@@ -1,0 +1,20 @@
+# Optional high-quality harmonic tuning pipeline.
+# Install the core backend first:
+#   python -m pip install -r backend/requirements.txt
+#
+# For NVIDIA GPU acceleration, install CUDA PyTorch before running this file:
+#   python -m pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+#
+# Demucs handles vocal/drum/bass/other stem separation.
+demucs>=4.0.1
+
+# Newer torchaudio builds may require TorchCodec as a fallback decoder. The
+# SmartMix pipeline injects imageio-ffmpeg into Demucs first, but TorchCodec is
+# useful when Demucs falls back to torchaudio.
+torchcodec>=0.11.0
+
+# Rubber Band is not a Python package. Install the CLI separately and make sure
+# `rubberband-r3` or `rubberband` is available on PATH.
+# Windows options:
+#   winget install BreakfastQuay.RubberBand
+#   choco install rubberband

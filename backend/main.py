@@ -13,6 +13,7 @@ from .analysis import analyze_audio
 from .matching import evaluate_track_match
 from .mixing import render_mix
 from .storage import EXPORT_DIR, PROJECT_DIR, UPLOAD_DIR, ensure_dirs, read_json, write_json
+from .tuning import analyze_tuned_output, normalize_camelot, render_harmonic_tune
 
 
 ensure_dirs()
@@ -58,6 +59,14 @@ class ProjectRequest(BaseModel):
     name: str
     tracks: list[dict]
     settings: dict
+
+
+class TuneTrackRequest(BaseModel):
+    targetCamelot: str
+    sourceCamelot: str | None = None
+    direction: str = "nearest"
+    format: str = "wav"
+    device: str = "auto"
 
 
 @app.get("/api/health")
@@ -114,6 +123,59 @@ def track_audio(track_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Track not found")
     payload = read_json(meta_path)
     return FileResponse(payload["path"], media_type=payload.get("content_type") or "audio/mpeg", filename=payload["name"])
+
+
+@app.post("/api/tracks/{track_id}/tune")
+def tune_track(track_id: str, request: TuneTrackRequest) -> dict:
+    meta_path = UPLOAD_DIR / f"{track_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    meta = read_json(meta_path)
+    source_camelot = normalize_camelot(request.sourceCamelot or meta.get("camelot"))
+    target_camelot = normalize_camelot(request.targetCamelot)
+    if not source_camelot or not target_camelot:
+        raise HTTPException(status_code=400, detail="A valid source and target Camelot key are required")
+    if request.direction not in {"nearest", "up", "down"}:
+        raise HTTPException(status_code=400, detail="direction must be nearest, up, or down")
+    if request.format not in {"wav", "mp3"}:
+        raise HTTPException(status_code=400, detail="format must be wav or mp3")
+    if request.device not in {"auto", "cuda", "cpu"}:
+        raise HTTPException(status_code=400, detail="device must be auto, cuda, or cpu")
+
+    new_track_id = uuid.uuid4().hex
+    original_name = Path(meta.get("name") or meta_path.name)
+    suffix = ".mp3" if request.format == "mp3" else ".wav"
+    output_path = EXPORT_DIR / f"{new_track_id}_{source_camelot}_to_{target_camelot}{suffix}"
+
+    try:
+        result = render_harmonic_tune(
+            Path(meta["path"]),
+            source_camelot=source_camelot,
+            target_camelot=target_camelot,
+            output_path=output_path,
+            prefer_direction=request.direction,
+            fmt=request.format,
+            device=request.device,
+        )
+        tuned_meta = analyze_tuned_output(
+            result,
+            {
+                "id": new_track_id,
+                "name": f"{original_name.stem}_{source_camelot}_to_{target_camelot}{suffix}",
+                "original_track_id": track_id,
+                "original_name": meta.get("name"),
+            },
+        )
+    except Exception as exc:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Tuning failed: {exc}") from exc
+
+    write_json(UPLOAD_DIR / f"{new_track_id}.json", tuned_meta)
+    return {
+        **tuned_meta,
+        "url": f"/api/tracks/{new_track_id}/audio",
+    }
 
 
 @app.post("/api/export")

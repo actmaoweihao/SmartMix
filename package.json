@@ -8,7 +8,9 @@
     "frontend": "vite --host 127.0.0.1 --port 3000",
     "backend": "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload",
     "check": "node --check src/main.js",
-    "setup:backend": "python -m pip install -r backend/requirements.txt"
+    "test:backend": "python -m unittest discover -v",
+    "setup:backend": "python -m pip install -r backend/requirements.txt",
+    "setup:tuning": "python -m pip install -r backend/requirements-tuning.txt"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

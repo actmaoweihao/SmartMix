@@ -47,3 +47,48 @@ Essentia 没有默认纳入依赖，因为它在 Windows 本地安装成本较�
 导出的 MP3 使用 `imageio-ffmpeg` 自带的 ffmpeg 二进制，不要求系统提前安装 ffmpeg。
 
 当前“AI”能力采用可本地运行的算法流水线实现：librosa beat tracking/chroma、规则化音乐结构候选、tempo stretch、动态 EQ、响度归一化。后续如需更接近工业级深度学习方案，可继续接入 madmom、Demucs、Essentia 或 PyTorch 结构分割模型。
+## High-quality Camelot tuning
+
+SmartMix now has a reusable backend tuning pipeline in `backend/tuning.py`.
+It is designed for this flow:
+
+```text
+source track
+  -> Demucs separates vocals/drums/bass/other
+  -> vocals use Rubber Band R3 with formant preservation
+  -> bass and other use Rubber Band R3 pitch shifting
+  -> drums stay unpitched where possible
+  -> stems are remixed, lightly EQ'd, and loudness-normalized
+  -> tuned track is saved as a new SmartMix track
+```
+
+Install optional stem-separation support:
+
+```bash
+pnpm setup:tuning
+```
+
+Install Rubber Band separately and make sure `rubberband-r3` or `rubberband`
+is on `PATH`. Without Demucs or Rubber Band, the code falls back to whole-track
+or librosa processing so the project still runs, but the result is lower quality.
+
+CLI example:
+
+```bash
+python tune_quality.py "song.mp3" --source 9A --target 3A -o "song_3A.wav"
+```
+
+Force GPU stem separation when CUDA PyTorch is installed:
+
+```bash
+python tune_quality.py "song.mp3" --source 9A --target 3A --device cuda -o "song_3A.wav"
+```
+
+API example:
+
+```http
+POST /api/tracks/{track_id}/tune
+Content-Type: application/json
+
+{"targetCamelot":"3A","direction":"nearest","format":"wav","device":"auto"}
+```

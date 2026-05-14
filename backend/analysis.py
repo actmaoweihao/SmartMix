@@ -9,6 +9,7 @@ import imageio_ffmpeg
 import librosa
 import numpy as np
 
+from .loudness import loudness_metrics
 from .matching import key_label_to_camelot
 
 
@@ -27,8 +28,8 @@ def analyze_audio(path: Path) -> dict:
     bpm = beat_grid["bpm"] or _estimate_bpm(y, sr)
     key = _estimate_key(y, sr)
     energy = _energy_metrics(y, sr)
-    loudness = _loudness_metrics(y)
-    candidates = _transition_candidates(duration, beat_grid["bars"], energy)
+    loudness = loudness_metrics(y, sr)
+    candidates = _transition_candidates(y, sr, duration, beat_grid["bars"], energy)
 
     return {
         "duration": duration,
@@ -36,6 +37,8 @@ def analyze_audio(path: Path) -> dict:
         "beats": beat_grid["beats"],
         "bars": beat_grid["bars"],
         "phrases": beat_grid["phrases"],
+        "downbeat_offset": beat_grid["downbeat_offset"],
+        "beat_confidence": beat_grid["confidence"],
         "key": key["label"],
         "camelot": key_label_to_camelot(key["label"], key["mode"]),
         "key_index": key["index"],
@@ -105,17 +108,45 @@ def _beat_grid(y: np.ndarray, sr: int) -> dict:
         bpm = float(np.asarray(tempo).reshape(-1)[0])
         beat_times = librosa.frames_to_time(beats, sr=sr).astype(float)
         if beat_times.size < 4:
-            return {"bpm": int(round(bpm)) if bpm > 0 else None, "beats": [], "bars": [], "phrases": []}
-        bars = beat_times[::4]
-        phrases = beat_times[::16]
+            return {"bpm": int(round(bpm)) if bpm > 0 else None, "beats": [], "bars": [], "phrases": [], "downbeat_offset": 0, "confidence": 0.0}
+        offset, confidence = _estimate_downbeat_offset(y, sr, beats)
+        bars = beat_times[offset::4]
+        phrases = bars[::4]
         return {
             "bpm": int(round(bpm)) if math.isfinite(bpm) and bpm > 0 else None,
             "beats": _round_times(beat_times),
             "bars": _round_times(bars),
             "phrases": _round_times(phrases),
+            "downbeat_offset": int(offset),
+            "confidence": round(float(confidence), 2),
         }
     except Exception:
-        return {"bpm": None, "beats": [], "bars": [], "phrases": []}
+        return {"bpm": None, "beats": [], "bars": [], "phrases": [], "downbeat_offset": 0, "confidence": 0.0}
+
+
+def _estimate_downbeat_offset(y: np.ndarray, sr: int, beats: np.ndarray) -> tuple[int, float]:
+    if len(beats) < 8:
+        return 0, 0.0
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
+    beat_frames = librosa.time_to_frames(librosa.frames_to_time(beats, sr=sr), sr=sr, hop_length=512)
+    beat_frames = np.clip(beat_frames, 0, len(rms) - 1)
+    beat_strength = rms[beat_frames]
+    if np.max(beat_strength) > 0:
+        beat_strength = beat_strength / np.max(beat_strength)
+
+    scores = []
+    for offset in range(4):
+        downbeats = beat_strength[offset::4]
+        others = np.concatenate([beat_strength[i::4] for i in range(4) if i != offset])
+        if downbeats.size == 0 or others.size == 0:
+            scores.append(0.0)
+            continue
+        scores.append(float(np.mean(downbeats) - np.mean(others) * 0.35))
+
+    best = int(np.argmax(scores))
+    spread = float(max(scores) - np.mean(scores))
+    confidence = max(0.0, min(0.95, 0.35 + spread))
+    return best, confidence
 
 
 def _estimate_bpm_from_envelope(y: np.ndarray, sr: int) -> int | None:
@@ -203,31 +234,109 @@ def _energy_metrics(y: np.ndarray, sr: int) -> dict:
     }
 
 
-def _loudness_metrics(y: np.ndarray) -> dict:
-    rms = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
-    peak = float(np.max(np.abs(y)) + 1e-12)
-    # This is a lightweight LUFS-style proxy. A production upgrade can replace it
-    # with pyloudnorm/BS.1770 gating while preserving the API shape.
-    lufs = 20 * math.log10(rms)
-    peak_db = 20 * math.log10(peak)
-    return {"lufs": round(lufs, 2), "peak_db": round(peak_db, 2)}
-
-
-def _transition_candidates(duration: float, bars: list[float], energy: dict) -> dict:
+def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[float], energy: dict) -> dict:
     if not bars:
         intro = min(max(energy["intro_low"], 4.0), duration * 0.35)
         outro = max(intro + 1.0, duration - min(max(energy["outro_low"], 8.0), duration * 0.35))
-        return {"intro": round(intro, 3), "outro": round(outro, 3), "confidence": 0.35}
+        return {
+            "intro": round(intro, 3),
+            "outro": round(outro, 3),
+            "confidence": 0.35,
+            "intro_vocal_density": None,
+            "outro_vocal_density": None,
+            "method": "energy-fallback",
+        }
 
+    features = _bar_features(y, sr, bars, duration)
     intro_floor = max(energy["intro_low"], 2.0)
-    outro_ceiling = duration - max(energy["outro_low"], 2.0)
-    intro = _first_at_or_after(bars, intro_floor) or bars[min(len(bars) - 1, 1)]
-    outro_target = max(duration * 0.55, outro_ceiling)
-    outro = _last_at_or_before(bars, outro_target) or bars[-1]
+    intro = _pick_intro_bar(features, intro_floor, duration) or _first_at_or_after(bars, intro_floor) or bars[min(len(bars) - 1, 1)]
+    outro_floor = max(duration * 0.55, duration - max(energy["outro_low"], 16.0) - 24.0)
+    outro = _pick_outro_bar(features, outro_floor, duration) or _last_at_or_before(bars, duration - 1.0) or bars[-1]
     if outro <= intro:
         outro = _last_at_or_before(bars, duration - 1.0) or max(intro + 1.0, duration - 1.0)
-    confidence = min(0.9, 0.45 + min(len(bars), 32) / 80)
-    return {"intro": round(float(intro), 3), "outro": round(float(outro), 3), "confidence": round(confidence, 2)}
+    intro_feature = _nearest_bar_feature(features, intro)
+    outro_feature = _nearest_bar_feature(features, outro)
+    density_bonus = 0.0
+    if intro_feature and outro_feature:
+        density_bonus = (1 - intro_feature["vocal_density"]) * 0.08 + (1 - outro_feature["vocal_density"]) * 0.08
+    confidence = min(0.92, 0.45 + min(len(bars), 32) / 90 + density_bonus)
+    return {
+        "intro": round(float(intro), 3),
+        "outro": round(float(outro), 3),
+        "confidence": round(confidence, 2),
+        "intro_vocal_density": round(float(intro_feature["vocal_density"]), 3) if intro_feature else None,
+        "outro_vocal_density": round(float(outro_feature["vocal_density"]), 3) if outro_feature else None,
+        "intro_energy": round(float(intro_feature["energy"]), 3) if intro_feature else None,
+        "outro_energy": round(float(outro_feature["energy"]), 3) if outro_feature else None,
+        "method": "bar-vocal-energy",
+    }
+
+
+def _bar_features(y: np.ndarray, sr: int, bars: list[float], duration: float) -> list[dict]:
+    hop = 1024
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
+    frame_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop)
+    vocal_density = _vocal_density_curve(y, sr, hop, len(rms))
+    max_rms = float(np.max(rms)) or 1.0
+    features = []
+    median_span = float(np.median(np.diff(bars))) if len(bars) > 1 else 2.0
+    for index, start in enumerate(bars):
+        end = bars[index + 1] if index + 1 < len(bars) else min(duration, start + median_span)
+        mask = (frame_times >= start) & (frame_times < end)
+        if not np.any(mask):
+            continue
+        energy_value = float(np.mean(rms[mask]) / max_rms)
+        vocal_value = float(np.mean(vocal_density[mask]))
+        position = float(start / max(duration, 1e-6))
+        features.append(
+            {
+                "time": float(start),
+                "energy": max(0.0, min(1.0, energy_value)),
+                "vocal_density": max(0.0, min(1.0, vocal_value)),
+                "position": position,
+            }
+        )
+    return features
+
+
+def _vocal_density_curve(y: np.ndarray, sr: int, hop: int, target_length: int) -> np.ndarray:
+    try:
+        harmonic, _ = librosa.effects.hpss(y)
+        spectrum = np.abs(librosa.stft(harmonic, n_fft=2048, hop_length=hop))
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+        vocal_mask = (freqs >= 300) & (freqs <= 3400)
+        total = np.sum(spectrum, axis=0) + 1e-9
+        vocal = np.sum(spectrum[vocal_mask], axis=0) / total
+        if vocal.size < target_length:
+            vocal = np.pad(vocal, (0, target_length - vocal.size), mode="edge")
+        return np.asarray(vocal[:target_length], dtype=np.float32)
+    except Exception:
+        return np.full(target_length, 0.5, dtype=np.float32)
+
+
+def _pick_intro_bar(features: list[dict], intro_floor: float, duration: float) -> float | None:
+    candidates = [item for item in features if intro_floor <= item["time"] <= duration * 0.45]
+    if not candidates:
+        return None
+    scored = sorted(candidates, key=lambda item: item["vocal_density"] * 0.65 + item["energy"] * 0.25 + item["position"] * 0.1)
+    return float(scored[0]["time"])
+
+
+def _pick_outro_bar(features: list[dict], outro_floor: float, duration: float) -> float | None:
+    candidates = [item for item in features if outro_floor <= item["time"] <= duration - 1.0]
+    if not candidates:
+        return None
+    scored = sorted(
+        candidates,
+        key=lambda item: item["vocal_density"] * 0.6 + item["energy"] * 0.25 - item["position"] * 0.15,
+    )
+    return float(scored[0]["time"])
+
+
+def _nearest_bar_feature(features: list[dict], time_value: float) -> dict | None:
+    if not features:
+        return None
+    return min(features, key=lambda item: abs(item["time"] - time_value))
 
 
 def _waveform_peaks(y: np.ndarray, bins: int) -> list[float]:

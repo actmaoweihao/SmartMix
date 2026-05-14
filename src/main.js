@@ -430,10 +430,37 @@ function renderMatchResult() {
     <div class="match-score">
       <span>${escapeHtml(result.overall_level)}</span>
       <strong>${Math.round(result.overall_score)}</strong>
-      <em>推荐方向：${escapeHtml(result.recommended_direction)}</em>
+      <em>Recommended direction: ${escapeHtml(result.recommended_direction)}</em>
     </div>
     ${renderDirectionMatch("A → B", forward)}
     ${renderDirectionMatch("B → A", reverse)}
+    ${renderTuneRecommendations(result.tuning_recommendations || [])}
+  `;
+}
+
+function renderTuneRecommendations(recommendations) {
+  if (!recommendations.length) {
+    return "";
+  }
+  return `
+    <div class="tune-recommendations">
+      <div class="direction-head">
+        <strong>Harmonic tuning</strong>
+        <span>${recommendations.length} option${recommendations.length === 1 ? "" : "s"}</span>
+      </div>
+      ${recommendations
+        .slice(0, 3)
+        .map(
+          (item) => `
+            <div class="tune-option">
+              <strong>${escapeHtml(item.track_name || item.source)} -> ${escapeHtml(item.target_camelot)}</strong>
+              <span>${item.semitones > 0 ? "+" : ""}${item.semitones} st · risk ${escapeHtml(item.quality_risk)}</span>
+              <small>${escapeHtml(item.reason || "")}</small>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
   `;
 }
 
@@ -495,6 +522,8 @@ async function uploadAndAnalyze(track) {
     track.beats = result.beats || [];
     track.bars = result.bars || [];
     track.phrases = result.phrases || [];
+    track.downbeat_offset = result.downbeat_offset || 0;
+    track.beat_confidence = result.beat_confidence || 0;
     track.key = result.key || "未知";
     track.camelot = result.camelot || keyLabelToCamelot(track.key, result.mode);
     track.key_index = result.key_index;
@@ -794,13 +823,13 @@ function keyDistance(a, b) {
 }
 
 const KEY_TO_CAMELOT = {
-  C: "8B", "C#": "9B", Db: "9B", D: "10B", "D#": "11B", Eb: "11B",
-  E: "12B", F: "1B", "F#": "2B", Gb: "2B", G: "3B", "G#": "4B",
-  Ab: "4B", A: "5B", "A#": "6B", Bb: "6B", B: "7B",
-  Am: "8A", "A#m": "9A", Bbm: "9A", Bm: "10A", Cm: "11A",
-  "C#m": "12A", Dbm: "12A", Dm: "1A", "D#m": "2A", Ebm: "2A",
-  Em: "3A", Fm: "4A", "F#m": "5A", Gbm: "5A", Gm: "6A",
-  "G#m": "7A", Abm: "7A",
+  C: "8B", "C#": "3B", Db: "3B", D: "10B", "D#": "5B", Eb: "5B",
+  E: "12B", F: "7B", "F#": "2B", Gb: "2B", G: "9B", "G#": "4B",
+  Ab: "4B", A: "11B", "A#": "6B", Bb: "6B", B: "1B",
+  Am: "8A", "A#m": "3A", Bbm: "3A", Bm: "10A", Cm: "5A",
+  "C#m": "12A", Dbm: "12A", Dm: "7A", "D#m": "2A", Ebm: "2A",
+  Em: "9A", Fm: "4A", "F#m": "11A", Gbm: "11A", Gm: "6A",
+  "G#m": "1A", Abm: "1A",
 };
 
 function keyLabelToCamelot(label, mode) {
@@ -1061,6 +1090,8 @@ function exportableTrack(track) {
     beats: track.beats || [],
     bars: track.bars || [],
     phrases: track.phrases || [],
+    downbeat_offset: track.downbeat_offset || 0,
+    beat_confidence: track.beat_confidence || 0,
     energy: track.energy,
     intro_low: track.intro_low,
     outro_low: track.outro_low,

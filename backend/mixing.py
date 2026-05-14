@@ -3,7 +3,6 @@ from __future__ import annotations
 import subprocess
 import uuid
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 import imageio_ffmpeg
 import librosa
@@ -11,7 +10,9 @@ import numpy as np
 import soundfile as sf
 from scipy import signal
 
+from .loudness import normalize_loudness
 from .storage import EXPORT_DIR
+from .transition import plan_transition
 
 
 SAMPLE_RATE = 44100
@@ -26,12 +27,12 @@ def render_mix(tracks: list[dict], settings: dict, fmt: str) -> Path:
         buffers = _beat_sync(buffers, tracks)
 
     if settings.get("aiPrecision") or settings.get("loudnessNormalize"):
-        buffers = [_normalize_loudness(buffer, float(settings.get("targetLufs", -16))) for buffer in buffers]
+        buffers = [normalize_loudness(buffer, SAMPLE_RATE, float(settings.get("targetLufs", -16))) for buffer in buffers]
 
     buffers = [_apply_static_eq(buffer, settings.get("eq", {})) for buffer in buffers]
     mix = _crossfade(buffers, tracks, settings)
     if settings.get("aiPrecision") or settings.get("loudnessNormalize"):
-        mix = _normalize_loudness(mix, float(settings.get("targetLufs", -16)))
+        mix = normalize_loudness(mix, SAMPLE_RATE, float(settings.get("targetLufs", -16)))
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     wav_path = EXPORT_DIR / f"{uuid.uuid4().hex}.wav"
     sf.write(wav_path, mix.T, SAMPLE_RATE, subtype="PCM_16")
@@ -63,24 +64,13 @@ def _beat_sync(buffers: list[np.ndarray], tracks: list[dict]) -> list[np.ndarray
         if bpm <= 0:
             synced.append(buffer)
             continue
-        rate = np.clip(bpm / target, 0.88, 1.12)
+        rate = np.clip(target / bpm, 0.88, 1.12)
         if abs(rate - 1) < 0.015:
             synced.append(buffer)
             continue
         stretched = librosa.effects.time_stretch(buffer, rate=rate)
         synced.append(np.ascontiguousarray(stretched, dtype=np.float32))
     return synced
-
-
-def _normalize_loudness(buffer: np.ndarray, target_lufs: float) -> np.ndarray:
-    rms = float(np.sqrt(np.mean(np.square(buffer)) + 1e-12))
-    current = 20 * np.log10(rms)
-    gain = 10 ** ((target_lufs - current) / 20)
-    out = buffer * gain
-    peak = float(np.max(np.abs(out)) + 1e-12)
-    if peak > 0.98:
-        out = out * (0.98 / peak)
-    return out.astype(np.float32)
 
 
 def _apply_static_eq(buffer: np.ndarray, eq: dict) -> np.ndarray:
@@ -113,20 +103,28 @@ def _crossfade(buffers: list[np.ndarray], tracks: list[dict], settings: dict) ->
         prev_track = tracks[index - 1]
         next_track = tracks[index]
         incoming = buffers[index]
-        transition = _transition_seconds(prev_track, next_track, requested, auto, settings)
+        plan = plan_transition(prev_track, next_track, {**settings, "crossfade": requested, "autoTransition": auto})
+        prev_duration_samples = min(_seconds_to_samples(float(prev_track.get("duration") or 0)), rendered.shape[1])
+        current_track_start = max(0, rendered.shape[1] - prev_duration_samples)
+        prev_overlap_start = current_track_start + _seconds_to_samples(plan.prev_overlap_start)
+        next_overlap_start = _seconds_to_samples(plan.next_overlap_start)
+        if prev_overlap_start >= rendered.shape[1]:
+            prev_overlap_start = max(0, rendered.shape[1] - _seconds_to_samples(plan.seconds))
+        if next_overlap_start >= incoming.shape[1]:
+            next_overlap_start = 0
         samples = min(
-            int(transition * SAMPLE_RATE),
-            rendered.shape[1] // 2,
-            incoming.shape[1] // 2,
+            _seconds_to_samples(plan.seconds),
+            rendered.shape[1] - prev_overlap_start,
+            incoming.shape[1] - next_overlap_start,
         )
         if samples <= 0:
             rendered = np.concatenate([rendered, incoming], axis=1)
             continue
 
-        head = rendered[:, :-samples]
-        outgoing_tail = rendered[:, -samples:]
-        incoming_head = incoming[:, :samples]
-        tail = incoming[:, samples:]
+        head = rendered[:, :prev_overlap_start]
+        outgoing_tail = rendered[:, prev_overlap_start : prev_overlap_start + samples]
+        incoming_head = incoming[:, next_overlap_start : next_overlap_start + samples]
+        tail = incoming[:, next_overlap_start + samples :]
 
         if ai_precision or filter_mode == "dynamicEq":
             overlap = _dynamic_eq_overlap(outgoing_tail, incoming_head)
@@ -142,37 +140,8 @@ def _crossfade(buffers: list[np.ndarray], tracks: list[dict], settings: dict) ->
     return np.clip(rendered, -1, 1)
 
 
-def _transition_seconds(prev_track: dict, next_track: dict, requested: float, auto: bool, settings: dict) -> float:
-    prev_duration = float(prev_track.get("duration") or 0)
-    next_duration = float(next_track.get("duration") or 0)
-    max_by_length = max(0.5, min(prev_duration, next_duration) * 0.35)
-    prev_out = prev_track.get("outroPoint")
-    next_in = next_track.get("introPoint")
-    if settings.get("aiPrecision"):
-        phrase_bars = int(settings.get("phraseBars", 8))
-        phrase_seconds = _phrase_transition_seconds(prev_track, next_track, phrase_bars)
-        if phrase_seconds:
-            requested = phrase_seconds
-        candidates_prev = prev_track.get("transition_candidates") or {}
-        candidates_next = next_track.get("transition_candidates") or {}
-        prev_out = candidates_prev.get("outro", prev_out)
-        next_in = candidates_next.get("intro", next_in)
-    if isinstance(prev_out, (int, float)) and isinstance(next_in, (int, float)):
-        handle_value = min(max(0.5, prev_duration - float(prev_out)), max(0.5, float(next_in)))
-        requested = min(requested, handle_value)
-    if auto:
-        structural = max(2, min(requested, float(prev_track.get("outro_low") or 0) + float(next_track.get("intro_low") or 0) + 2))
-        return min(structural, max_by_length)
-    return min(requested, max_by_length)
-
-
-def _phrase_transition_seconds(prev_track: dict, next_track: dict, phrase_bars: int) -> float | None:
-    bpms = [float(track.get("bpm") or 0) for track in (prev_track, next_track)]
-    bpms = [bpm for bpm in bpms if bpm > 0]
-    if not bpms:
-        return None
-    beat_seconds = 60 / float(np.mean(bpms))
-    return max(2.0, phrase_bars * 4 * beat_seconds)
+def _seconds_to_samples(seconds: float) -> int:
+    return max(0, int(round(seconds * SAMPLE_RATE)))
 
 
 def _fade_curves(samples: int, equal_power: bool) -> tuple[np.ndarray, np.ndarray]:

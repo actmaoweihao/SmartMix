@@ -2,44 +2,47 @@ from __future__ import annotations
 
 from typing import Any
 
+from .tuning import recommend_pair_tuning
+from .transition import plan_transition
+
 
 KEY_TO_CAMELOT = {
     # Major keys, Camelot B.
     "C": "8B",
-    "C#": "9B",
-    "Db": "9B",
+    "C#": "3B",
+    "Db": "3B",
     "D": "10B",
-    "D#": "11B",
-    "Eb": "11B",
+    "D#": "5B",
+    "Eb": "5B",
     "E": "12B",
-    "F": "1B",
+    "F": "7B",
     "F#": "2B",
     "Gb": "2B",
-    "G": "3B",
+    "G": "9B",
     "G#": "4B",
     "Ab": "4B",
-    "A": "5B",
+    "A": "11B",
     "A#": "6B",
     "Bb": "6B",
-    "B": "7B",
+    "B": "1B",
     # Minor keys, Camelot A.
     "Am": "8A",
-    "A#m": "9A",
-    "Bbm": "9A",
+    "A#m": "3A",
+    "Bbm": "3A",
     "Bm": "10A",
-    "Cm": "11A",
+    "Cm": "5A",
     "C#m": "12A",
     "Dbm": "12A",
-    "Dm": "1A",
+    "Dm": "7A",
     "D#m": "2A",
     "Ebm": "2A",
-    "Em": "3A",
+    "Em": "9A",
     "Fm": "4A",
-    "F#m": "5A",
-    "Gbm": "5A",
+    "F#m": "11A",
+    "Gbm": "11A",
     "Gm": "6A",
-    "G#m": "7A",
-    "Abm": "7A",
+    "G#m": "1A",
+    "Abm": "1A",
 }
 
 
@@ -122,12 +125,14 @@ def evaluate_track_match(track_a: dict[str, Any], track_b: dict[str, Any]) -> di
     forward = evaluate_direction(track_a, track_b)
     reverse = evaluate_direction(track_b, track_a)
     best = forward if forward["total_score"] >= reverse["total_score"] else reverse
+    tuning_recommendations = recommend_pair_tuning(track_a, track_b)
     return {
         "track_a": _track_summary(track_a),
         "track_b": _track_summary(track_b),
         "overall_score": best["total_score"],
         "overall_level": best["level"],
         "recommended_direction": best["direction"],
+        "tuning_recommendations": tuning_recommendations,
         "directions": {
             "a_to_b": forward,
             "b_to_a": reverse,
@@ -220,35 +225,16 @@ def structure_match_score(prev_track: dict[str, Any], next_track: dict[str, Any]
 
 
 def recommend_transition(prev_track: dict[str, Any], next_track: dict[str, Any]) -> dict[str, Any]:
-    prev_duration = float(prev_track.get("duration") or 0)
-    next_duration = float(next_track.get("duration") or 0)
-    prev_out = _candidate_outro(prev_track)
-    next_in = _candidate_intro(next_track)
-    tail = max(0.0, prev_duration - prev_out)
-    head = max(0.0, next_in)
-    max_by_length = max(0.0, min(prev_duration, next_duration) * 0.35)
-    available = max(0.0, min(tail, head, max_by_length))
-
-    avg_bpm = _avg_bpm(prev_track, next_track)
-    phrase_options = []
-    if avg_bpm:
-        for bars in (16, 8, 4):
-            seconds = bars * 4 * (60 / avg_bpm)
-            if seconds <= available + 0.25:
-                phrase_options.append((bars, seconds))
-
-    if phrase_options:
-        bars, seconds = phrase_options[0]
-    else:
-        bars, seconds = 0, available
-
-    return {
-        "seconds": round(float(seconds), 2),
-        "phrase_bars": bars,
-        "available_seconds": round(float(available), 2),
-        "prev_outro": round(float(prev_out), 3),
-        "next_intro": round(float(next_in), 3),
-    }
+    return plan_transition(
+        prev_track,
+        next_track,
+        {
+            "crossfade": 64,
+            "autoTransition": False,
+            "aiPrecision": True,
+            "phraseBars": 16,
+        },
+    ).to_dict()
 
 
 def total_rank(score: float) -> str:
@@ -288,26 +274,4 @@ def _camelot_distance_to_score(distance: int | float) -> float:
     if distance <= 4:
         return 62
     return max(0, 50 - (distance - 5) * 12)
-
-
-def _candidate_intro(track: dict[str, Any]) -> float:
-    candidates = track.get("transition_candidates") or {}
-    value = candidates.get("intro", track.get("introPoint", track.get("intro_low", 0)))
-    return float(value or 0)
-
-
-def _candidate_outro(track: dict[str, Any]) -> float:
-    candidates = track.get("transition_candidates") or {}
-    duration = float(track.get("duration") or 0)
-    value = candidates.get("outro", track.get("outroPoint"))
-    if value is None:
-        value = duration - float(track.get("outro_low") or 0)
-    return float(value or 0)
-
-
-def _avg_bpm(track_a: dict[str, Any], track_b: dict[str, Any]) -> float | None:
-    bpms = [float(track.get("bpm")) for track in (track_a, track_b) if track.get("bpm")]
-    if not bpms:
-        return None
-    return sum(bpms) / len(bpms)
 
