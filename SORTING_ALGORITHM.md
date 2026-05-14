@@ -223,7 +223,7 @@ circular = min(11, 12 - 11) / 6 = 1 / 6 = 0.166
 0.5
 ```
 
-注意：当前算法不是 Camelot Wheel 完整实现，只是用半音环距离近似谐和程度。
+注意：当前代码已经升级为 Camelot Wheel 距离。早期版本使用半音环距离近似谐和程度，现在会先把分析出的调性映射为 Camelot 编码，再按同号 A/B、同 mode 轮盘距离、纯五度加分和远距离惩罚计算调性距离。
 
 ## 7. 能量差计算
 
@@ -365,16 +365,9 @@ score = 0.55 * bpmDelta
 
 更高级方案可以把歌曲看成图，用 TSP/动态规划/beam search 寻找全局路径。
 
-### 12.2 调性算法偏粗
+### 12.2 调性检测仍可能偏粗
 
-当前 `keyDistance()` 只是半音环距离，没有完整考虑：
-
-- Camelot Wheel
-- relative major/minor
-- perfect fifth
-- energy-compatible harmonic mixing
-
-因此它能提供近似参考，但不等于专业 DJ 调性排序。
+当前 `keyDistance()` 的匹配规则已经使用 Camelot Wheel，但上游调性识别仍来自 librosa chroma 模板匹配或前端 fallback。也就是说，匹配规则更专业了，但如果某首歌的 Key 识别错误，排序结果仍会被影响。
 
 ### 12.3 没有使用 beat grid 和小节结构
 
@@ -485,4 +478,3 @@ score = 0.55 * normalized_bpm_delta
 ```
 
 它适合快速生成一个“听起来更顺”的初始歌单，但还不是专业级自动 DJ 排序。下一步应把后端已经具备的 beat grid、小节线、transition candidates、响度和频谱特征纳入排序评分，这样排序才能真正服务于 4/8/16 小节精准混音。
-

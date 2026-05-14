@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .analysis import analyze_audio
+from .matching import evaluate_track_match
 from .mixing import render_mix
 from .storage import EXPORT_DIR, PROJECT_DIR, UPLOAD_DIR, ensure_dirs, read_json, write_json
 
@@ -66,6 +67,17 @@ def health() -> dict:
 
 @app.post("/api/tracks")
 async def upload_track(file: UploadFile = File(...)) -> dict:
+    return _save_and_analyze_upload(file)
+
+
+@app.post("/api/match")
+async def match_two_tracks(file_a: UploadFile = File(...), file_b: UploadFile = File(...)) -> dict:
+    track_a = _save_and_analyze_upload(file_a)
+    track_b = _save_and_analyze_upload(file_b)
+    return evaluate_track_match(track_a, track_b)
+
+
+def _save_and_analyze_upload(file: UploadFile) -> dict:
     track_id = uuid.uuid4().hex
     suffix = Path(file.filename or "track").suffix or ".audio"
     content_type = file.content_type or "application/octet-stream"

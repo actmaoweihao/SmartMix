@@ -289,6 +289,134 @@ input[type="range"] {
   margin: 0;
 }
 
+.match-panel {
+  margin: 12px;
+  border: 1px solid var(--line);
+  background: #14161a;
+}
+
+.match-head {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.match-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.match-inputs label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.match-inputs input {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  background: #101113;
+  color: var(--text);
+  padding: 9px;
+}
+
+.match-result {
+  min-height: 74px;
+  padding: 12px;
+  color: var(--muted);
+}
+
+.match-loading {
+  color: var(--accent);
+}
+
+.match-error {
+  color: var(--danger);
+}
+
+.match-score {
+  display: grid;
+  grid-template-columns: 88px 86px 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.match-score span {
+  color: var(--accent-2);
+  font-weight: 800;
+}
+
+.match-score strong {
+  font-size: 44px;
+  color: var(--text);
+  line-height: 1;
+}
+
+.match-score em {
+  color: var(--muted);
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.direction-card {
+  border: 1px solid var(--line);
+  background: #101113;
+  padding: 10px;
+  margin-top: 8px;
+}
+
+.direction-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.direction-head span {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.component-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.component {
+  border: 1px solid var(--line);
+  padding: 8px;
+  min-width: 0;
+}
+
+.component span,
+.component small {
+  display: block;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.component strong {
+  display: block;
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1.1;
+  margin: 4px 0;
+}
+
 .pulse-dot {
   width: 12px;
   height: 12px;
@@ -475,6 +603,9 @@ tr.selected {
   }
 
   .button-row,
+  .match-inputs,
+  .component-grid,
+  .match-score,
   .transport {
     grid-template-columns: 1fr;
   }

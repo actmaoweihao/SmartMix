@@ -2,7 +2,7 @@ import "./styles.css";
 
 const API_HOST = window.location.hostname || "127.0.0.1";
 const API_PROTOCOL = window.location.protocol === "https:" ? "https:" : "http:";
-const API = `${API_PROTOCOL}//${API_HOST}:8000`;
+const API = `${API_PROTOCOL}//${API_HOST}:8001`;
 
 const state = {
   tracks: [],
@@ -18,6 +18,13 @@ const state = {
   isPlaying: false,
   isExporting: false,
   projects: [],
+  match: {
+    fileA: null,
+    fileB: null,
+    result: null,
+    loading: false,
+    error: "",
+  },
   settings: {
     sortMode: "recommended",
     crossfade: 8,
@@ -133,6 +140,27 @@ app.innerHTML = `
           <div><span class="pulse-dot"></span><p>拖入音频文件，后端会立刻分析 BPM、调性和能量</p></div>
         </div>
 
+        <section class="match-panel" aria-label="两首歌匹配评分">
+          <div class="match-head">
+            <div>
+              <span class="tiny-label">Pair Match</span>
+              <strong>两首歌衔接匹配评分</strong>
+            </div>
+            <button id="matchButton" type="button">计算匹配度</button>
+          </div>
+          <div class="match-inputs">
+            <label>
+              <span>Song A</span>
+              <input id="matchFileA" type="file" accept="audio/*" />
+            </label>
+            <label>
+              <span>Song B</span>
+              <input id="matchFileB" type="file" accept="audio/*" />
+            </label>
+          </div>
+          <div id="matchResult" class="match-result">上传任意两首歌，系统会用 Camelot、BPM、能量和结构可过渡性计算匹配分。</div>
+        </section>
+
         <section class="transport">
           <button id="restartButton" type="button" class="iconish">从头播放</button>
           <input id="mixProgress" type="range" min="0" max="0" value="0" step="0.01" />
@@ -207,6 +235,10 @@ const els = {
   waveCanvas: document.querySelector("#waveCanvas"),
   selectedTitle: document.querySelector("#selectedTitle"),
   handleReadout: document.querySelector("#handleReadout"),
+  matchFileA: document.querySelector("#matchFileA"),
+  matchFileB: document.querySelector("#matchFileB"),
+  matchButton: document.querySelector("#matchButton"),
+  matchResult: document.querySelector("#matchResult"),
   projectName: document.querySelector("#projectName"),
   saveProject: document.querySelector("#saveProject"),
   projectList: document.querySelector("#projectList"),
@@ -234,6 +266,15 @@ function bindEvents() {
   els.saveProject.addEventListener("click", saveProject);
   els.loadProject.addEventListener("click", loadSelectedProject);
   els.refreshProjects.addEventListener("click", loadProjectList);
+  els.matchFileA.addEventListener("change", () => {
+    state.match.fileA = els.matchFileA.files?.[0] || null;
+    renderMatchResult();
+  });
+  els.matchFileB.addEventListener("change", () => {
+    state.match.fileB = els.matchFileB.files?.[0] || null;
+    renderMatchResult();
+  });
+  els.matchButton.addEventListener("click", calculatePairMatch);
 
   els.sortMode.addEventListener("change", syncSettings);
   els.crossfade.addEventListener("input", syncSettings);
@@ -323,6 +364,7 @@ async function addFiles(files) {
       key: "未知",
       key_index: null,
       mode: null,
+      camelot: null,
       energy: 0,
       intro_low: 0,
       outro_low: 0,
@@ -336,6 +378,91 @@ async function addFiles(files) {
     await decodeLocal(track);
     await uploadAndAnalyze(track);
   }
+}
+
+async function calculatePairMatch() {
+  if (!state.match.fileA || !state.match.fileB) {
+    state.match.error = "请先选择两首音频。";
+    renderMatchResult();
+    return;
+  }
+  state.match.loading = true;
+  state.match.error = "";
+  state.match.result = null;
+  renderMatchResult();
+  try {
+    await assertBackendReachable();
+    const form = new FormData();
+    form.append("file_a", state.match.fileA);
+    form.append("file_b", state.match.fileB);
+    state.match.result = await fetchJson(`${API}/api/match`, { method: "POST", body: form });
+    setStatus("两歌匹配评分完成");
+  } catch (error) {
+    state.match.error = error.message || "匹配评分失败";
+  } finally {
+    state.match.loading = false;
+    renderMatchResult();
+  }
+}
+
+function renderMatchResult() {
+  if (!els.matchResult) return;
+  els.matchButton.disabled = state.match.loading || !state.match.fileA || !state.match.fileB;
+  if (state.match.loading) {
+    els.matchResult.innerHTML = `<div class="match-loading">正在分析两首歌并计算匹配度...</div>`;
+    return;
+  }
+  if (state.match.error) {
+    els.matchResult.innerHTML = `<div class="match-error">${escapeHtml(state.match.error)}</div>`;
+    return;
+  }
+  if (!state.match.result) {
+    const a = state.match.fileA?.name || "未选择";
+    const b = state.match.fileB?.name || "未选择";
+    els.matchResult.innerHTML = `A: ${escapeHtml(a)}<br />B: ${escapeHtml(b)}<br />上传任意两首歌，系统会用 Camelot、BPM、能量和结构可过渡性计算匹配分。`;
+    return;
+  }
+
+  const result = state.match.result;
+  const forward = result.directions.a_to_b;
+  const reverse = result.directions.b_to_a;
+  els.matchResult.innerHTML = `
+    <div class="match-score">
+      <span>${escapeHtml(result.overall_level)}</span>
+      <strong>${Math.round(result.overall_score)}</strong>
+      <em>推荐方向：${escapeHtml(result.recommended_direction)}</em>
+    </div>
+    ${renderDirectionMatch("A → B", forward)}
+    ${renderDirectionMatch("B → A", reverse)}
+  `;
+}
+
+function renderDirectionMatch(title, direction) {
+  const c = direction.components;
+  return `
+    <div class="direction-card">
+      <div class="direction-head">
+        <strong>${title}</strong>
+        <span>${Math.round(direction.total_score)} / ${escapeHtml(direction.level)}</span>
+      </div>
+      <div class="component-grid">
+        ${renderComponent("Camelot", c.camelot.score, `${c.camelot.from || "--"} → ${c.camelot.to || "--"} · ${c.camelot.rank}`)}
+        ${renderComponent("BPM", c.bpm.score, `Δ ${c.bpm.delta ?? "--"} BPM`)}
+        ${renderComponent("Energy", c.energy.score, `Δ ${c.energy.delta ?? "--"}`)}
+        ${renderComponent("Structure", c.structure.score, `${c.structure.phrase_bars || 0} bars / ${c.structure.overlap_seconds}s`)}
+      </div>
+    </div>
+  `;
+}
+
+function renderComponent(label, score, note) {
+  return `
+    <div class="component">
+      <span>${escapeHtml(label)}</span>
+      <strong>${Math.round(score)}</strong>
+      <small>${escapeHtml(note)}</small>
+    </div>
+  `;
 }
 
 async function decodeLocal(track) {
@@ -369,6 +496,7 @@ async function uploadAndAnalyze(track) {
     track.bars = result.bars || [];
     track.phrases = result.phrases || [];
     track.key = result.key || "未知";
+    track.camelot = result.camelot || keyLabelToCamelot(track.key, result.mode);
     track.key_index = result.key_index;
     track.mode = result.mode;
     track.energy = result.energy || 0;
@@ -440,6 +568,7 @@ function applyLocalFallbackAnalysis(track, error) {
   track.bars = [];
   track.phrases = [];
   track.key = key.label;
+  track.camelot = keyLabelToCamelot(key.label, key.mode);
   track.key_index = key.index;
   track.mode = key.mode;
   track.energy = envelope.energy;
@@ -658,11 +787,51 @@ function transitionScore(a, b, mode) {
 }
 
 function keyDistance(a, b) {
-  if (a.key_index === null || b.key_index === null) return 0.5;
-  const raw = Math.abs(a.key_index - b.key_index);
-  const circular = Math.min(raw, 12 - raw) / 6;
-  const modePenalty = a.mode === b.mode ? 0 : 0.15;
-  return Math.min(1, circular + modePenalty);
+  const codeA = a.camelot || keyLabelToCamelot(a.key, a.mode);
+  const codeB = b.camelot || keyLabelToCamelot(b.key, b.mode);
+  if (!codeA || !codeB) return 0.5;
+  return Math.min(1, camelotDistance(codeA, codeB) / 6);
+}
+
+const KEY_TO_CAMELOT = {
+  C: "8B", "C#": "9B", Db: "9B", D: "10B", "D#": "11B", Eb: "11B",
+  E: "12B", F: "1B", "F#": "2B", Gb: "2B", G: "3B", "G#": "4B",
+  Ab: "4B", A: "5B", "A#": "6B", Bb: "6B", B: "7B",
+  Am: "8A", "A#m": "9A", Bbm: "9A", Bm: "10A", Cm: "11A",
+  "C#m": "12A", Dbm: "12A", Dm: "1A", "D#m": "2A", Ebm: "2A",
+  Em: "3A", Fm: "4A", "F#m": "5A", Gbm: "5A", Gm: "6A",
+  "G#m": "7A", Abm: "7A",
+};
+
+function keyLabelToCamelot(label, mode) {
+  if (!label || label === "Unknown" || label === "未知") return null;
+  const parts = String(label).replace("Major", "Maj").replace("Minor", "Min").split(/\s+/);
+  const root = parts[0];
+  const inferred = String(mode || parts[1] || "").toLowerCase();
+  const key = inferred.startsWith("min") || inferred === "minor" ? `${root}m` : root;
+  return KEY_TO_CAMELOT[key] || null;
+}
+
+function parseCamelot(code) {
+  return { num: Number(code.slice(0, -1)), mode: code.slice(-1) };
+}
+
+function camelotNumDistance(a, b) {
+  const diff = Math.abs(a - b);
+  return Math.min(diff, 12 - diff);
+}
+
+function camelotDistance(codeA, codeB) {
+  const a = parseCamelot(codeA);
+  const b = parseCamelot(codeB);
+  const dNum = camelotNumDistance(a.num, b.num);
+  let score;
+  if (a.num === b.num) score = 0;
+  else if (a.mode === b.mode) score = dNum;
+  else score = dNum + 2;
+  if (dNum === 5) score -= 1;
+  if (dNum >= 6) score += 1;
+  return Math.max(0, score);
 }
 
 async function previewMix(offset = 0) {
@@ -886,6 +1055,7 @@ function exportableTrack(track) {
     duration: track.duration,
     bpm: track.bpm,
     key: track.key,
+    camelot: track.camelot,
     key_index: track.key_index,
     mode: track.mode,
     beats: track.beats || [],
@@ -1031,6 +1201,7 @@ function render() {
   renderMetrics();
   renderTable();
   renderTransport();
+  renderMatchResult();
   drawWaveform();
 }
 

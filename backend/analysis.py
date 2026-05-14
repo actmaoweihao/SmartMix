@@ -9,6 +9,8 @@ import imageio_ffmpeg
 import librosa
 import numpy as np
 
+from .matching import key_label_to_camelot
+
 
 KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -35,6 +37,7 @@ def analyze_audio(path: Path) -> dict:
         "bars": beat_grid["bars"],
         "phrases": beat_grid["phrases"],
         "key": key["label"],
+        "camelot": key_label_to_camelot(key["label"], key["mode"]),
         "key_index": key["index"],
         "mode": key["mode"],
         "energy": energy["energy"],
