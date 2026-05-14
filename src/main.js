@@ -1,6 +1,8 @@
 import "./styles.css";
 
-const API = "http://127.0.0.1:8000";
+const API_HOST = window.location.hostname || "127.0.0.1";
+const API_PROTOCOL = window.location.protocol === "https:" ? "https:" : "http:";
+const API = `${API_PROTOCOL}//${API_HOST}:8000`;
 
 const state = {
   tracks: [],
@@ -21,6 +23,11 @@ const state = {
     crossfade: 8,
     autoTransition: true,
     beatSync: false,
+    aiPrecision: true,
+    phraseBars: 8,
+    loudnessNormalize: true,
+    targetLufs: -16,
+    equalPowerFade: true,
     filterMode: "lowpassSweep",
     exportFormat: "mp3",
     eq: { low: 0, mid: 0, high: 0 },
@@ -69,10 +76,23 @@ app.innerHTML = `
 
         <label class="toggle"><input id="autoTransition" type="checkbox" checked /><span>首尾能量自动微调</span></label>
         <label class="toggle"><input id="beatSync" type="checkbox" /><span>导出时节拍同步</span></label>
+        <label class="toggle"><input id="aiPrecision" type="checkbox" checked /><span>AI 精准小节混音</span></label>
+        <label class="toggle"><input id="loudnessNormalize" type="checkbox" checked /><span>响度归一化</span></label>
+
+        <label class="field">
+          <span>重叠小节 <b id="phraseBarsValue">8 bars</b></span>
+          <input id="phraseBars" type="range" min="4" max="16" value="8" step="4" />
+        </label>
+
+        <label class="field">
+          <span>目标响度 <b id="targetLufsValue">-16 LUFS</b></span>
+          <input id="targetLufs" type="range" min="-20" max="-10" value="-16" step="1" />
+        </label>
 
         <label class="field">
           <span>过渡滤波</span>
           <select id="filterMode">
+            <option value="dynamicEq">AI 动态 EQ 避让</option>
             <option value="lowpassSweep">低通扫尾</option>
             <option value="highpassLift">高通抬入</option>
             <option value="none">关闭滤波</option>
@@ -165,6 +185,12 @@ const els = {
   crossfadeValue: document.querySelector("#crossfadeValue"),
   autoTransition: document.querySelector("#autoTransition"),
   beatSync: document.querySelector("#beatSync"),
+  aiPrecision: document.querySelector("#aiPrecision"),
+  loudnessNormalize: document.querySelector("#loudnessNormalize"),
+  phraseBars: document.querySelector("#phraseBars"),
+  phraseBarsValue: document.querySelector("#phraseBarsValue"),
+  targetLufs: document.querySelector("#targetLufs"),
+  targetLufsValue: document.querySelector("#targetLufsValue"),
   filterMode: document.querySelector("#filterMode"),
   exportFormat: document.querySelector("#exportFormat"),
   eqLow: document.querySelector("#eqLow"),
@@ -213,6 +239,10 @@ function bindEvents() {
   els.crossfade.addEventListener("input", syncSettings);
   els.autoTransition.addEventListener("change", syncSettings);
   els.beatSync.addEventListener("change", syncSettings);
+  els.aiPrecision.addEventListener("change", syncSettings);
+  els.loudnessNormalize.addEventListener("change", syncSettings);
+  els.phraseBars.addEventListener("input", syncSettings);
+  els.targetLufs.addEventListener("input", syncSettings);
   els.filterMode.addEventListener("change", syncSettings);
   els.exportFormat.addEventListener("change", syncSettings);
   [els.eqLow, els.eqMid, els.eqHigh].forEach((input) => input.addEventListener("input", syncSettings));
@@ -253,6 +283,11 @@ function syncSettings() {
   state.settings.crossfade = Number(els.crossfade.value);
   state.settings.autoTransition = els.autoTransition.checked;
   state.settings.beatSync = els.beatSync.checked;
+  state.settings.aiPrecision = els.aiPrecision.checked;
+  state.settings.loudnessNormalize = els.loudnessNormalize.checked;
+  state.settings.phraseBars = Number(els.phraseBars.value);
+  state.settings.targetLufs = Number(els.targetLufs.value);
+  state.settings.equalPowerFade = els.aiPrecision.checked;
   state.settings.filterMode = els.filterMode.value;
   state.settings.exportFormat = els.exportFormat.value;
   state.settings.eq.low = Number(els.eqLow.value);
@@ -322,6 +357,7 @@ async function decodeLocal(track) {
 async function uploadAndAnalyze(track) {
   try {
     setStatus(`后端分析 ${track.name}`);
+    await assertBackendReachable();
     const form = new FormData();
     form.append("file", track.file);
     const result = await fetchJson(`${API}/api/tracks`, { method: "POST", body: form });
@@ -329,22 +365,34 @@ async function uploadAndAnalyze(track) {
     track.status = "ready";
     track.duration = result.duration || track.duration;
     track.bpm = result.bpm;
+    track.beats = result.beats || [];
+    track.bars = result.bars || [];
+    track.phrases = result.phrases || [];
     track.key = result.key || "未知";
     track.key_index = result.key_index;
     track.mode = result.mode;
     track.energy = result.energy || 0;
     track.intro_low = result.intro_low || 0;
     track.outro_low = result.outro_low || 0;
+    track.loudness_lufs = result.loudness_lufs;
+    track.true_peak_db = result.true_peak_db;
+    track.transition_candidates = result.transition_candidates || null;
     track.peaks = result.peaks?.length ? result.peaks : track.peaks;
-    track.introPoint = clamp(track.intro_low || track.introPoint, 0.5, Math.max(0.5, track.duration * 0.35));
-    track.outroPoint = clamp(track.duration - (track.outro_low || state.settings.crossfade), track.duration * 0.55, Math.max(track.duration - 0.5, 0.5));
+    track.introPoint = clamp(track.transition_candidates?.intro ?? track.intro_low ?? track.introPoint, 0.5, Math.max(0.5, track.duration * 0.35));
+    track.outroPoint = clamp(track.transition_candidates?.outro ?? (track.duration - (track.outro_low || state.settings.crossfade)), track.duration * 0.55, Math.max(track.duration - 0.5, 0.5));
     setStatus(`完成分析 ${track.name}`);
   } catch (error) {
-    track.status = "error";
-    track.error = error.message || "后端分析失败";
-    setStatus(`分析失败：${track.name}`);
+    applyLocalFallbackAnalysis(track, error);
   } finally {
     render();
+  }
+}
+
+async function assertBackendReachable() {
+  try {
+    await fetchJson(`${API}/api/health`);
+  } catch (error) {
+    throw new Error(`后端连接失败，请确认 ${API}/api/health 可访问。${error.message || ""}`.trim());
   }
 }
 
@@ -373,6 +421,183 @@ function peaksFromBuffer(buffer, bins) {
   }
   const peak = Math.max(...peaks, 1);
   return peaks.map((value) => value / peak);
+}
+
+function applyLocalFallbackAnalysis(track, error) {
+  if (!track.buffer) {
+    track.status = "error";
+    track.error = error.message || "后端分析失败";
+    setStatus(`分析失败：${track.name}`);
+    return;
+  }
+
+  const mono = makeMono(track.buffer);
+  const envelope = buildEnvelope(mono, track.buffer.sampleRate);
+  const key = estimateLocalKey(mono, track.buffer.sampleRate);
+  track.duration = track.buffer.duration;
+  track.bpm = estimateLocalBpm(envelope.values, envelope.frameRate);
+  track.beats = [];
+  track.bars = [];
+  track.phrases = [];
+  track.key = key.label;
+  track.key_index = key.index;
+  track.mode = key.mode;
+  track.energy = envelope.energy;
+  track.intro_low = envelope.introLow;
+  track.outro_low = envelope.outroLow;
+  track.loudness_lufs = localLoudness(mono);
+  track.true_peak_db = localPeakDb(mono);
+  track.transition_candidates = {
+    intro: track.introPoint,
+    outro: track.outroPoint,
+    confidence: 0.25,
+  };
+  track.introPoint = clamp(track.intro_low || track.introPoint, 0.5, Math.max(0.5, track.duration * 0.35));
+  track.outroPoint = clamp(track.duration - (track.outro_low || state.settings.crossfade), track.duration * 0.55, Math.max(track.duration - 0.5, 0.5));
+  track.status = "ready";
+  track.error = "";
+  setStatus(`已用浏览器本地分析：${track.name}`);
+  console.warn("SmartMix backend analysis failed; local fallback was used.", error);
+}
+
+function makeMono(buffer) {
+  const length = buffer.length;
+  const mono = new Float32Array(length);
+  for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+    const data = buffer.getChannelData(channel);
+    for (let i = 0; i < length; i += 1) mono[i] += data[i] / buffer.numberOfChannels;
+  }
+  return mono;
+}
+
+function buildEnvelope(samples, sampleRate) {
+  const windowSize = Math.max(1024, Math.floor(sampleRate * 0.05));
+  const values = [];
+  let sumEnergy = 0;
+  let peak = 0;
+  for (let offset = 0; offset < samples.length; offset += windowSize) {
+    let sum = 0;
+    const end = Math.min(offset + windowSize, samples.length);
+    for (let i = offset; i < end; i += 1) sum += samples[i] * samples[i];
+    const rms = Math.sqrt(sum / Math.max(1, end - offset));
+    values.push(rms);
+    sumEnergy += rms;
+    peak = Math.max(peak, rms);
+  }
+  const average = sumEnergy / Math.max(1, values.length);
+  const threshold = Math.max(average * 0.55, peak * 0.08);
+  const frameRate = sampleRate / windowSize;
+  return {
+    values,
+    frameRate,
+    energy: Math.min(1, average * 7 + peak * 1.5),
+    introLow: countLowFrames(values, threshold, true) / frameRate,
+    outroLow: countLowFrames(values, threshold, false) / frameRate,
+  };
+}
+
+function countLowFrames(values, threshold, fromStart) {
+  let count = 0;
+  const limit = Math.min(values.length, Math.floor(values.length * 0.25));
+  for (let i = 0; i < limit; i += 1) {
+    const index = fromStart ? i : values.length - 1 - i;
+    if (values[index] > threshold) break;
+    count += 1;
+  }
+  return count;
+}
+
+function estimateLocalBpm(envelope, frameRate) {
+  if (envelope.length < frameRate * 8) return null;
+  const flux = envelope.map((value, index) => Math.max(0, value - (envelope[index - 1] || 0)));
+  const mean = flux.reduce((sum, value) => sum + value, 0) / flux.length;
+  const centered = flux.map((value) => Math.max(0, value - mean));
+  let bestBpm = 120;
+  let bestScore = -Infinity;
+  for (let bpm = 70; bpm <= 180; bpm += 1) {
+    const lag = Math.round((60 / bpm) * frameRate);
+    if (lag < 1 || lag >= centered.length) continue;
+    let score = 0;
+    for (let i = lag; i < centered.length; i += 1) score += centered[i] * centered[i - lag];
+    if (score > bestScore) {
+      bestScore = score;
+      bestBpm = bpm;
+    }
+  }
+  return bestScore > 0 ? bestBpm : null;
+}
+
+function estimateLocalKey(samples, sampleRate) {
+  const chroma = new Array(12).fill(0);
+  const chunkSize = 4096;
+  const step = Math.max(chunkSize, Math.floor(sampleRate * 1.2));
+  let used = 0;
+  for (let offset = 0; offset + chunkSize < samples.length && used < 80; offset += step) {
+    const pitch = estimatePitch(samples.subarray(offset, offset + chunkSize), sampleRate);
+    if (!pitch) continue;
+    const midi = Math.round(69 + 12 * Math.log2(pitch / 440));
+    chroma[((midi % 12) + 12) % 12] += 1;
+    used += 1;
+  }
+  if (!used) return { label: "Unknown", index: null, mode: null };
+  normalize(chroma);
+  const majorProfile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+  const minorProfile = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+  const keyNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  let best = { score: -Infinity, index: 0, mode: "major" };
+  for (let root = 0; root < 12; root += 1) {
+    const majorScore = correlateProfile(chroma, majorProfile, root);
+    const minorScore = correlateProfile(chroma, minorProfile, root);
+    if (majorScore > best.score) best = { score: majorScore, index: root, mode: "major" };
+    if (minorScore > best.score) best = { score: minorScore, index: root, mode: "minor" };
+  }
+  return {
+    label: `${keyNames[best.index]} ${best.mode === "major" ? "Maj" : "Min"}`,
+    index: best.index,
+    mode: best.mode,
+  };
+}
+
+function localLoudness(samples) {
+  const rms = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / Math.max(1, samples.length) + 1e-12);
+  return Math.round(20 * Math.log10(rms) * 100) / 100;
+}
+
+function localPeakDb(samples) {
+  let peak = 1e-12;
+  for (let i = 0; i < samples.length; i += 1) peak = Math.max(peak, Math.abs(samples[i]));
+  return Math.round(20 * Math.log10(peak) * 100) / 100;
+}
+
+function estimatePitch(chunk, sampleRate) {
+  let rms = 0;
+  for (let i = 0; i < chunk.length; i += 1) rms += chunk[i] * chunk[i];
+  rms = Math.sqrt(rms / chunk.length);
+  if (rms < 0.015) return null;
+  const minLag = Math.floor(sampleRate / 900);
+  const maxLag = Math.floor(sampleRate / 80);
+  let bestLag = -1;
+  let bestCorrelation = 0;
+  for (let lag = minLag; lag <= maxLag; lag += 1) {
+    let correlation = 0;
+    for (let i = 0; i < chunk.length - lag; i += 1) correlation += chunk[i] * chunk[i + lag];
+    if (correlation > bestCorrelation) {
+      bestCorrelation = correlation;
+      bestLag = lag;
+    }
+  }
+  return bestLag > 0 ? sampleRate / bestLag : null;
+}
+
+function normalize(values) {
+  const sum = values.reduce((total, value) => total + value, 0) || 1;
+  for (let i = 0; i < values.length; i += 1) values[i] /= sum;
+}
+
+function correlateProfile(chroma, profile, root) {
+  let score = 0;
+  for (let i = 0; i < 12; i += 1) score += chroma[(i + root) % 12] * profile[i];
+  return score;
 }
 
 function applySort() {
@@ -663,9 +888,15 @@ function exportableTrack(track) {
     key: track.key,
     key_index: track.key_index,
     mode: track.mode,
+    beats: track.beats || [],
+    bars: track.bars || [],
+    phrases: track.phrases || [],
     energy: track.energy,
     intro_low: track.intro_low,
     outro_low: track.outro_low,
+    loudness_lufs: track.loudness_lufs,
+    true_peak_db: track.true_peak_db,
+    transition_candidates: track.transition_candidates,
     introPoint: track.introPoint,
     outroPoint: track.outroPoint,
     peaks: track.peaks,
@@ -678,6 +909,10 @@ function applySettingsToControls() {
   els.crossfade.value = state.settings.crossfade;
   els.autoTransition.checked = state.settings.autoTransition;
   els.beatSync.checked = state.settings.beatSync;
+  els.aiPrecision.checked = state.settings.aiPrecision;
+  els.loudnessNormalize.checked = state.settings.loudnessNormalize;
+  els.phraseBars.value = state.settings.phraseBars;
+  els.targetLufs.value = state.settings.targetLufs;
   els.filterMode.value = state.settings.filterMode;
   els.exportFormat.value = state.settings.exportFormat;
   els.eqLow.value = state.settings.eq.low;
@@ -703,6 +938,15 @@ function getTransitionDuration(prev, next) {
   const requested = state.settings.crossfade;
   const maxByLength = Math.max(0.5, Math.min(prev.duration, next.duration) * 0.35);
   let actual = requested;
+  if (state.settings.aiPrecision) {
+    const phrase = phraseTransitionSeconds(prev, next);
+    if (phrase) actual = phrase;
+    const prevOut = prev.transition_candidates?.outro;
+    const nextIn = next.transition_candidates?.intro;
+    if (Number.isFinite(prevOut) && Number.isFinite(nextIn)) {
+      actual = Math.min(actual, Math.max(0.5, prev.duration - prevOut), Math.max(0.5, nextIn));
+    }
+  }
   if (Number.isFinite(prev.outroPoint) && Number.isFinite(next.introPoint)) {
     actual = Math.min(actual, Math.max(0.5, prev.duration - prev.outroPoint), Math.max(0.5, next.introPoint));
   }
@@ -710,6 +954,13 @@ function getTransitionDuration(prev, next) {
     actual = Math.max(2, Math.min(actual, (prev.outro_low || 0) + (next.intro_low || 0) + 2));
   }
   return Math.min(actual, maxByLength);
+}
+
+function phraseTransitionSeconds(prev, next) {
+  const bpms = [prev.bpm, next.bpm].filter((bpm) => Number.isFinite(bpm) && bpm > 0);
+  if (!bpms.length) return null;
+  const avg = bpms.reduce((sum, bpm) => sum + bpm, 0) / bpms.length;
+  return Math.max(2, state.settings.phraseBars * 4 * (60 / avg));
 }
 
 function getMixDurationSeconds() {
@@ -788,6 +1039,8 @@ function renderMetrics() {
   els.trackCount.textContent = state.tracks.length;
   els.mixDuration.textContent = formatTime(getMixDurationSeconds());
   els.crossfadeValue.textContent = `${state.settings.crossfade}s`;
+  els.phraseBarsValue.textContent = `${state.settings.phraseBars} bars`;
+  els.targetLufsValue.textContent = `${state.settings.targetLufs} LUFS`;
   els.sortButton.disabled = playable.length < 2;
   els.playButton.disabled = playable.length < 1;
   els.restartButton.disabled = playable.length < 1;
@@ -917,7 +1170,12 @@ function drawHandle(ctx, x, height, color, label) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (error) {
+    throw new Error(`无法连接后端 ${API}。请确认已运行 pnpm backend，或重新运行 pnpm dev。原始错误：${error.message}`);
+  }
   if (!response.ok) {
     let message = response.statusText;
     try {

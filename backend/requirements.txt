@@ -5,5 +5,4 @@ librosa==0.11.0
 soundfile==0.13.1
 numpy==2.2.6
 scipy==1.16.3
-pydub==0.25.1
 imageio-ffmpeg==0.6.0
