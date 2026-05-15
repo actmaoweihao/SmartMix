@@ -2,7 +2,7 @@ import "./styles.css";
 
 const API_HOST = window.location.hostname || "127.0.0.1";
 const API_PROTOCOL = window.location.protocol === "https:" ? "https:" : "http:";
-const API = `${API_PROTOCOL}//${API_HOST}:8001`;
+const API = `${API_PROTOCOL}//${API_HOST}:8002`;
 
 const state = {
   tracks: [],
@@ -549,7 +549,7 @@ function renderDirectionMatch(title, direction) {
       <div class="component-grid">
         ${renderComponent("Camelot", c.camelot.score, `${c.camelot.from || "--"} → ${c.camelot.to || "--"} · ${c.camelot.rank}`)}
         ${renderComponent("BPM", c.bpm.score, `Δ ${c.bpm.delta ?? "--"} BPM`)}
-        ${renderComponent("Energy", c.energy.score, `Δ ${c.energy.delta ?? "--"}`)}
+        ${renderComponent("Energy", c.energy.score, c.energy.summary || `diff ${c.energy.delta ?? "--"}`)}
         ${renderComponent("Structure", c.structure.score, `${c.structure.phrase_bars || 0} bars / ${c.structure.overlap_seconds}s`)}
       </div>
     </div>
@@ -603,6 +603,7 @@ async function uploadAndAnalyze(track) {
     track.key_index = result.key_index;
     track.mode = result.mode;
     track.energy = result.energy || 0;
+    track.energy_profile = result.energy_profile || null;
     track.intro_low = result.intro_low || 0;
     track.outro_low = result.outro_low || 0;
     track.loudness_lufs = result.loudness_lufs;
@@ -676,6 +677,7 @@ function applyLocalFallbackAnalysis(track, error) {
   track.key_index = key.index;
   track.mode = key.mode;
   track.energy = envelope.energy;
+  track.energy_profile = envelope.energyProfile;
   track.intro_low = envelope.introLow;
   track.outro_low = envelope.outroLow;
   track.loudness_lufs = localLoudness(mono);
@@ -725,9 +727,91 @@ function buildEnvelope(samples, sampleRate) {
     values,
     frameRate,
     energy: Math.min(1, average * 7 + peak * 1.5),
+    energyProfile: buildLocalEnergyProfile(values, samples, sampleRate, average, peak),
     introLow: countLowFrames(values, threshold, true) / frameRate,
     outroLow: countLowFrames(values, threshold, false) / frameRate,
   };
+}
+
+function buildLocalEnergyProfile(values, samples, sampleRate, average, peak) {
+  const rmsDb = values.map((value) => 20 * Math.log10(Math.max(value, 1e-9))).sort((a, b) => a - b);
+  const p10 = percentile(rmsDb, 10);
+  const p50 = percentile(rmsDb, 50);
+  const p85 = percentile(rmsDb, 85);
+  const p95 = percentile(rmsDb, 95);
+  const lufs = localLoudness(samples);
+  const peakDb = localPeakDb(samples);
+  const crest = peakDb - lufs;
+  const dynamicRange = Math.max(0, p95 - p10);
+  const introCount = Math.max(1, Math.min(values.length, Math.round(16 / (values.length ? samples.length / sampleRate / values.length : 1))));
+  const introAvg = avg(values.slice(0, introCount));
+  const outroAvg = avg(values.slice(-introCount));
+  const fullAvg = Math.max(average, 1e-9);
+  const introDelta = 20 * Math.log10(Math.max(introAvg, 1e-9) / fullAvg);
+  const outroDelta = 20 * Math.log10(Math.max(outroAvg, 1e-9) / fullAvg);
+  const lowFrequencyRatio = 0;
+  const components = {
+    loudness: clamp01((lufs + 30) / 18) * 100,
+    rms_body: clamp01((p85 + 32) / 24) * 100,
+    crest_density: clamp01((18 - crest) / 14) * 100,
+    low_frequency: 0,
+    dynamic_motion: clamp01((dynamicRange - 3) / 14) * 100,
+    transition_contrast: Math.min(1, (Math.abs(introDelta) + Math.abs(outroDelta)) / 24) * 100,
+  };
+  const energyIndex =
+    components.loudness * 0.30 +
+    components.rms_body * 0.25 +
+    components.crest_density * 0.15 +
+    components.low_frequency * 0.15 +
+    components.dynamic_motion * 0.10 +
+    components.transition_contrast * 0.05;
+  return {
+    energy_index: round1(energyIndex),
+    lufs: round2(lufs),
+    true_peak_db: round2(peakDb),
+    rms_p10_db: round2(p10),
+    rms_p50_db: round2(p50),
+    rms_p85_db: round2(p85),
+    rms_p95_db: round2(p95),
+    crest_factor_db: round2(crest),
+    low_frequency_ratio: lowFrequencyRatio,
+    dynamic_range_db: round2(dynamicRange),
+    intro_relative_energy: round4(Math.min(1, introAvg / fullAvg / 2)),
+    outro_relative_energy: round4(Math.min(1, outroAvg / fullAvg / 2)),
+    intro_delta_db: round2(introDelta),
+    outro_delta_db: round2(outroDelta),
+    transition_contrast: round4(components.transition_contrast / 100),
+    components,
+  };
+}
+
+function percentile(sortedValues, p) {
+  if (!sortedValues.length) return 0;
+  const index = (sortedValues.length - 1) * (p / 100);
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sortedValues[lower];
+  return sortedValues[lower] * (upper - index) + sortedValues[upper] * (index - lower);
+}
+
+function avg(values) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function round1(value) {
+  return Math.round(value * 10) / 10;
+}
+
+function round2(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function round4(value) {
+  return Math.round(value * 10000) / 10000;
+}
+
+function clamp01(value) {
+  return Math.min(1, Math.max(0, value));
 }
 
 function countLowFrames(values, threshold, fromStart) {
@@ -1256,6 +1340,7 @@ function exportableTrack(track) {
     downbeat_offset: track.downbeat_offset || 0,
     beat_confidence: track.beat_confidence || 0,
     energy: track.energy,
+    energy_profile: track.energy_profile,
     intro_low: track.intro_low,
     outro_low: track.outro_low,
     loudness_lufs: track.loudness_lufs,

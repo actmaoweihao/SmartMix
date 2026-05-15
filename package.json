@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -n backend,frontend -c cyan,green \"pnpm backend\" \"pnpm frontend\"",
     "frontend": "vite --host 127.0.0.1 --port 3000",
-    "backend": "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload",
+    "backend": "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8002 --reload",
     "check": "node --check src/main.js",
     "test:backend": "python -m unittest discover -v",
     "setup:backend": "python -m pip install -r backend/requirements.txt",

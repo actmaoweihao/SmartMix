@@ -145,7 +145,7 @@ def evaluate_direction(prev_track: dict[str, Any], next_track: dict[str, Any]) -
     next_camelot = _track_camelot(next_track)
     key_eval = camelot_key_distance(prev_camelot, next_camelot)
     bpm_eval = bpm_match_score(prev_track.get("bpm"), next_track.get("bpm"))
-    energy_eval = energy_match_score(prev_track.get("energy"), next_track.get("energy"))
+    energy_eval = energy_match_score(prev_track, next_track)
     structure_eval = structure_match_score(prev_track, next_track)
 
     total = round(
@@ -191,15 +191,52 @@ def bpm_match_score(bpm_a: Any, bpm_b: Any) -> dict[str, Any]:
     }
 
 
-def energy_match_score(energy_a: Any, energy_b: Any) -> dict[str, Any]:
-    if energy_a is None or energy_b is None:
-        return {"score": 55, "delta": None, "reason": "至少一首歌能量未知，使用中性能量评分。"}
-    delta = abs(float(energy_a) - float(energy_b))
-    score = max(0, min(100, 100 - delta * 120))
+def energy_match_score(track_a: dict[str, Any], track_b: dict[str, Any]) -> dict[str, Any]:
+    profile_a = track_a.get("energy_profile") or {}
+    profile_b = track_b.get("energy_profile") or {}
+    if not profile_a or not profile_b:
+        energy_a = track_a.get("energy")
+        energy_b = track_b.get("energy")
+        if energy_a is None or energy_b is None:
+            return {"score": 55, "delta": None, "reason": "At least one track has unknown energy; using neutral score."}
+        delta = abs(float(energy_a) - float(energy_b))
+        score = max(0, min(100, 100 - delta * 120))
+        return {
+            "score": round(score, 1),
+            "delta": round(delta, 3),
+            "summary": f"energy diff {delta:.3f}",
+            "reason": "Fallback score based on legacy single energy value.",
+        }
+
+    sub_scores = {
+        "energy_index": _score_delta(profile_a.get("energy_index"), profile_b.get("energy_index"), 35),
+        "lufs": _score_delta(profile_a.get("lufs"), profile_b.get("lufs"), 10),
+        "rms_body": _score_delta(profile_a.get("rms_p85_db"), profile_b.get("rms_p85_db"), 12),
+        "crest_factor": _score_delta(profile_a.get("crest_factor_db"), profile_b.get("crest_factor_db"), 10),
+        "low_frequency": _score_delta(profile_a.get("low_frequency_ratio"), profile_b.get("low_frequency_ratio"), 0.35),
+        "dynamic_range": _score_delta(profile_a.get("dynamic_range_db"), profile_b.get("dynamic_range_db"), 12),
+        "transition_shape": _score_delta(
+            profile_a.get("outro_relative_energy"),
+            profile_b.get("intro_relative_energy"),
+            0.75,
+        ),
+    }
+    weights = {
+        "energy_index": 0.18,
+        "lufs": 0.18,
+        "rms_body": 0.14,
+        "crest_factor": 0.12,
+        "low_frequency": 0.14,
+        "dynamic_range": 0.10,
+        "transition_shape": 0.14,
+    }
+    score = sum(sub_scores[key]["score"] * weights[key] for key in weights)
     return {
-        "score": round(score, 1),
-        "delta": round(delta, 3),
-        "reason": "能量越接近，现场听感越容易自然衔接。",
+        "score": round(float(score), 1),
+        "delta": {key: sub_scores[key]["delta"] for key in sub_scores},
+        "sub_scores": {key: round(float(sub_scores[key]["score"]), 1) for key in sub_scores},
+        "summary": _energy_summary(profile_a, profile_b),
+        "reason": "Compares LUFS, RMS percentiles, crest factor, low-frequency ratio, dynamic range, and outro-to-intro energy shape.",
     }
 
 
@@ -258,6 +295,7 @@ def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
         "key": track.get("key"),
         "camelot": _track_camelot(track),
         "energy": track.get("energy"),
+        "energy_profile": track.get("energy_profile"),
         "duration": track.get("duration"),
     }
 
@@ -275,3 +313,17 @@ def _camelot_distance_to_score(distance: int | float) -> float:
         return 62
     return max(0, 50 - (distance - 5) * 12)
 
+
+def _score_delta(a: Any, b: Any, tolerance: float) -> dict[str, float | None]:
+    if a is None or b is None:
+        return {"score": 55.0, "delta": None}
+    delta = abs(float(a) - float(b))
+    score = max(0.0, min(100.0, 100.0 - (delta / max(tolerance, 1e-9)) * 100.0))
+    return {"score": score, "delta": round(float(delta), 4)}
+
+
+def _energy_summary(profile_a: dict[str, Any], profile_b: dict[str, Any]) -> str:
+    index_delta = abs(float(profile_a.get("energy_index", 0)) - float(profile_b.get("energy_index", 0)))
+    lufs_delta = abs(float(profile_a.get("lufs", 0)) - float(profile_b.get("lufs", 0)))
+    low_delta = abs(float(profile_a.get("low_frequency_ratio", 0)) - float(profile_b.get("low_frequency_ratio", 0)))
+    return f"index diff {index_delta:.1f}, LUFS diff {lufs_delta:.1f}, low diff {low_delta:.2f}"

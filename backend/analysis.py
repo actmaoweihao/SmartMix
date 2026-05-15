@@ -44,6 +44,7 @@ def analyze_audio(path: Path) -> dict:
         "key_index": key["index"],
         "mode": key["mode"],
         "energy": energy["energy"],
+        "energy_profile": energy["energy_profile"],
         "intro_low": energy["intro_low"],
         "outro_low": energy["outro_low"],
         "loudness_lufs": loudness["lufs"],
@@ -227,11 +228,96 @@ def _energy_metrics(y: np.ndarray, sr: int) -> dict:
             break
         outro += 1
 
+    profile = _energy_profile(y, sr, rms, frame_length, hop_length)
+
     return {
-        "energy": min(1.0, avg * 7 + peak * 1.5),
+        "energy": profile["energy_index"] / 100,
+        "energy_profile": profile,
         "intro_low": float(intro / frame_rate),
         "outro_low": float(outro / frame_rate),
     }
+
+
+def _energy_profile(y: np.ndarray, sr: int, rms: np.ndarray, frame_length: int, hop_length: int) -> dict:
+    rms = np.asarray(rms, dtype=np.float32)
+    rms_db = 20 * np.log10(np.maximum(rms, 1e-9))
+    loudness = loudness_metrics(y, sr)
+    peak = float(np.max(np.abs(y)) + 1e-12)
+    rms_global = float(np.sqrt(np.mean(np.square(y)) + 1e-12))
+    crest_db = float(20 * np.log10(peak / max(rms_global, 1e-12)))
+    low_ratio = _low_frequency_ratio(y, sr, hop_length)
+
+    p10 = float(np.percentile(rms_db, 10))
+    p50 = float(np.percentile(rms_db, 50))
+    p85 = float(np.percentile(rms_db, 85))
+    p95 = float(np.percentile(rms_db, 95))
+    dynamic_range_db = max(0.0, p95 - p10)
+
+    intro_frames = max(1, min(len(rms), int(round(16 * sr / hop_length))))
+    outro_frames = intro_frames
+    full_rms = float(np.mean(rms) + 1e-12)
+    intro_rms = float(np.mean(rms[:intro_frames]) + 1e-12)
+    outro_rms = float(np.mean(rms[-outro_frames:]) + 1e-12)
+    intro_relative = _ratio_to_unit(intro_rms / full_rms)
+    outro_relative = _ratio_to_unit(outro_rms / full_rms)
+    intro_delta_db = float(20 * np.log10(intro_rms / full_rms))
+    outro_delta_db = float(20 * np.log10(outro_rms / full_rms))
+    transition_contrast = min(1.0, (abs(intro_delta_db) + abs(outro_delta_db)) / 24)
+
+    components = {
+        "loudness": _clamp01((loudness["lufs"] + 30) / 18) * 100,
+        "rms_body": _clamp01((p85 + 32) / 24) * 100,
+        "crest_density": _clamp01((18 - crest_db) / 14) * 100,
+        "low_frequency": _clamp01(low_ratio / 0.42) * 100,
+        "dynamic_motion": _clamp01((dynamic_range_db - 3) / 14) * 100,
+        "transition_contrast": transition_contrast * 100,
+    }
+    energy_index = (
+        components["loudness"] * 0.30
+        + components["rms_body"] * 0.25
+        + components["crest_density"] * 0.15
+        + components["low_frequency"] * 0.15
+        + components["dynamic_motion"] * 0.10
+        + components["transition_contrast"] * 0.05
+    )
+
+    return {
+        "energy_index": round(float(energy_index), 1),
+        "lufs": loudness["lufs"],
+        "true_peak_db": loudness["peak_db"],
+        "rms_p10_db": round(p10, 2),
+        "rms_p50_db": round(p50, 2),
+        "rms_p85_db": round(p85, 2),
+        "rms_p95_db": round(p95, 2),
+        "crest_factor_db": round(crest_db, 2),
+        "low_frequency_ratio": round(float(low_ratio), 4),
+        "dynamic_range_db": round(float(dynamic_range_db), 2),
+        "intro_relative_energy": round(float(intro_relative), 4),
+        "outro_relative_energy": round(float(outro_relative), 4),
+        "intro_delta_db": round(intro_delta_db, 2),
+        "outro_delta_db": round(outro_delta_db, 2),
+        "transition_contrast": round(float(transition_contrast), 4),
+        "components": {key: round(float(value), 1) for key, value in components.items()},
+    }
+
+
+def _low_frequency_ratio(y: np.ndarray, sr: int, hop_length: int) -> float:
+    try:
+        spectrum = np.abs(librosa.stft(y, n_fft=2048, hop_length=hop_length)) ** 2
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+        low = np.sum(spectrum[freqs <= 180])
+        total = np.sum(spectrum) + 1e-12
+        return float(low / total)
+    except Exception:
+        return 0.0
+
+
+def _ratio_to_unit(value: float) -> float:
+    return _clamp01(value / 2)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
 
 
 def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[float], energy: dict) -> dict:

@@ -7,7 +7,7 @@ SmartMix 是一个本地运行的智能混音工作台。它面向音乐爱好�
 ## 主要功能
 
 - 多音频上传：支持常见音频格式，包括 MP3、WAV、FLAC、M4A、OGG、AAC、AIFF、OPUS、WEBM 等。
-- 自动音频分析：识别时长、BPM、Key、Camelot、能量、LUFS、真峰值、beat grid、bar、phrase、波形峰值和推荐过渡点。
+- 自动音频分析：识别时长、BPM、Key、Camelot、多指标能量、LUFS、真峰值、beat grid、bar、phrase、波形峰值和推荐过渡点。
 - 智能排序：支持综合推荐、谐和优先、BPM 升序、BPM 降序、能量弧线和原始顺序。
 - 两首歌衔接评分：上传任意两首歌，按 Camelot、BPM、能量和结构可过渡性计算 A 到 B / B 到 A 的匹配分。
 - Harmonic tuning 建议：当两首歌调性不够兼容时，给出可调到的 Camelot 目标、半音数和质量风险。
@@ -53,12 +53,12 @@ pnpm dev
 启动后访问：
 
 - 前端工作台：http://127.0.0.1:3000
-- 后端健康检查：http://127.0.0.1:8001/api/health
+- 后端健康检查：http://127.0.0.1:8002/api/health
 
 `pnpm dev` 会同时启动：
 
 - `pnpm frontend`：Vite 前端，默认端口 `3000`
-- `pnpm backend`：FastAPI 后端，默认端口 `8001`
+- `pnpm backend`：FastAPI 后端，默认端口 `8002`
 
 ## 基础使用流程
 
@@ -83,7 +83,7 @@ pnpm dev
 - `bpm`：估算 BPM
 - `beats` / `bars` / `phrases`：节拍、小节和 phrase 时间点
 - `key` / `camelot`：调性和 Camelot 编码
-- `energy`：整体能量
+- `energy` / `energy_profile`：多指标能量画像，包括 LUFS、RMS 分位数、crest factor、低频比例、动态范围和 intro/outro 相对能量
 - `intro_low` / `outro_low`：首尾低能量时长
 - `loudness_lufs` / `true_peak_db`：响度指标
 - `transition_candidates`：推荐入点、出点、人声密度和置信度
@@ -332,7 +332,7 @@ pnpm dev
 再打开：
 
 ```text
-http://127.0.0.1:8001/api/health
+http://127.0.0.1:8002/api/health
 ```
 
 如果返回 `{"ok": true}`，说明后端正常。
