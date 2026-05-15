@@ -596,6 +596,41 @@ input[type="range"] {
   padding: 12px;
 }
 
+.transition-explain {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) 1.2fr minmax(220px, 1fr);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: #101113;
+  padding: 12px;
+}
+
+.transition-explain strong {
+  display: block;
+  color: var(--accent);
+}
+
+.decision-list,
+.decision-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.decision-list span,
+.decision-metrics span {
+  border: 1px solid var(--line);
+  color: var(--muted);
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.decision-list span {
+  color: var(--text);
+}
+
 .deck-card {
   border: 1px solid var(--line);
   background: #101113;
@@ -699,6 +734,54 @@ input[type="range"] {
   width: 100%;
   height: 260px;
   cursor: crosshair;
+}
+
+.cue-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 180px)) 132px minmax(220px, 1fr);
+  gap: 10px;
+  align-items: end;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: #101113;
+}
+
+.cue-editor label {
+  display: grid;
+  gap: 6px;
+}
+
+.cue-editor label span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cue-editor input {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  background: #14161a;
+  color: var(--text);
+  padding: 0 9px;
+}
+
+.cue-editor button {
+  min-height: 36px;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--text);
+}
+
+.cue-ai {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cue-ai span {
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 5px 7px;
 }
 
 .table-wrap {
@@ -826,6 +909,8 @@ tr.selected {
   .component-grid,
   .match-score,
   .deck-grid,
+  .transition-explain,
+  .cue-editor,
   .transport {
     grid-template-columns: 1fr;
   }

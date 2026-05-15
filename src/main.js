@@ -35,6 +35,7 @@ const state = {
     loudnessNormalize: true,
     targetLufs: -16,
     equalPowerFade: true,
+    mixStrategy: "auto",
     filterMode: "lowpassSweep",
     exportFormat: "mp3",
     eq: { low: 0, mid: 0, high: 0 },
@@ -99,6 +100,17 @@ app.innerHTML = `
         <label class="field">
           <span>目标响度 <b id="targetLufsValue">-16 LUFS</b></span>
           <input id="targetLufs" type="range" min="-20" max="-10" value="-16" step="1" />
+        </label>
+
+        <label class="field">
+          <span>AI 混音策略</span>
+          <select id="mixStrategy">
+            <option value="auto">AI 自动判断</option>
+            <option value="vocalSafe">保留人声清晰</option>
+            <option value="bassSwap">低频交换切入</option>
+            <option value="smooth">平滑氛围过渡</option>
+            <option value="quickCut">快速切歌</option>
+          </select>
         </label>
 
         <label class="field">
@@ -203,6 +215,7 @@ app.innerHTML = `
             <span id="handleReadout">入点 -- / 出点 --</span>
           </div>
           <canvas id="waveCanvas" width="1200" height="260"></canvas>
+          <div id="cueEditor" class="cue-editor"></div>
         </section>
 
         <div class="table-wrap">
@@ -246,6 +259,7 @@ const els = {
   phraseBarsValue: document.querySelector("#phraseBarsValue"),
   targetLufs: document.querySelector("#targetLufs"),
   targetLufsValue: document.querySelector("#targetLufsValue"),
+  mixStrategy: document.querySelector("#mixStrategy"),
   filterMode: document.querySelector("#filterMode"),
   exportFormat: document.querySelector("#exportFormat"),
   eqLow: document.querySelector("#eqLow"),
@@ -264,6 +278,7 @@ const els = {
   deckMixer: document.querySelector("#deckMixer"),
   jumpToTransition: document.querySelector("#jumpToTransition"),
   waveCanvas: document.querySelector("#waveCanvas"),
+  cueEditor: document.querySelector("#cueEditor"),
   selectedTitle: document.querySelector("#selectedTitle"),
   handleReadout: document.querySelector("#handleReadout"),
   matchFileA: document.querySelector("#matchFileA"),
@@ -316,6 +331,7 @@ function bindEvents() {
   els.loudnessNormalize.addEventListener("change", syncSettings);
   els.phraseBars.addEventListener("input", syncSettings);
   els.targetLufs.addEventListener("input", syncSettings);
+  els.mixStrategy.addEventListener("change", syncSettings);
   els.filterMode.addEventListener("change", syncSettings);
   els.exportFormat.addEventListener("change", syncSettings);
   [els.eqLow, els.eqMid, els.eqHigh].forEach((input) => input.addEventListener("input", syncSettings));
@@ -346,6 +362,8 @@ function bindEvents() {
 
   els.waveCanvas.addEventListener("pointerdown", wavePointerDown);
   els.waveCanvas.addEventListener("pointermove", wavePointerMove);
+  els.cueEditor.addEventListener("input", updateCueEditor);
+  els.cueEditor.addEventListener("click", cueEditorClick);
   els.deckMixer.addEventListener("input", updateDeckMixer);
   els.deckMixer.addEventListener("click", deckMixerClick);
   els.mixTimeline.addEventListener("click", seekTimelineClick);
@@ -363,6 +381,7 @@ function syncSettings() {
   state.settings.loudnessNormalize = els.loudnessNormalize.checked;
   state.settings.phraseBars = Number(els.phraseBars.value);
   state.settings.targetLufs = Number(els.targetLufs.value);
+  state.settings.mixStrategy = els.mixStrategy.value;
   state.settings.equalPowerFade = els.aiPrecision.checked;
   state.settings.filterMode = els.filterMode.value;
   state.settings.exportFormat = els.exportFormat.value;
@@ -1023,11 +1042,15 @@ function automateDynamicEq(track, item, low, mid, high, startsAt, mixOffset, end
   const baseLow = mixer.eq.low * 12 + state.settings.eq.low * 6;
   const baseMid = mixer.eq.mid * 12 + state.settings.eq.mid * 5;
   const baseHigh = mixer.eq.high * 12 + state.settings.eq.high * 6;
+  const strategy = item.transitionIn
+    ? resolveMixStrategy(item.transitionIn.prevTrack, item.track)
+    : resolveMixStrategy(item.track, item.transitionOut?.nextTrack);
+  const curves = strategyEqCurves(strategy);
 
   if (item.fadeIn > 0) {
-    low.gain.setValueAtTime(baseLow - 2, startsAt);
-    mid.gain.setValueAtTime(baseMid - 9, startsAt);
-    high.gain.setValueAtTime(baseHigh - 5, startsAt);
+    low.gain.setValueAtTime(baseLow + curves.inLow, startsAt);
+    mid.gain.setValueAtTime(baseMid + curves.inMid, startsAt);
+    high.gain.setValueAtTime(baseHigh + curves.inHigh, startsAt);
     low.gain.linearRampToValueAtTime(baseLow, startsAt + item.fadeIn * 0.45);
     mid.gain.linearRampToValueAtTime(baseMid, startsAt + item.fadeIn);
     high.gain.linearRampToValueAtTime(baseHigh, startsAt + item.fadeIn * 0.8);
@@ -1039,10 +1062,51 @@ function automateDynamicEq(track, item, low, mid, high, startsAt, mixOffset, end
     low.gain.setValueAtTime(baseLow, fadeOutStart);
     mid.gain.setValueAtTime(baseMid, fadeOutStart);
     high.gain.setValueAtTime(baseHigh, fadeOutStart);
-    low.gain.linearRampToValueAtTime(baseLow - 12, fadeOutEnd);
-    mid.gain.linearRampToValueAtTime(baseMid - 5, fadeOutEnd);
-    high.gain.linearRampToValueAtTime(baseHigh - 2, fadeOutEnd);
+    low.gain.linearRampToValueAtTime(baseLow + curves.outLow, fadeOutEnd);
+    mid.gain.linearRampToValueAtTime(baseMid + curves.outMid, fadeOutEnd);
+    high.gain.linearRampToValueAtTime(baseHigh + curves.outHigh, fadeOutEnd);
   }
+}
+
+function resolveMixStrategy(prevTrack, nextTrack) {
+  const selected = state.settings.mixStrategy || "auto";
+  if (selected !== "auto") return selected;
+  const prevVocal = prevTrack?.transition_candidates?.outro_vocal_density || 0;
+  const nextVocal = nextTrack?.transition_candidates?.intro_vocal_density || 0;
+  const bpmDelta = Math.abs((prevTrack?.bpm || 0) - (nextTrack?.bpm || 0));
+  const energyLift = (nextTrack?.energy || 0) - (prevTrack?.energy || 0);
+  if (prevVocal > 0.55 || nextVocal > 0.55) return "vocalSafe";
+  if (bpmDelta <= 4 && energyLift > 0.08) return "bassSwap";
+  if (bpmDelta > 12) return "smooth";
+  return "bassSwap";
+}
+
+function strategyEqCurves(strategy) {
+  return {
+    vocalSafe: { inLow: -4, inMid: -12, inHigh: -6, outLow: -8, outMid: -3, outHigh: -1 },
+    bassSwap: { inLow: -1, inMid: -8, inHigh: -4, outLow: -14, outMid: -5, outHigh: -2 },
+    smooth: { inLow: -5, inMid: -7, inHigh: -7, outLow: -8, outMid: -7, outHigh: -4 },
+    quickCut: { inLow: 0, inMid: -4, inHigh: -2, outLow: -16, outMid: -8, outHigh: -6 },
+  }[strategy] || { inLow: -2, inMid: -9, inHigh: -5, outLow: -12, outMid: -5, outHigh: -2 };
+}
+
+function strategyLabel(strategy) {
+  return {
+    auto: "AI 自动判断",
+    vocalSafe: "保留人声清晰",
+    bassSwap: "低频交换切入",
+    smooth: "平滑氛围过渡",
+    quickCut: "快速切歌",
+  }[strategy] || "AI 自动判断";
+}
+
+function strategyActions(strategy) {
+  return {
+    vocalSafe: ["压低新歌中频，等上一首人声离开", "低频轻推，避免主唱和旋律打架"],
+    bassSwap: ["旧歌低频快速下潜", "新歌鼓和贝斯提前建立"],
+    smooth: ["等功率慢淡化", "中高频缓慢进入，减少突兀切换"],
+    quickCut: ["缩短重叠感", "更像 DJ 的快速换歌点"],
+  }[strategy] || ["根据人声密度、能量和 BPM 自动选择 EQ 曲线"];
 }
 
 function stopPreview(options = {}) {
@@ -1219,6 +1283,7 @@ function applySettingsToControls() {
   els.loudnessNormalize.checked = state.settings.loudnessNormalize;
   els.phraseBars.value = state.settings.phraseBars;
   els.targetLufs.value = state.settings.targetLufs;
+  els.mixStrategy.value = state.settings.mixStrategy || "auto";
   els.filterMode.value = state.settings.filterMode;
   els.exportFormat.value = state.settings.exportFormat;
   els.eqLow.value = state.settings.eq.low;
@@ -1250,6 +1315,8 @@ function buildTimeline(tracks = playableTracks()) {
     const previous = tracks[index - 1];
     const previousItem = items[index - 1];
     const plan = planClientTransition(previous, track);
+    plan.prevTrack = previous;
+    plan.nextTrack = track;
     previousItem.fadeOut = plan.seconds;
     previousItem.fadeOutStart = previousItem.start + Math.max(0, plan.prevOverlapStart - previousItem.sourceStart);
     previousItem.end = Math.min(previousItem.end, previousItem.fadeOutStart + plan.seconds);
@@ -1549,7 +1616,25 @@ function renderDeckMixer() {
     els.deckMixer.innerHTML = `<div class="deck-empty">需要至少两首已分析曲目。时间线出现重叠后，这里会显示两台 Deck 的独立音量和 EQ。</div>`;
     return;
   }
-  els.deckMixer.innerHTML = [renderDeck("A", transition.prev), renderDeck("B", transition.next)].join("");
+  const strategy = resolveMixStrategy(transition.prev.track, transition.next.track);
+  els.deckMixer.innerHTML = `
+    <div class="transition-explain">
+      <div>
+        <span class="tiny-label">AI Mix Decision</span>
+        <strong>${escapeHtml(strategyLabel(strategy))}</strong>
+      </div>
+      <div class="decision-list">
+        ${strategyActions(strategy).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+      </div>
+      <div class="decision-metrics">
+        <span>Overlap ${formatTime(transition.plan?.seconds || transition.next.fadeIn)}</span>
+        <span>A OUT ${formatTime(transition.prev.track.outroPoint)}</span>
+        <span>B IN ${formatTime(transition.next.track.introPoint)}</span>
+        <span>Confidence ${Math.round((transition.plan?.confidence || 0) * 100)}%</span>
+      </div>
+    </div>
+    ${[renderDeck("A", transition.prev), renderDeck("B", transition.next)].join("")}
+  `;
 }
 
 function renderDeck(label, item) {
@@ -1615,11 +1700,13 @@ function drawWaveform() {
   if (!track) {
     els.selectedTitle.textContent = "未选择曲目";
     els.handleReadout.textContent = "入点 -- / 出点 --";
+    els.cueEditor.innerHTML = "";
     drawEmptyWave(ctx, width, height);
     return;
   }
   els.selectedTitle.textContent = track.name;
   els.handleReadout.textContent = `入点 ${formatTime(track.introPoint)} / 出点 ${formatTime(track.outroPoint)}`;
+  renderCueEditor(track);
 
   const peaks = track.peaks || [];
   const center = height / 2;
@@ -1643,6 +1730,54 @@ function drawWaveform() {
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.fillRect(x - 1, 0, 2, height);
   }
+}
+
+function renderCueEditor(track) {
+  const candidate = track.transition_candidates || {};
+  els.cueEditor.innerHTML = `
+    <label>
+      <span>入点 IN</span>
+      <input type="number" min="0" max="${Math.floor(track.duration)}" step="0.1" value="${roundOne(track.introPoint)}" data-cue="intro" />
+    </label>
+    <label>
+      <span>出点 OUT</span>
+      <input type="number" min="0" max="${Math.floor(track.duration)}" step="0.1" value="${roundOne(track.outroPoint)}" data-cue="outro" />
+    </label>
+    <button type="button" data-cue-action="reset">恢复 AI 切点</button>
+    <div class="cue-ai">
+      <span>AI: ${escapeHtml(candidate.method || "manual")}</span>
+      <span>Vocal IN ${formatDensity(candidate.intro_vocal_density)} / OUT ${formatDensity(candidate.outro_vocal_density)}</span>
+      <span>Beat ${Math.round((track.beat_confidence || 0) * 100)}%</span>
+    </div>
+  `;
+}
+
+function updateCueEditor(event) {
+  const input = event.target.closest("input[data-cue]");
+  const track = selectedTrack();
+  if (!input || !track) return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value)) return;
+  if (input.dataset.cue === "intro") track.introPoint = clamp(value, 0, Math.max(0, track.outroPoint - 0.5));
+  if (input.dataset.cue === "outro") track.outroPoint = clamp(value, Math.min(track.duration - 0.5, track.introPoint + 0.5), track.duration);
+  render();
+}
+
+function cueEditorClick(event) {
+  const button = event.target.closest("button[data-cue-action='reset']");
+  const track = selectedTrack();
+  if (!button || !track?.transition_candidates) return;
+  track.introPoint = clamp(track.transition_candidates.intro ?? track.introPoint, 0, Math.max(0, track.outroPoint - 0.5));
+  track.outroPoint = clamp(track.transition_candidates.outro ?? track.outroPoint, Math.min(track.duration - 0.5, track.introPoint + 0.5), track.duration);
+  render();
+}
+
+function formatDensity(value) {
+  return Number.isFinite(value) ? `${Math.round(value * 100)}%` : "--";
+}
+
+function roundOne(value) {
+  return Math.round((value || 0) * 10) / 10;
 }
 
 function drawEmptyWave(ctx, width, height) {

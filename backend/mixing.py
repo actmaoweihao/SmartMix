@@ -136,7 +136,8 @@ def _crossfade(buffers: list[np.ndarray], tracks: list[dict], settings: dict) ->
         tail = incoming[:, next_overlap_start + samples :]
 
         if ai_precision or filter_mode == "dynamicEq":
-            overlap = _dynamic_eq_overlap(outgoing_tail, incoming_head)
+            strategy = _resolve_mix_strategy(settings, prev_track, next_track)
+            overlap = _dynamic_eq_overlap(outgoing_tail, incoming_head, strategy)
         else:
             if filter_mode == "lowpassSweep":
                 outgoing_tail = _sos_filter(outgoing_tail, "lowpass", 1800)
@@ -160,7 +161,7 @@ def _fade_curves(samples: int, equal_power: bool) -> tuple[np.ndarray, np.ndarra
     return (1 - x).astype(np.float32), x.astype(np.float32)
 
 
-def _dynamic_eq_overlap(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
+def _dynamic_eq_overlap(outgoing: np.ndarray, incoming: np.ndarray, strategy: str = "bassSwap") -> np.ndarray:
     samples = outgoing.shape[1]
     fade_out, fade_in = _fade_curves(samples, equal_power=True)
     x = np.linspace(0, 1, samples, dtype=np.float32)
@@ -172,24 +173,74 @@ def _dynamic_eq_overlap(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarra
     prev_mid = outgoing - prev_low - prev_high
     next_mid = incoming - next_low - next_high
 
-    # DJ-style frequency avoidance: let the incoming kick/bass establish early,
-    # while vocals/synths enter more slowly to reduce masking.
-    prev_low_curve = np.power(1 - x, 2.2)
-    next_low_curve = np.sqrt(x)
-    prev_mid_curve = fade_out
-    next_mid_curve = np.power(x, 1.35)
-    prev_high_curve = np.power(1 - x, 0.85)
-    next_high_curve = np.power(x, 1.15)
+    curves = _strategy_curves(strategy, x, fade_out, fade_in)
 
     overlap = (
-        prev_low * prev_low_curve
-        + next_low * next_low_curve
-        + prev_mid * prev_mid_curve
-        + next_mid * next_mid_curve
-        + prev_high * prev_high_curve
-        + next_high * next_high_curve
+        prev_low * curves["prev_low"]
+        + next_low * curves["next_low"]
+        + prev_mid * curves["prev_mid"]
+        + next_mid * curves["next_mid"]
+        + prev_high * curves["prev_high"]
+        + next_high * curves["next_high"]
     )
     return np.clip(overlap, -1, 1).astype(np.float32)
+
+
+def _resolve_mix_strategy(settings: dict, prev_track: dict, next_track: dict) -> str:
+    selected = settings.get("mixStrategy") or "auto"
+    if selected != "auto":
+        return selected
+    prev_candidates = prev_track.get("transition_candidates") or {}
+    next_candidates = next_track.get("transition_candidates") or {}
+    prev_vocal = float(prev_candidates.get("outro_vocal_density") or 0)
+    next_vocal = float(next_candidates.get("intro_vocal_density") or 0)
+    bpm_delta = abs(float(prev_track.get("bpm") or 0) - float(next_track.get("bpm") or 0))
+    energy_lift = float(next_track.get("energy") or 0) - float(prev_track.get("energy") or 0)
+    if prev_vocal > 0.55 or next_vocal > 0.55:
+        return "vocalSafe"
+    if bpm_delta <= 4 and energy_lift > 0.08:
+        return "bassSwap"
+    if bpm_delta > 12:
+        return "smooth"
+    return "bassSwap"
+
+
+def _strategy_curves(strategy: str, x: np.ndarray, fade_out: np.ndarray, fade_in: np.ndarray) -> dict[str, np.ndarray]:
+    if strategy == "vocalSafe":
+        return {
+            "prev_low": np.power(1 - x, 1.8),
+            "next_low": np.power(x, 0.75),
+            "prev_mid": np.power(1 - x, 0.75),
+            "next_mid": np.power(x, 1.9),
+            "prev_high": np.power(1 - x, 0.85),
+            "next_high": np.power(x, 1.45),
+        }
+    if strategy == "smooth":
+        return {
+            "prev_low": fade_out,
+            "next_low": fade_in * 0.9,
+            "prev_mid": fade_out,
+            "next_mid": np.power(x, 1.25),
+            "prev_high": fade_out,
+            "next_high": np.power(x, 1.25),
+        }
+    if strategy == "quickCut":
+        return {
+            "prev_low": np.power(1 - x, 3.0),
+            "next_low": np.power(x, 0.45),
+            "prev_mid": np.power(1 - x, 2.0),
+            "next_mid": np.power(x, 0.75),
+            "prev_high": np.power(1 - x, 1.6),
+            "next_high": np.power(x, 0.8),
+        }
+    return {
+        "prev_low": np.power(1 - x, 2.2),
+        "next_low": np.sqrt(x),
+        "prev_mid": fade_out,
+        "next_mid": np.power(x, 1.35),
+        "prev_high": np.power(1 - x, 0.85),
+        "next_high": np.power(x, 1.15),
+    }
 
 
 def _convert_to_mp3(wav_path: Path) -> Path:

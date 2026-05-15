@@ -7,7 +7,7 @@ import numpy as np
 
 from backend.loudness import loudness_metrics, normalize_loudness
 from backend.analysis import _transition_candidates
-from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade
+from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade, _resolve_mix_strategy
 from backend.transition import plan_transition
 
 
@@ -119,6 +119,15 @@ class CrossfadePlanTests(unittest.TestCase):
         mixed = _apply_track_mixer(buffer, {"mixer": {"gain": 0.5, "eq": {"low": 0, "mid": 0, "high": 0}}})
 
         self.assertTrue(np.allclose(mixed, 0.25))
+
+    def test_auto_mix_strategy_prefers_vocal_safe_for_dense_vocals(self) -> None:
+        strategy = _resolve_mix_strategy(
+            {"mixStrategy": "auto"},
+            {"bpm": 120, "energy": 0.5, "transition_candidates": {"outro_vocal_density": 0.8}},
+            {"bpm": 121, "energy": 0.55, "transition_candidates": {"intro_vocal_density": 0.2}},
+        )
+
+        self.assertEqual(strategy, "vocalSafe")
 
 
 if __name__ == "__main__":
