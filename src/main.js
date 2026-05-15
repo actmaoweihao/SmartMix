@@ -1,4 +1,6 @@
 import "./styles.css";
+import { explainTransition } from "./explain/explainTransition";
+import { recommendNextTracks, recommendTransition } from "./transitions/recommend";
 
 const API_HOST = window.location.hostname || "127.0.0.1";
 const API_PROTOCOL = window.location.protocol === "https:" ? "https:" : "http:";
@@ -18,6 +20,12 @@ const state = {
   isPlaying: false,
   isExporting: false,
   projects: [],
+  teaching: {
+    open: false,
+    targetEnergy: "keep",
+    beginnerMode: true,
+    maxComplexity: 3,
+  },
   match: {
     fileA: null,
     fileB: null,
@@ -61,6 +69,7 @@ app.innerHTML = `
           <input id="fileInput" type="file" accept="audio/*" multiple />
         </label>
         <button id="refreshProjects" class="ghost" type="button">刷新项目</button>
+        <button id="teachingToggle" class="ghost" type="button">教学入口</button>
       </div>
     </header>
 
@@ -179,6 +188,36 @@ app.innerHTML = `
           <div id="matchResult" class="match-result">上传任意两首歌，系统会用 Camelot、BPM、能量和结构可过渡性计算匹配分。</div>
         </section>
 
+        <section id="teachingPanel" class="teaching-panel" aria-label="DJ 接歌教学" hidden>
+          <div class="teaching-head">
+            <div>
+              <span class="tiny-label">DJ Lesson</span>
+              <strong>下一首怎么接</strong>
+            </div>
+            <div class="teaching-controls">
+              <label>
+                <span>目标能量</span>
+                <select id="teachingEnergy">
+                  <option value="keep">保持</option>
+                  <option value="up">上扬</option>
+                  <option value="down">回落</option>
+                </select>
+              </label>
+              <label class="mini-toggle"><input id="teachingBeginner" type="checkbox" checked /><span>新手模式</span></label>
+              <label>
+                <span>难度</span>
+                <select id="teachingComplexity">
+                  <option value="2">1-2</option>
+                  <option value="3" selected>1-3</option>
+                  <option value="4">1-4</option>
+                  <option value="5">全部</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="teachingContent" class="teaching-content"></div>
+        </section>
+
         <section class="transport">
           <button id="restartButton" type="button" class="iconish">从头播放</button>
           <input id="mixProgress" type="range" min="0" max="0" value="0" step="0.01" />
@@ -291,6 +330,12 @@ const els = {
   projectList: document.querySelector("#projectList"),
   loadProject: document.querySelector("#loadProject"),
   refreshProjects: document.querySelector("#refreshProjects"),
+  teachingToggle: document.querySelector("#teachingToggle"),
+  teachingPanel: document.querySelector("#teachingPanel"),
+  teachingContent: document.querySelector("#teachingContent"),
+  teachingEnergy: document.querySelector("#teachingEnergy"),
+  teachingBeginner: document.querySelector("#teachingBeginner"),
+  teachingComplexity: document.querySelector("#teachingComplexity"),
 };
 
 const wave = {
@@ -314,6 +359,11 @@ function bindEvents() {
   els.saveProject.addEventListener("click", saveProject);
   els.loadProject.addEventListener("click", loadSelectedProject);
   els.refreshProjects.addEventListener("click", loadProjectList);
+  els.teachingToggle.addEventListener("click", toggleTeachingPanel);
+  els.teachingEnergy.addEventListener("change", syncTeachingSettings);
+  els.teachingBeginner.addEventListener("change", syncTeachingSettings);
+  els.teachingComplexity.addEventListener("change", syncTeachingSettings);
+  els.teachingContent.addEventListener("click", teachingPanelClick);
   els.matchFileA.addEventListener("change", () => {
     state.match.fileA = els.matchFileA.files?.[0] || null;
     renderMatchResult();
@@ -1408,6 +1458,9 @@ function applySettingsToControls() {
   els.targetLufs.value = state.settings.targetLufs;
   els.mixStrategy.value = state.settings.mixStrategy || "auto";
   els.filterMode.value = state.settings.filterMode;
+  els.teachingEnergy.value = state.teaching.targetEnergy;
+  els.teachingBeginner.checked = state.teaching.beginnerMode;
+  els.teachingComplexity.value = String(state.teaching.maxComplexity);
   els.exportFormat.value = state.settings.exportFormat;
   els.eqLow.value = state.settings.eq.low;
   els.eqMid.value = state.settings.eq.mid;
@@ -1588,6 +1641,70 @@ function selectTrack(localId) {
   render();
 }
 
+function toggleTeachingPanel() {
+  state.teaching.open = !state.teaching.open;
+  if (state.teaching.open && !selectedTrack()) state.selectedId = playableTracks()[0]?.localId || state.selectedId;
+  render();
+}
+
+function syncTeachingSettings() {
+  state.teaching.targetEnergy = els.teachingEnergy.value;
+  state.teaching.beginnerMode = els.teachingBeginner.checked;
+  state.teaching.maxComplexity = Number(els.teachingComplexity.value) || 3;
+  renderTeachingPanel();
+}
+
+function teachingPanelClick(event) {
+  const button = event.target.closest("[data-teaching-apply]");
+  if (!button) return;
+  applyTeachingRecommendation(button.dataset.teachingApply);
+}
+
+function applyTeachingRecommendation(nextId) {
+  const current = selectedTrack()?.status === "ready" ? selectedTrack() : playableTracks()[0];
+  const next = state.tracks.find((track) => track.localId === nextId);
+  if (!current || !next || current.localId === next.localId) return;
+  const rec = recommendTransition(toTeachingAnalysis(current), toTeachingAnalysis(next), {
+    targetEnergy: state.teaching.targetEnergy,
+    beginnerMode: state.teaching.beginnerMode,
+    maxComplexity: state.teaching.maxComplexity,
+  })[0];
+
+  current.outroPoint = clamp(rec.outgoingCue.time, 0.5, Math.max(0.5, current.duration - 0.25));
+  next.introPoint = clamp(rec.incomingCue.time, 0, Math.max(0, next.duration - 0.25));
+  applyRecommendedMixSettings(rec);
+
+  const currentIndex = state.tracks.findIndex((track) => track.localId === current.localId);
+  const nextIndex = state.tracks.findIndex((track) => track.localId === next.localId);
+  if (currentIndex >= 0 && nextIndex >= 0 && nextIndex !== currentIndex + 1) {
+    const [picked] = state.tracks.splice(nextIndex, 1);
+    const insertAt = state.tracks.findIndex((track) => track.localId === current.localId) + 1;
+    state.tracks.splice(insertAt, 0, picked);
+  }
+  state.selectedId = current.localId;
+  setStatus(`已应用教学接法：${methodLabel(rec.method)}`);
+  applySettingsToControls();
+  render();
+}
+
+function applyRecommendedMixSettings(rec) {
+  state.settings.crossfade = clamp(Math.round(rec.overlapDuration || 2), 2, 24);
+  if (rec.method === "beatmix" || rec.method === "bass_swap") {
+    state.settings.mixStrategy = "bassSwap";
+    state.settings.filterMode = "dynamicEq";
+  } else if (rec.method === "quick_cut") {
+    state.settings.mixStrategy = "quickCut";
+    state.settings.filterMode = "dynamicEq";
+    state.settings.crossfade = 2;
+  } else if (rec.method === "echo_out" || rec.method === "breakdown_switch") {
+    state.settings.mixStrategy = "smooth";
+    state.settings.filterMode = "highpassLift";
+  } else {
+    state.settings.mixStrategy = "smooth";
+    state.settings.filterMode = "dynamicEq";
+  }
+}
+
 function wavePointerDown(event) {
   const track = selectedTrack();
   if (!track?.duration) return;
@@ -1627,6 +1744,7 @@ function render() {
   renderMixTimeline();
   renderDeckMixer();
   renderMatchResult();
+  renderTeachingPanel();
   drawWaveform();
 }
 
@@ -1788,6 +1906,89 @@ function renderDeck(label, item) {
   `;
 }
 
+function renderTeachingPanel() {
+  els.teachingPanel.hidden = !state.teaching.open;
+  els.teachingToggle.classList.toggle("active", state.teaching.open);
+  if (!state.teaching.open) return;
+  const tracks = playableTracks();
+  const current = selectedTrack()?.status === "ready" ? selectedTrack() : tracks[0];
+  if (tracks.length < 2 || !current) {
+    els.teachingContent.innerHTML = `
+      <div class="teaching-empty">
+        <strong>上传并分析至少两首歌</strong>
+        <span>教学入口会基于当前选中的 A 歌，推荐最适合接进来的 B 歌和具体操作。</span>
+      </div>
+    `;
+    return;
+  }
+
+  const currentAnalysis = toTeachingAnalysis(current);
+  const candidateAnalyses = tracks.filter((track) => track.localId !== current.localId).map(toTeachingAnalysis);
+  const recommendations = recommendNextTracks(currentAnalysis, candidateAnalyses, {
+    targetEnergy: state.teaching.targetEnergy,
+    beginnerMode: state.teaching.beginnerMode,
+    maxResults: 4,
+  });
+
+  els.teachingContent.innerHTML = `
+    <div class="teaching-current">
+      <div>
+        <span class="tiny-label">Current Deck A</span>
+        <strong>${escapeHtml(current.name)}</strong>
+      </div>
+      <div class="teaching-current-meta">
+        <span>${current.bpm || "--"} BPM</span>
+        <span>${escapeHtml(current.camelot || current.key || "--")}</span>
+        <span>OUT ${formatTime(current.outroPoint)}</span>
+      </div>
+    </div>
+    <div class="teaching-grid">
+      ${recommendations.map((item, index) => renderTeachingCard(item, index)).join("")}
+    </div>
+  `;
+}
+
+function renderTeachingCard(item, index) {
+  const target = state.tracks.find((track) => track.localId === item.track.id);
+  const rec = item.bestTransition;
+  const explanation = explainTransition(rec);
+  return `
+    <article class="teaching-card">
+      <div class="teaching-card-head">
+        <div>
+          <span class="tiny-label">Recommendation ${index + 1}</span>
+          <strong>${escapeHtml(methodLabel(rec.method))}</strong>
+        </div>
+        <b>${Math.round(item.totalScore * 100)}</b>
+      </div>
+      <div class="teaching-pair">
+        <span>A OUT ${formatTime(rec.outgoingCue.time)}</span>
+        <span>B IN ${formatTime(rec.incomingCue.time)}</span>
+        <span>Overlap ${formatTime(rec.overlapDuration)}</span>
+        <span>难度 ${rec.difficulty}/5</span>
+      </div>
+      <h3 title="${escapeHtml(target?.name || item.track.title)}">${escapeHtml(target?.name || item.track.title)}</h3>
+      <p class="teaching-reason">${escapeHtml(explanation)}</p>
+      <div class="teaching-steps">
+        ${rec.stepByStep.slice(0, 5).map(renderTeachingStep).join("")}
+      </div>
+      <div class="teaching-risk">${escapeHtml(riskLine(rec.method))}</div>
+      <button type="button" data-teaching-apply="${escapeHtml(item.track.id)}">使用这个接法</button>
+    </article>
+  `;
+}
+
+function renderTeachingStep(step) {
+  return `
+    <div class="teaching-step">
+      <span>${step.targetDeck}</span>
+      <strong>${escapeHtml(actionLabel(step.action))}</strong>
+      <small>${step.atBeatOffset >= 0 ? "+" : ""}${step.atBeatOffset} beat · ${formatSignedTime(step.atTimeOffset)}</small>
+      <p>${escapeHtml(step.explanation)}</p>
+    </div>
+  `;
+}
+
 function renderMixerSlider(trackId, param, label, value, min, max, step, readout) {
   return `
     <label class="deck-slider">
@@ -1896,12 +2097,157 @@ function cueEditorClick(event) {
   render();
 }
 
+function toTeachingAnalysis(track) {
+  const bpm = Number(track.bpm) || 120;
+  return {
+    id: track.localId,
+    title: track.name,
+    duration: track.duration || 0,
+    bpm,
+    key: track.key || "unknown",
+    camelotKey: track.camelot || undefined,
+    energyCurve: teachingEnergyCurve(track),
+    sections: teachingSections(track, bpm),
+    beatGrid: teachingBeatGrid(track, bpm),
+    vocalDensityCurve: teachingVocalCurve(track),
+  };
+}
+
+function teachingBeatGrid(track, bpm) {
+  if (track.beats?.length) {
+    return track.beats.map((time, beatIndex) => {
+      const barIndex = Math.floor(beatIndex / 4);
+      return {
+        time,
+        beatIndex,
+        barIndex,
+        phraseIndex: Math.floor(barIndex / 8),
+      };
+    });
+  }
+  const beatSeconds = 60 / Math.max(1, bpm);
+  const total = Math.max(1, Math.floor((track.duration || 0) / beatSeconds));
+  return Array.from({ length: total }, (_, beatIndex) => {
+    const barIndex = Math.floor(beatIndex / 4);
+    return {
+      time: beatIndex * beatSeconds,
+      beatIndex,
+      barIndex,
+      phraseIndex: Math.floor(barIndex / 8),
+    };
+  });
+}
+
+function teachingSections(track, bpm) {
+  const duration = Math.max(track.duration || 0, 1);
+  const introEnd = clamp(track.introPoint || track.transition_candidates?.intro || duration * 0.12, 2, duration * 0.35);
+  const outroStart = clamp(track.outroPoint || track.transition_candidates?.outro || duration * 0.82, duration * 0.55, duration - 1);
+  const points = [
+    ["intro", 0, introEnd, 0.86],
+    ["verse", introEnd, duration * 0.38, 0.58],
+    ["chorus", duration * 0.38, duration * 0.58, 0.76],
+    ["bridge", duration * 0.58, duration * 0.68, 0.56],
+    ["breakdown", duration * 0.68, Math.min(duration * 0.78, outroStart), 0.64],
+    ["drop", Math.min(duration * 0.78, outroStart), outroStart, 0.68],
+    ["outro", outroStart, duration, 0.82],
+  ];
+  const beatSeconds = 60 / Math.max(1, bpm);
+  return points
+    .map(([type, start, end, confidence]) => ({
+      type,
+      startTime: clamp(Number(start), 0, duration),
+      endTime: clamp(Number(end), 0, duration),
+      startBeat: Math.round(Number(start) / beatSeconds),
+      endBeat: Math.round(Number(end) / beatSeconds),
+      confidence: Number(confidence),
+    }))
+    .filter((section) => section.endTime - section.startTime >= 0.5);
+}
+
+function teachingEnergyCurve(track) {
+  const duration = Math.max(track.duration || 0, 1);
+  const base = Number(track.energy) || 0.5;
+  const intro = track.transition_candidates?.intro_energy ?? track.energy_profile?.intro_relative_energy ?? base * 0.75;
+  const outro = track.transition_candidates?.outro_energy ?? track.energy_profile?.outro_relative_energy ?? base * 0.65;
+  return [
+    { time: 0, energy: clamp(intro, 0, 1) },
+    { time: duration * 0.25, energy: clamp(base * 0.9, 0, 1) },
+    { time: duration * 0.5, energy: clamp(Math.max(base, 0.55), 0, 1) },
+    { time: duration * 0.72, energy: clamp(base * 1.05, 0, 1) },
+    { time: duration, energy: clamp(outro, 0, 1) },
+  ];
+}
+
+function teachingVocalCurve(track) {
+  const duration = Math.max(track.duration || 0, 1);
+  const intro = track.transition_candidates?.intro_vocal_density;
+  const outro = track.transition_candidates?.outro_vocal_density;
+  const fallback = Number.isFinite(intro) || Number.isFinite(outro) ? 0.35 : 0.2;
+  return [
+    { time: 0, density: Number.isFinite(intro) ? intro : fallback * 0.55 },
+    { time: duration * 0.28, density: Math.max(fallback, 0.55) },
+    { time: duration * 0.48, density: Math.max(fallback, 0.62) },
+    { time: duration * 0.7, density: fallback },
+    { time: duration, density: Number.isFinite(outro) ? outro : fallback * 0.5 },
+  ];
+}
+
 function formatDensity(value) {
   return Number.isFinite(value) ? `${Math.round(value * 100)}%` : "--";
 }
 
 function roundOne(value) {
   return Math.round((value || 0) * 10) / 10;
+}
+
+function methodLabel(method) {
+  return {
+    fade: "渐隐",
+    end_to_end: "首尾切换",
+    quick_cut: "快切",
+    beatmix: "对拍混音",
+    bass_swap: "低频替换",
+    echo_out: "回声退出",
+    filter_sweep: "滤波扫频",
+    breakdown_switch: "空拍切换",
+    wide_bpm_loop: "大 BPM 差 Loop",
+    loop_build: "Loop Build",
+    instrumental_bridge: "伴奏过桥",
+    acapella_mashup: "清唱叠加",
+  }[method] || method;
+}
+
+function actionLabel(action) {
+  return {
+    press_play: "按播放",
+    set_cue: "设 Cue",
+    start_loop: "开 Loop",
+    halve_loop: "Loop 减半",
+    increase_filter: "加滤波",
+    decrease_filter: "收滤波",
+    filter_sweep: "扫滤波",
+    enable_echo: "开 Echo",
+    disable_echo: "关 Echo",
+    fade_out: "淡出",
+    fade_in: "淡入",
+    eq_low_cut: "切低频",
+    eq_low_swap: "换低频",
+    crossfader_move: "推横推",
+    stop_track: "停 A 歌",
+  }[action] || action;
+}
+
+function riskLine(method) {
+  if (method === "beatmix" || method === "bass_swap") return "容易翻车：两个底鼓同时打开。先关 B 低频，到乐句边界再交换。";
+  if (method === "quick_cut") return "容易翻车：不在第一拍切。数完当前乐句，在强拍瞬间切过去。";
+  if (method === "echo_out") return "容易翻车：Echo 盖住新歌。B 歌进来后要马上收掉 A。";
+  if (method === "wide_bpm_loop") return "容易翻车：loop 到人声。只在无人声鼓组上做循环。";
+  return "容易翻车：两首歌主唱叠唱。听到人声打架就缩短重叠。";
+}
+
+function formatSignedTime(seconds) {
+  const sign = seconds >= 0 ? "+" : "-";
+  return `${sign}${formatTime(Math.abs(seconds))}`;
 }
 
 function drawEmptyWave(ctx, width, height) {
