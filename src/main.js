@@ -41,6 +41,11 @@ const state = {
   },
 };
 
+const DEFAULT_TRACK_MIXER = Object.freeze({
+  gain: 1,
+  eq: { low: 0, mid: 0, high: 0 },
+});
+
 const app = document.querySelector("#app");
 app.innerHTML = `
   <main class="app-shell">
@@ -167,6 +172,28 @@ app.innerHTML = `
           <time id="playTime">00:00 / 00:00</time>
         </section>
 
+        <section class="mix-map" aria-label="混音时间线">
+          <div class="mix-map-head">
+            <div>
+              <span class="tiny-label">Mix Timeline</span>
+              <strong>重叠过渡时间线</strong>
+            </div>
+            <span id="transitionReadout">上传两首以上歌曲后显示过渡</span>
+          </div>
+          <div id="mixTimeline" class="mix-timeline"></div>
+        </section>
+
+        <section class="deck-panel" aria-label="双 Deck 混音控制">
+          <div class="deck-head">
+            <div>
+              <span class="tiny-label">Deck Mixer</span>
+              <strong>当前过渡双 Deck</strong>
+            </div>
+            <button id="jumpToTransition" type="button" class="secondary">跳到过渡</button>
+          </div>
+          <div id="deckMixer" class="deck-grid"></div>
+        </section>
+
         <section class="waveform-panel">
           <div class="wave-head">
             <div>
@@ -232,6 +259,10 @@ const els = {
   downloadLink: document.querySelector("#downloadLink"),
   mixProgress: document.querySelector("#mixProgress"),
   playTime: document.querySelector("#playTime"),
+  mixTimeline: document.querySelector("#mixTimeline"),
+  transitionReadout: document.querySelector("#transitionReadout"),
+  deckMixer: document.querySelector("#deckMixer"),
+  jumpToTransition: document.querySelector("#jumpToTransition"),
   waveCanvas: document.querySelector("#waveCanvas"),
   selectedTitle: document.querySelector("#selectedTitle"),
   handleReadout: document.querySelector("#handleReadout"),
@@ -262,6 +293,7 @@ function bindEvents() {
   els.playButton.addEventListener("click", () => previewMix(state.playbackOffset));
   els.restartButton.addEventListener("click", () => previewMix(0));
   els.stopButton.addEventListener("click", stopPreview);
+  els.jumpToTransition.addEventListener("click", jumpToActiveTransition);
   els.exportButton.addEventListener("click", exportMix);
   els.saveProject.addEventListener("click", saveProject);
   els.loadProject.addEventListener("click", loadSelectedProject);
@@ -314,6 +346,9 @@ function bindEvents() {
 
   els.waveCanvas.addEventListener("pointerdown", wavePointerDown);
   els.waveCanvas.addEventListener("pointermove", wavePointerMove);
+  els.deckMixer.addEventListener("input", updateDeckMixer);
+  els.deckMixer.addEventListener("click", deckMixerClick);
+  els.mixTimeline.addEventListener("click", seekTimelineClick);
   window.addEventListener("pointerup", () => {
     wave.dragging = null;
   });
@@ -370,6 +405,7 @@ async function addFiles(files) {
       outro_low: 0,
       introPoint: 0,
       outroPoint: 0,
+      mixer: cloneDefaultMixer(),
     };
     state.tracks.push(track);
     state.originalOrder.push(track.localId);
@@ -378,6 +414,25 @@ async function addFiles(files) {
     await decodeLocal(track);
     await uploadAndAnalyze(track);
   }
+}
+
+function cloneDefaultMixer() {
+  return {
+    gain: DEFAULT_TRACK_MIXER.gain,
+    eq: { ...DEFAULT_TRACK_MIXER.eq },
+  };
+}
+
+function ensureTrackMixer(track) {
+  track.mixer = {
+    gain: Number.isFinite(track.mixer?.gain) ? track.mixer.gain : DEFAULT_TRACK_MIXER.gain,
+    eq: {
+      low: Number.isFinite(track.mixer?.eq?.low) ? track.mixer.eq.low : DEFAULT_TRACK_MIXER.eq.low,
+      mid: Number.isFinite(track.mixer?.eq?.mid) ? track.mixer.eq.mid : DEFAULT_TRACK_MIXER.eq.mid,
+      high: Number.isFinite(track.mixer?.eq?.high) ? track.mixer.eq.high : DEFAULT_TRACK_MIXER.eq.high,
+    },
+  };
+  return track.mixer;
 }
 
 async function calculatePairMatch() {
@@ -537,6 +592,7 @@ async function uploadAndAnalyze(track) {
     track.peaks = result.peaks?.length ? result.peaks : track.peaks;
     track.introPoint = clamp(track.transition_candidates?.intro ?? track.intro_low ?? track.introPoint, 0.5, Math.max(0.5, track.duration * 0.35));
     track.outroPoint = clamp(track.transition_candidates?.outro ?? (track.duration - (track.outro_low || state.settings.crossfade)), track.duration * 0.55, Math.max(track.duration - 0.5, 0.5));
+    ensureTrackMixer(track);
     setStatus(`完成分析 ${track.name}`);
   } catch (error) {
     applyLocalFallbackAnalysis(track, error);
@@ -614,6 +670,7 @@ function applyLocalFallbackAnalysis(track, error) {
   track.outroPoint = clamp(track.duration - (track.outro_low || state.settings.crossfade), track.duration * 0.55, Math.max(track.duration - 0.5, 0.5));
   track.status = "ready";
   track.error = "";
+  ensureTrackMixer(track);
   setStatus(`已用浏览器本地分析：${track.name}`);
   console.warn("SmartMix backend analysis failed; local fallback was used.", error);
 }
@@ -883,10 +940,10 @@ async function previewMix(offset = 0) {
 function scheduleMix(context, tracks, timeline, offset) {
   const startAt = context.currentTime + 0.08;
   let started = 0;
-  timeline.items.forEach((item, index) => {
+  timeline.items.forEach((item) => {
     if (item.end <= offset) return;
-    const track = tracks[index];
-    const sourceOffset = Math.max(0, offset - item.start);
+    const track = item.track;
+    const sourceOffset = item.sourceStart + Math.max(0, offset - item.start);
     if (sourceOffset >= track.buffer.duration) return;
 
     const source = context.createBufferSource();
@@ -896,11 +953,11 @@ function scheduleMix(context, tracks, timeline, offset) {
     const mid = context.createBiquadFilter();
     const high = context.createBiquadFilter();
     const transitionFilter = context.createBiquadFilter();
-    configureEq(low, mid, high, transitionFilter, context.currentTime);
+    configureEq(track, low, mid, high, transitionFilter, context.currentTime);
     source.connect(low).connect(mid).connect(high).connect(transitionFilter).connect(gain).connect(context.destination);
 
     const localStart = startAt + Math.max(0, item.start - offset);
-    applyPreviewEnvelope(gain.gain, transitionFilter, localStart, track.buffer.duration, item.fadeIn, item.fadeOut, sourceOffset);
+    applyPreviewEnvelope(item, gain.gain, transitionFilter, low, mid, high, localStart, offset, sourceOffset);
     source.start(localStart, sourceOffset);
     source.onended = () => {
       state.activeSources = state.activeSources.filter((itemSource) => itemSource !== source);
@@ -912,45 +969,79 @@ function scheduleMix(context, tracks, timeline, offset) {
   return started > 0;
 }
 
-function configureEq(low, mid, high, transitionFilter, now) {
+function configureEq(track, low, mid, high, transitionFilter, now) {
+  const mixer = ensureTrackMixer(track);
   low.type = "lowshelf";
   low.frequency.value = 220;
-  low.gain.value = state.settings.eq.low * 10;
+  low.gain.value = mixer.eq.low * 12 + state.settings.eq.low * 6;
   mid.type = "peaking";
   mid.frequency.value = 1200;
   mid.Q.value = 0.9;
-  mid.gain.value = state.settings.eq.mid * 9;
+  mid.gain.value = mixer.eq.mid * 12 + state.settings.eq.mid * 5;
   high.type = "highshelf";
   high.frequency.value = 3400;
-  high.gain.value = state.settings.eq.high * 10;
+  high.gain.value = mixer.eq.high * 12 + state.settings.eq.high * 6;
   transitionFilter.type = state.settings.filterMode === "highpassLift" ? "highpass" : "lowpass";
   transitionFilter.frequency.setValueAtTime(state.settings.filterMode === "none" ? 20000 : 16000, now);
 }
 
-function applyPreviewEnvelope(param, filterNode, startsAt, duration, fadeIn, fadeOut, offset) {
-  const endAt = startsAt + Math.max(0, duration - offset);
-  const absolutePosition = offset;
+function applyPreviewEnvelope(item, param, filterNode, low, mid, high, startsAt, mixOffset, sourceOffset) {
+  const track = item.track;
+  const mixer = ensureTrackMixer(track);
+  const endAt = startsAt + Math.max(0, track.buffer.duration - sourceOffset);
+  const elapsed = Math.max(0, mixOffset - item.start);
   param.cancelScheduledValues(startsAt);
-  const inProgressFadeIn = fadeIn > 0 && absolutePosition < fadeIn;
-  param.setValueAtTime(inProgressFadeIn ? absolutePosition / fadeIn : 1, startsAt);
-  if (inProgressFadeIn) param.linearRampToValueAtTime(1, startsAt + (fadeIn - absolutePosition));
+  const inProgressFadeIn = item.fadeIn > 0 && elapsed < item.fadeIn;
+  param.setValueAtTime((inProgressFadeIn ? elapsed / item.fadeIn : 1) * mixer.gain, startsAt);
+  if (inProgressFadeIn) param.linearRampToValueAtTime(mixer.gain, startsAt + (item.fadeIn - elapsed));
 
-  const fadeOutStartOriginal = Math.max(0, duration - fadeOut);
-  const fadeOutStart = startsAt + Math.max(0, fadeOutStartOriginal - offset);
-  if (fadeOut > 0 && endAt > fadeOutStart) {
-    param.setValueAtTime(1, fadeOutStart);
-    param.linearRampToValueAtTime(0, endAt);
+  const fadeOutStart = item.fadeOutStart == null ? null : startsAt + Math.max(0, item.fadeOutStart - mixOffset);
+  const fadeOutEnd = fadeOutStart == null ? null : fadeOutStart + item.fadeOut;
+  if (item.fadeOut > 0 && fadeOutStart != null && fadeOutEnd != null && endAt > fadeOutStart) {
+    param.setValueAtTime(mixer.gain, fadeOutStart);
+    param.linearRampToValueAtTime(0, fadeOutEnd);
     if (state.settings.filterMode === "lowpassSweep") {
       filterNode.type = "lowpass";
       filterNode.frequency.setValueAtTime(16000, fadeOutStart);
-      filterNode.frequency.exponentialRampToValueAtTime(900, endAt);
+      filterNode.frequency.exponentialRampToValueAtTime(900, fadeOutEnd);
     }
   }
 
-  if (state.settings.filterMode === "highpassLift" && fadeIn > 0) {
+  if (state.settings.filterMode === "highpassLift" && item.fadeIn > 0) {
     filterNode.type = "highpass";
     filterNode.frequency.setValueAtTime(700, startsAt);
-    filterNode.frequency.exponentialRampToValueAtTime(35, startsAt + fadeIn);
+    filterNode.frequency.exponentialRampToValueAtTime(35, startsAt + item.fadeIn);
+  }
+
+  if (state.settings.filterMode === "dynamicEq") {
+    automateDynamicEq(track, item, low, mid, high, startsAt, mixOffset, endAt);
+  }
+}
+
+function automateDynamicEq(track, item, low, mid, high, startsAt, mixOffset, endAt) {
+  const mixer = ensureTrackMixer(track);
+  const baseLow = mixer.eq.low * 12 + state.settings.eq.low * 6;
+  const baseMid = mixer.eq.mid * 12 + state.settings.eq.mid * 5;
+  const baseHigh = mixer.eq.high * 12 + state.settings.eq.high * 6;
+
+  if (item.fadeIn > 0) {
+    low.gain.setValueAtTime(baseLow - 2, startsAt);
+    mid.gain.setValueAtTime(baseMid - 9, startsAt);
+    high.gain.setValueAtTime(baseHigh - 5, startsAt);
+    low.gain.linearRampToValueAtTime(baseLow, startsAt + item.fadeIn * 0.45);
+    mid.gain.linearRampToValueAtTime(baseMid, startsAt + item.fadeIn);
+    high.gain.linearRampToValueAtTime(baseHigh, startsAt + item.fadeIn * 0.8);
+  }
+
+  const fadeOutStart = item.fadeOutStart == null ? null : startsAt + Math.max(0, item.fadeOutStart - mixOffset);
+  const fadeOutEnd = fadeOutStart == null ? null : fadeOutStart + item.fadeOut;
+  if (item.fadeOut > 0 && fadeOutStart != null && fadeOutEnd != null && endAt > fadeOutStart) {
+    low.gain.setValueAtTime(baseLow, fadeOutStart);
+    mid.gain.setValueAtTime(baseMid, fadeOutStart);
+    high.gain.setValueAtTime(baseHigh, fadeOutStart);
+    low.gain.linearRampToValueAtTime(baseLow - 12, fadeOutEnd);
+    mid.gain.linearRampToValueAtTime(baseMid - 5, fadeOutEnd);
+    high.gain.linearRampToValueAtTime(baseHigh - 2, fadeOutEnd);
   }
 }
 
@@ -1072,6 +1163,14 @@ async function rehydrateTrack(saved) {
     buffer,
     localId: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
     peaks: saved.peaks?.length ? saved.peaks : peaksFromBuffer(buffer, 900),
+    mixer: {
+      gain: Number.isFinite(saved.mixer?.gain) ? saved.mixer.gain : DEFAULT_TRACK_MIXER.gain,
+      eq: {
+        low: Number.isFinite(saved.mixer?.eq?.low) ? saved.mixer.eq.low : DEFAULT_TRACK_MIXER.eq.low,
+        mid: Number.isFinite(saved.mixer?.eq?.mid) ? saved.mixer.eq.mid : DEFAULT_TRACK_MIXER.eq.mid,
+        high: Number.isFinite(saved.mixer?.eq?.high) ? saved.mixer.eq.high : DEFAULT_TRACK_MIXER.eq.high,
+      },
+    },
     status: "ready",
     error: "",
   };
@@ -1097,9 +1196,15 @@ function exportableTrack(track) {
     outro_low: track.outro_low,
     loudness_lufs: track.loudness_lufs,
     true_peak_db: track.true_peak_db,
-    transition_candidates: track.transition_candidates,
+    transition_candidates: {
+      ...(track.transition_candidates || {}),
+      intro: track.introPoint,
+      outro: track.outroPoint,
+      source: "user-adjusted",
+    },
     introPoint: track.introPoint,
     outroPoint: track.outroPoint,
+    mixer: ensureTrackMixer(track),
     peaks: track.peaks,
     status: track.status,
   };
@@ -1123,38 +1228,84 @@ function applySettingsToControls() {
 
 function buildTimeline(tracks = playableTracks()) {
   const items = [];
-  let cursor = 0;
   tracks.forEach((track, index) => {
-    const fadeIn = index === 0 ? 0 : getTransitionDuration(tracks[index - 1], track);
-    const fadeOut = index < tracks.length - 1 ? getTransitionDuration(track, tracks[index + 1]) : 0;
-    const start = index === 0 ? 0 : cursor - fadeIn;
-    const end = start + track.duration;
-    items.push({ track, start, end, fadeIn, fadeOut });
-    cursor = end;
+    ensureTrackMixer(track);
+    if (index === 0) {
+      items.push({
+        track,
+        index,
+        lane: 0,
+        start: 0,
+        sourceStart: 0,
+        end: track.duration,
+        fadeIn: 0,
+        fadeOut: 0,
+        fadeOutStart: null,
+        transitionIn: null,
+        transitionOut: null,
+      });
+      return;
+    }
+
+    const previous = tracks[index - 1];
+    const previousItem = items[index - 1];
+    const plan = planClientTransition(previous, track);
+    previousItem.fadeOut = plan.seconds;
+    previousItem.fadeOutStart = previousItem.start + Math.max(0, plan.prevOverlapStart - previousItem.sourceStart);
+    previousItem.end = Math.min(previousItem.end, previousItem.fadeOutStart + plan.seconds);
+    previousItem.transitionOut = plan;
+
+    const start = previousItem.fadeOutStart;
+    const sourceStart = plan.nextOverlapStart;
+    items.push({
+      track,
+      index,
+      lane: index % 2,
+      start,
+      sourceStart,
+      end: start + Math.max(0, track.duration - sourceStart),
+      fadeIn: plan.seconds,
+      fadeOut: 0,
+      fadeOutStart: null,
+      transitionIn: plan,
+      transitionOut: null,
+    });
   });
   return { items, total: items.at(-1)?.end || 0 };
 }
 
 function getTransitionDuration(prev, next) {
+  return planClientTransition(prev, next).seconds;
+}
+
+function planClientTransition(prev, next) {
   const requested = state.settings.crossfade;
   const maxByLength = Math.max(0.5, Math.min(prev.duration, next.duration) * 0.35);
   let actual = requested;
+  let prevOut = prev.outroPoint;
+  let nextIn = next.introPoint;
   if (state.settings.aiPrecision) {
     const phrase = phraseTransitionSeconds(prev, next);
     if (phrase) actual = phrase;
-    const prevOut = prev.transition_candidates?.outro;
-    const nextIn = next.transition_candidates?.intro;
-    if (Number.isFinite(prevOut) && Number.isFinite(nextIn)) {
-      actual = Math.min(actual, Math.max(0.5, prev.duration - prevOut), Math.max(0.5, nextIn));
-    }
+    prevOut = prev.transition_candidates?.outro ?? prevOut;
+    nextIn = next.transition_candidates?.intro ?? nextIn;
   }
-  if (Number.isFinite(prev.outroPoint) && Number.isFinite(next.introPoint)) {
-    actual = Math.min(actual, Math.max(0.5, prev.duration - prev.outroPoint), Math.max(0.5, next.introPoint));
-  }
+  if (Number.isFinite(prev.outroPoint)) prevOut = prev.outroPoint;
+  if (Number.isFinite(next.introPoint)) nextIn = next.introPoint;
+  prevOut = clamp(Number(prevOut) || Math.max(0, prev.duration - requested), 0, Math.max(0, prev.duration - 0.25));
+  nextIn = clamp(Number(nextIn) || requested, 0, next.duration);
+  actual = Math.min(actual, Math.max(0.5, prev.duration - prevOut), Math.max(0.5, nextIn));
   if (state.settings.autoTransition) {
     actual = Math.max(2, Math.min(actual, (prev.outro_low || 0) + (next.intro_low || 0) + 2));
   }
-  return Math.min(actual, maxByLength);
+  actual = Math.min(actual, maxByLength);
+  return {
+    seconds: actual,
+    prevOverlapStart: prevOut,
+    nextIntro: nextIn,
+    nextOverlapStart: Math.max(0, nextIn - actual),
+    confidence: Math.min(0.95, (prev.transition_candidates?.confidence || 0.35) * 0.5 + (next.transition_candidates?.confidence || 0.35) * 0.5),
+  };
 }
 
 function phraseTransitionSeconds(prev, next) {
@@ -1174,6 +1325,56 @@ function playableTracks() {
 
 function selectedTrack() {
   return state.tracks.find((track) => track.localId === state.selectedId) || null;
+}
+
+function activeTransition(timeline = buildTimeline()) {
+  if (timeline.items.length < 2) return null;
+  const active = timeline.items.slice(1).find((item) => {
+    const overlapStart = item.start;
+    const overlapEnd = item.start + item.fadeIn;
+    return state.playbackOffset >= overlapStart && state.playbackOffset <= overlapEnd;
+  });
+  if (active) {
+    return { prev: timeline.items[active.index - 1], next: active, plan: active.transitionIn };
+  }
+  const selectedIndex = timeline.items.findIndex((item) => item.track.localId === state.selectedId);
+  const nextIndex = selectedIndex >= 0 ? Math.min(selectedIndex + 1, timeline.items.length - 1) : 1;
+  const index = Math.max(1, nextIndex);
+  return { prev: timeline.items[index - 1], next: timeline.items[index], plan: timeline.items[index].transitionIn };
+}
+
+function updateDeckMixer(event) {
+  const input = event.target.closest("input[data-mixer]");
+  if (!input) return;
+  const track = state.tracks.find((item) => item.localId === input.dataset.id);
+  if (!track) return;
+  const mixer = ensureTrackMixer(track);
+  const value = Number(input.value);
+  if (input.dataset.mixer === "gain") mixer.gain = value;
+  if (input.dataset.mixer in mixer.eq) mixer.eq[input.dataset.mixer] = value;
+  render();
+}
+
+function deckMixerClick(event) {
+  const button = event.target.closest("button[data-action='select']");
+  if (!button) return;
+  selectTrack(button.dataset.id);
+}
+
+function jumpToActiveTransition() {
+  const transition = activeTransition();
+  if (!transition) return;
+  state.playbackOffset = transition.next.start;
+  if (state.isPlaying) previewMix(state.playbackOffset);
+  render();
+}
+
+function seekTimelineClick(event) {
+  const clip = event.target.closest("[data-time]");
+  if (!clip) return;
+  state.playbackOffset = Number(clip.dataset.time) || 0;
+  if (state.isPlaying) previewMix(state.playbackOffset);
+  render();
 }
 
 function moveTrack(localId, direction) {
@@ -1211,7 +1412,7 @@ function wavePointerDown(event) {
     const timeline = buildTimeline();
     const item = timeline.items.find((entry) => entry.track.localId === track.localId);
     if (item) {
-      state.playbackOffset = clamp(item.start + localTime, 0, timeline.total);
+      state.playbackOffset = clamp(item.start + localTime - item.sourceStart, 0, timeline.total);
       if (state.isPlaying) previewMix(state.playbackOffset);
       render();
     }
@@ -1232,6 +1433,8 @@ function render() {
   renderMetrics();
   renderTable();
   renderTransport();
+  renderMixTimeline();
+  renderDeckMixer();
   renderMatchResult();
   drawWaveform();
 }
@@ -1297,6 +1500,94 @@ function renderTransport() {
   els.playTime.textContent = `${formatTime(state.playbackOffset)} / ${formatTime(total)}`;
 }
 
+function renderMixTimeline() {
+  const timeline = buildTimeline();
+  const total = Math.max(timeline.total, 1);
+  const transitions = timeline.items.slice(1);
+  els.transitionReadout.textContent = transitions.length
+    ? `${transitions.length} 个重叠过渡 · 当前 ${formatActiveTransitionLabel(timeline)}`
+    : "上传两首以上歌曲后显示过渡";
+  if (!timeline.items.length) {
+    els.mixTimeline.innerHTML = `<div class="timeline-empty">还没有可预览的混音时间线</div>`;
+    return;
+  }
+  const playhead = clamp((state.playbackOffset / total) * 100, 0, 100);
+  els.mixTimeline.innerHTML = `
+    <div class="timeline-stage">
+      <div class="timeline-playhead" style="left:${playhead}%"></div>
+      ${timeline.items
+        .map((item) => {
+          const left = (item.start / total) * 100;
+          const width = Math.max(1.5, ((item.end - item.start) / total) * 100);
+          const fadeInWidth = item.fadeIn ? Math.max(1, (item.fadeIn / total) * 100) : 0;
+          const fadeOutLeft = item.fadeOutStart == null ? 0 : ((item.fadeOutStart - item.start) / Math.max(item.end - item.start, 1)) * 100;
+          const fadeOutWidth = item.fadeOut ? Math.max(1, (item.fadeOut / (item.end - item.start)) * 100) : 0;
+          return `
+            <button class="timeline-clip lane-${item.lane}" type="button" data-time="${item.start}" style="left:${left}%;width:${width}%">
+              <span>${escapeHtml(item.track.name)}</span>
+              ${fadeInWidth ? `<i class="fade-in" style="width:${fadeInWidth / Math.max(width, 1) * 100}%"></i>` : ""}
+              ${fadeOutWidth ? `<i class="fade-out" style="left:${fadeOutLeft}%;width:${fadeOutWidth}%"></i>` : ""}
+            </button>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function formatActiveTransitionLabel(timeline) {
+  const transition = activeTransition(timeline);
+  if (!transition) return "--";
+  return `${transition.prev.track.name} → ${transition.next.track.name}`;
+}
+
+function renderDeckMixer() {
+  const timeline = buildTimeline();
+  const transition = activeTransition(timeline);
+  els.jumpToTransition.disabled = !transition;
+  if (!transition) {
+    els.deckMixer.innerHTML = `<div class="deck-empty">需要至少两首已分析曲目。时间线出现重叠后，这里会显示两台 Deck 的独立音量和 EQ。</div>`;
+    return;
+  }
+  els.deckMixer.innerHTML = [renderDeck("A", transition.prev), renderDeck("B", transition.next)].join("");
+}
+
+function renderDeck(label, item) {
+  const track = item.track;
+  const mixer = ensureTrackMixer(track);
+  const role = label === "A" ? "Outgoing" : "Incoming";
+  return `
+    <article class="deck-card">
+      <div class="deck-title">
+        <span>Deck ${label} · ${role}</span>
+        <strong title="${escapeHtml(track.name)}">${escapeHtml(track.name)}</strong>
+      </div>
+      <div class="deck-stats">
+        <span>${track.bpm || "--"} BPM</span>
+        <span>${track.camelot || track.key || "--"}</span>
+        <span>${formatTime(item.start)} → ${formatTime(item.end)}</span>
+      </div>
+      ${renderMixerSlider(track.localId, "gain", "Gain", mixer.gain, 0, 1.4, 0.01, `${Math.round(mixer.gain * 100)}%`)}
+      ${renderMixerSlider(track.localId, "low", "Low", mixer.eq.low, -1, 1, 0.01, `${Math.round(mixer.eq.low * 12)} dB`)}
+      ${renderMixerSlider(track.localId, "mid", "Mid", mixer.eq.mid, -1, 1, 0.01, `${Math.round(mixer.eq.mid * 12)} dB`)}
+      ${renderMixerSlider(track.localId, "high", "High", mixer.eq.high, -1, 1, 0.01, `${Math.round(mixer.eq.high * 12)} dB`)}
+      <div class="deck-cues">
+        <button type="button" data-action="select" data-id="${track.localId}">编辑波形</button>
+        <span>IN ${formatTime(track.introPoint)} / OUT ${formatTime(track.outroPoint)}</span>
+      </div>
+    </article>
+  `;
+}
+
+function renderMixerSlider(trackId, param, label, value, min, max, step, readout) {
+  return `
+    <label class="deck-slider">
+      <span>${label}<b>${readout}</b></span>
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-mixer="${param}" data-id="${trackId}" />
+    </label>
+  `;
+}
+
 function drawWaveform() {
   const canvas = els.waveCanvas;
   const ctx = wave.ctx;
@@ -1347,7 +1638,7 @@ function drawWaveform() {
   const timeline = buildTimeline();
   const item = timeline.items.find((entry) => entry.track.localId === track.localId);
   if (item && state.playbackOffset >= item.start && state.playbackOffset <= item.end) {
-    const local = state.playbackOffset - item.start;
+    const local = item.sourceStart + state.playbackOffset - item.start;
     const x = (local / track.duration) * width;
     ctx.fillStyle = "rgba(255,255,255,0.9)";
     ctx.fillRect(x - 1, 0, 2, height);

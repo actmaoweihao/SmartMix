@@ -29,6 +29,7 @@ def render_mix(tracks: list[dict], settings: dict, fmt: str) -> Path:
     if settings.get("aiPrecision") or settings.get("loudnessNormalize"):
         buffers = [normalize_loudness(buffer, SAMPLE_RATE, float(settings.get("targetLufs", -16))) for buffer in buffers]
 
+    buffers = [_apply_track_mixer(buffer, track) for buffer, track in zip(buffers, tracks)]
     buffers = [_apply_static_eq(buffer, settings.get("eq", {})) for buffer in buffers]
     mix = _crossfade(buffers, tracks, settings)
     if settings.get("aiPrecision") or settings.get("loudnessNormalize"):
@@ -85,6 +86,14 @@ def _apply_static_eq(buffer: np.ndarray, eq: dict) -> np.ndarray:
     mid_band = buffer - low_band - high_band
     out = buffer + low_band * low + mid_band * mid + high_band * high
     return np.clip(out, -1, 1).astype(np.float32)
+
+
+def _apply_track_mixer(buffer: np.ndarray, track: dict) -> np.ndarray:
+    mixer = track.get("mixer") or {}
+    eq = mixer.get("eq") or {}
+    gain = float(mixer.get("gain", 1.0))
+    out = _apply_static_eq(buffer, eq)
+    return np.clip(out * gain, -1, 1).astype(np.float32)
 
 
 def _sos_filter(buffer: np.ndarray, kind: str, freq: float) -> np.ndarray:

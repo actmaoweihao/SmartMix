@@ -7,7 +7,7 @@ import numpy as np
 
 from backend.loudness import loudness_metrics, normalize_loudness
 from backend.analysis import _transition_candidates
-from backend.mixing import SAMPLE_RATE, _beat_sync, _crossfade
+from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade
 from backend.transition import plan_transition
 
 
@@ -113,6 +113,12 @@ class CrossfadePlanTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered.shape[1], SAMPLE_RATE * 14)
+
+    def test_track_mixer_gain_affects_export_buffer(self) -> None:
+        buffer = np.full((2, 128), 0.5, dtype=np.float32)
+        mixed = _apply_track_mixer(buffer, {"mixer": {"gain": 0.5, "eq": {"low": 0, "mid": 0, "high": 0}}})
+
+        self.assertTrue(np.allclose(mixed, 0.25))
 
 
 if __name__ == "__main__":
