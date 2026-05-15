@@ -36,7 +36,7 @@ const state = {
     targetLufs: -16,
     equalPowerFade: true,
     mixStrategy: "auto",
-    filterMode: "lowpassSweep",
+    filterMode: "dynamicEq",
     exportFormat: "mp3",
     eq: { low: 0, mid: 0, high: 0 },
   },
@@ -106,6 +106,7 @@ app.innerHTML = `
           <span>AI 混音策略</span>
           <select id="mixStrategy">
             <option value="auto">AI 自动判断</option>
+            <option value="vocalHandoff">人声接鼓点</option>
             <option value="vocalSafe">保留人声清晰</option>
             <option value="bassSwap">低频交换切入</option>
             <option value="smooth">平滑氛围过渡</option>
@@ -1093,16 +1094,27 @@ function applyPreviewEnvelope(item, param, filterNode, low, mid, high, startsAt,
   const mixer = ensureTrackMixer(track);
   const endAt = startsAt + Math.max(0, track.buffer.duration - sourceOffset);
   const elapsed = Math.max(0, mixOffset - item.start);
+  const strategy = transitionStrategyForItem(item);
+  const vocalHandoffIn = strategy === "vocalHandoff" && item.transitionIn;
+  const vocalHandoffOut = strategy === "vocalHandoff" && item.transitionOut;
   param.cancelScheduledValues(startsAt);
-  const inProgressFadeIn = item.fadeIn > 0 && elapsed < item.fadeIn;
-  param.setValueAtTime((inProgressFadeIn ? elapsed / item.fadeIn : 1) * mixer.gain, startsAt);
-  if (inProgressFadeIn) param.linearRampToValueAtTime(mixer.gain, startsAt + (item.fadeIn - elapsed));
+  const entrySeconds = vocalHandoffIn ? Math.min(0.45, item.fadeIn * 0.16) : item.fadeIn;
+  const inProgressFadeIn = entrySeconds > 0 && elapsed < entrySeconds;
+  param.setValueAtTime((inProgressFadeIn ? elapsed / entrySeconds : 1) * mixer.gain, startsAt);
+  if (inProgressFadeIn) param.linearRampToValueAtTime(mixer.gain, startsAt + (entrySeconds - elapsed));
 
   const fadeOutStart = item.fadeOutStart == null ? null : startsAt + Math.max(0, item.fadeOutStart - mixOffset);
   const fadeOutEnd = fadeOutStart == null ? null : fadeOutStart + item.fadeOut;
   if (item.fadeOut > 0 && fadeOutStart != null && fadeOutEnd != null && endAt > fadeOutStart) {
-    param.setValueAtTime(mixer.gain, fadeOutStart);
-    param.linearRampToValueAtTime(0, fadeOutEnd);
+    if (vocalHandoffOut) {
+      const releaseStart = fadeOutStart + item.fadeOut * 0.76;
+      param.setValueAtTime(mixer.gain, fadeOutStart);
+      param.setValueAtTime(mixer.gain * 0.92, releaseStart);
+      param.linearRampToValueAtTime(0, fadeOutEnd);
+    } else {
+      param.setValueAtTime(mixer.gain, fadeOutStart);
+      param.linearRampToValueAtTime(0, fadeOutEnd);
+    }
     if (state.settings.filterMode === "lowpassSweep") {
       filterNode.type = "lowpass";
       filterNode.frequency.setValueAtTime(16000, fadeOutStart);
@@ -1135,9 +1147,16 @@ function automateDynamicEq(track, item, low, mid, high, startsAt, mixOffset, end
     low.gain.setValueAtTime(baseLow + curves.inLow, startsAt);
     mid.gain.setValueAtTime(baseMid + curves.inMid, startsAt);
     high.gain.setValueAtTime(baseHigh + curves.inHigh, startsAt);
-    low.gain.linearRampToValueAtTime(baseLow, startsAt + item.fadeIn * 0.45);
-    mid.gain.linearRampToValueAtTime(baseMid, startsAt + item.fadeIn);
-    high.gain.linearRampToValueAtTime(baseHigh, startsAt + item.fadeIn * 0.8);
+    if (strategy === "vocalHandoff") {
+      low.gain.setValueAtTime(baseLow + curves.inLow, startsAt + item.fadeIn * 0.68);
+      low.gain.linearRampToValueAtTime(baseLow, startsAt + item.fadeIn);
+      mid.gain.linearRampToValueAtTime(baseMid, startsAt + Math.min(0.45, item.fadeIn * 0.18));
+      high.gain.linearRampToValueAtTime(baseHigh, startsAt + Math.min(0.6, item.fadeIn * 0.22));
+    } else {
+      low.gain.linearRampToValueAtTime(baseLow, startsAt + item.fadeIn * 0.45);
+      mid.gain.linearRampToValueAtTime(baseMid, startsAt + item.fadeIn);
+      high.gain.linearRampToValueAtTime(baseHigh, startsAt + item.fadeIn * 0.8);
+    }
   }
 
   const fadeOutStart = item.fadeOutStart == null ? null : startsAt + Math.max(0, item.fadeOutStart - mixOffset);
@@ -1146,10 +1165,22 @@ function automateDynamicEq(track, item, low, mid, high, startsAt, mixOffset, end
     low.gain.setValueAtTime(baseLow, fadeOutStart);
     mid.gain.setValueAtTime(baseMid, fadeOutStart);
     high.gain.setValueAtTime(baseHigh, fadeOutStart);
-    low.gain.linearRampToValueAtTime(baseLow + curves.outLow, fadeOutEnd);
-    mid.gain.linearRampToValueAtTime(baseMid + curves.outMid, fadeOutEnd);
-    high.gain.linearRampToValueAtTime(baseHigh + curves.outHigh, fadeOutEnd);
+    if (strategy === "vocalHandoff") {
+      low.gain.linearRampToValueAtTime(baseLow + curves.outLow, fadeOutEnd);
+      mid.gain.linearRampToValueAtTime(baseMid + curves.outMid, fadeOutStart + Math.min(0.5, item.fadeOut * 0.16));
+      high.gain.linearRampToValueAtTime(baseHigh + curves.outHigh, fadeOutStart + Math.min(0.6, item.fadeOut * 0.18));
+    } else {
+      low.gain.linearRampToValueAtTime(baseLow + curves.outLow, fadeOutEnd);
+      mid.gain.linearRampToValueAtTime(baseMid + curves.outMid, fadeOutEnd);
+      high.gain.linearRampToValueAtTime(baseHigh + curves.outHigh, fadeOutEnd);
+    }
   }
+}
+
+function transitionStrategyForItem(item) {
+  if (item.transitionIn) return resolveMixStrategy(item.transitionIn.prevTrack, item.track);
+  if (item.transitionOut) return resolveMixStrategy(item.track, item.transitionOut.nextTrack);
+  return state.settings.mixStrategy || "auto";
 }
 
 function resolveMixStrategy(prevTrack, nextTrack) {
@@ -1158,7 +1189,11 @@ function resolveMixStrategy(prevTrack, nextTrack) {
   const prevVocal = prevTrack?.transition_candidates?.outro_vocal_density || 0;
   const nextVocal = nextTrack?.transition_candidates?.intro_vocal_density || 0;
   const bpmDelta = Math.abs((prevTrack?.bpm || 0) - (nextTrack?.bpm || 0));
+  const prevEnergy = prevTrack?.transition_candidates?.outro_energy || prevTrack?.energy || 0;
+  const nextEnergy = nextTrack?.transition_candidates?.intro_energy || nextTrack?.energy || 0;
   const energyLift = (nextTrack?.energy || 0) - (prevTrack?.energy || 0);
+  if (bpmDelta > 20) return "smooth";
+  if (nextVocal >= 0.32 && prevEnergy >= 0.25 && nextEnergy >= 0.22 && bpmDelta <= 18) return "vocalHandoff";
   if (prevVocal > 0.55 || nextVocal > 0.55) return "vocalSafe";
   if (bpmDelta <= 4 && energyLift > 0.08) return "bassSwap";
   if (bpmDelta > 12) return "smooth";
@@ -1167,6 +1202,7 @@ function resolveMixStrategy(prevTrack, nextTrack) {
 
 function strategyEqCurves(strategy) {
   return {
+    vocalHandoff: { inLow: -18, inMid: -2, inHigh: -4, outLow: -3, outMid: -15, outHigh: -9 },
     vocalSafe: { inLow: -4, inMid: -12, inHigh: -6, outLow: -8, outMid: -3, outHigh: -1 },
     bassSwap: { inLow: -1, inMid: -8, inHigh: -4, outLow: -14, outMid: -5, outHigh: -2 },
     smooth: { inLow: -5, inMid: -7, inHigh: -7, outLow: -8, outMid: -7, outHigh: -4 },
@@ -1177,6 +1213,7 @@ function strategyEqCurves(strategy) {
 function strategyLabel(strategy) {
   return {
     auto: "AI 自动判断",
+    vocalHandoff: "人声接鼓点",
     vocalSafe: "保留人声清晰",
     bassSwap: "低频交换切入",
     smooth: "平滑氛围过渡",
@@ -1186,6 +1223,7 @@ function strategyLabel(strategy) {
 
 function strategyActions(strategy) {
   return {
+    vocalHandoff: ["上一首保留鼓组律动，快速压掉中频人声", "下一首先接入人声/旋律，鼓和低频在重叠后段再打开"],
     vocalSafe: ["压低新歌中频，等上一首人声离开", "低频轻推，避免主唱和旋律打架"],
     bassSwap: ["旧歌低频快速下潜", "新歌鼓和贝斯提前建立"],
     smooth: ["等功率慢淡化", "中高频缓慢进入，减少突兀切换"],
@@ -1453,9 +1491,10 @@ function planClientTransition(prev, next) {
   actual = Math.min(actual, maxByLength);
   return {
     seconds: actual,
+    strategy: resolveMixStrategy(prev, next),
     prevOverlapStart: prevOut,
     nextIntro: nextIn,
-    nextOverlapStart: Math.max(0, nextIn - actual),
+    nextOverlapStart: resolveMixStrategy(prev, next) === "vocalHandoff" ? nextIn : Math.max(0, nextIn - actual),
     confidence: Math.min(0.95, (prev.transition_candidates?.confidence || 0.35) * 0.5 + (next.transition_candidates?.confidence || 0.35) * 0.5),
   };
 }

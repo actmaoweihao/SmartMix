@@ -7,8 +7,13 @@ import numpy as np
 
 from backend.loudness import loudness_metrics, normalize_loudness
 from backend.analysis import _transition_candidates
-from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade, _resolve_mix_strategy
+from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade, _dynamic_eq_overlap, _resolve_mix_strategy
 from backend.transition import plan_transition
+
+
+def signal_like_clicks(t: np.ndarray, hz: float) -> np.ndarray:
+    phase = np.mod(t * hz, 1.0)
+    return np.exp(-phase * 42).astype(np.float32)
 
 
 class BeatSyncTests(unittest.TestCase):
@@ -128,6 +133,37 @@ class CrossfadePlanTests(unittest.TestCase):
         )
 
         self.assertEqual(strategy, "vocalSafe")
+
+    def test_auto_mix_strategy_prefers_vocal_handoff_for_incoming_vocal_over_drums(self) -> None:
+        strategy = _resolve_mix_strategy(
+            {"mixStrategy": "auto"},
+            {
+                "bpm": 129,
+                "energy": 0.88,
+                "transition_candidates": {"outro_vocal_density": 0.34, "outro_energy": 0.36},
+            },
+            {
+                "bpm": 112,
+                "energy": 0.84,
+                "transition_candidates": {"intro_vocal_density": 0.35, "intro_energy": 0.38},
+            },
+        )
+
+        self.assertEqual(strategy, "vocalHandoff")
+
+    def test_vocal_handoff_overlap_returns_stable_audio(self) -> None:
+        t = np.linspace(0, 4, SAMPLE_RATE * 4, endpoint=False, dtype=np.float32)
+        prev = 0.3 * np.sin(2 * np.pi * 90 * t) + 0.12 * signal_like_clicks(t, 2)
+        next_track = 0.22 * np.sin(2 * np.pi * 440 * t) + 0.08 * signal_like_clicks(t, 4)
+        overlap = _dynamic_eq_overlap(
+            np.vstack([prev, prev]).astype(np.float32),
+            np.vstack([next_track, next_track]).astype(np.float32),
+            "vocalHandoff",
+        )
+
+        self.assertEqual(overlap.shape, (2, SAMPLE_RATE * 4))
+        self.assertFalse(np.isnan(overlap).any())
+        self.assertLessEqual(np.max(np.abs(overlap)), 1.0)
 
 
 if __name__ == "__main__":

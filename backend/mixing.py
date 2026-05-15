@@ -112,11 +112,12 @@ def _crossfade(buffers: list[np.ndarray], tracks: list[dict], settings: dict) ->
         prev_track = tracks[index - 1]
         next_track = tracks[index]
         incoming = buffers[index]
+        strategy = _resolve_mix_strategy(settings, prev_track, next_track) if ai_precision or filter_mode == "dynamicEq" else None
         plan = plan_transition(prev_track, next_track, {**settings, "crossfade": requested, "autoTransition": auto})
         prev_duration_samples = min(_seconds_to_samples(float(prev_track.get("duration") or 0)), rendered.shape[1])
         current_track_start = max(0, rendered.shape[1] - prev_duration_samples)
         prev_overlap_start = current_track_start + _seconds_to_samples(plan.prev_overlap_start)
-        next_overlap_start = _seconds_to_samples(plan.next_overlap_start)
+        next_overlap_start = _seconds_to_samples(plan.next_intro if strategy == "vocalHandoff" else plan.next_overlap_start)
         if prev_overlap_start >= rendered.shape[1]:
             prev_overlap_start = max(0, rendered.shape[1] - _seconds_to_samples(plan.seconds))
         if next_overlap_start >= incoming.shape[1]:
@@ -136,8 +137,7 @@ def _crossfade(buffers: list[np.ndarray], tracks: list[dict], settings: dict) ->
         tail = incoming[:, next_overlap_start + samples :]
 
         if ai_precision or filter_mode == "dynamicEq":
-            strategy = _resolve_mix_strategy(settings, prev_track, next_track)
-            overlap = _dynamic_eq_overlap(outgoing_tail, incoming_head, strategy)
+            overlap = _dynamic_eq_overlap(outgoing_tail, incoming_head, strategy or "bassSwap")
         else:
             if filter_mode == "lowpassSweep":
                 outgoing_tail = _sos_filter(outgoing_tail, "lowpass", 1800)
@@ -162,6 +162,9 @@ def _fade_curves(samples: int, equal_power: bool) -> tuple[np.ndarray, np.ndarra
 
 
 def _dynamic_eq_overlap(outgoing: np.ndarray, incoming: np.ndarray, strategy: str = "bassSwap") -> np.ndarray:
+    if strategy == "vocalHandoff":
+        return _vocal_handoff_overlap(outgoing, incoming)
+
     samples = outgoing.shape[1]
     fade_out, fade_in = _fade_curves(samples, equal_power=True)
     x = np.linspace(0, 1, samples, dtype=np.float32)
@@ -195,7 +198,13 @@ def _resolve_mix_strategy(settings: dict, prev_track: dict, next_track: dict) ->
     prev_vocal = float(prev_candidates.get("outro_vocal_density") or 0)
     next_vocal = float(next_candidates.get("intro_vocal_density") or 0)
     bpm_delta = abs(float(prev_track.get("bpm") or 0) - float(next_track.get("bpm") or 0))
+    prev_energy = float(prev_candidates.get("outro_energy") or prev_track.get("energy") or 0)
+    next_energy = float(next_candidates.get("intro_energy") or next_track.get("energy") or 0)
     energy_lift = float(next_track.get("energy") or 0) - float(prev_track.get("energy") or 0)
+    if bpm_delta > 20:
+        return "smooth"
+    if next_vocal >= 0.32 and prev_energy >= 0.25 and next_energy >= 0.22 and bpm_delta <= 18:
+        return "vocalHandoff"
     if prev_vocal > 0.55 or next_vocal > 0.55:
         return "vocalSafe"
     if bpm_delta <= 4 and energy_lift > 0.08:
@@ -205,7 +214,61 @@ def _resolve_mix_strategy(settings: dict, prev_track: dict, next_track: dict) ->
     return "bassSwap"
 
 
+def _vocal_handoff_overlap(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
+    samples = min(outgoing.shape[1], incoming.shape[1])
+    if samples <= 0:
+        return incoming
+
+    outgoing = outgoing[:, :samples]
+    incoming = incoming[:, :samples]
+    x = np.linspace(0, 1, samples, dtype=np.float32)
+    fast_entry = _smoothstep(np.clip(x / 0.16, 0, 1))
+    late = np.clip((x - 0.68) / 0.32, 0, 1)
+    very_late = np.clip((x - 0.78) / 0.22, 0, 1)
+
+    prev_harmonic, prev_percussive = _harmonic_percussive(outgoing)
+    next_harmonic, next_percussive = _harmonic_percussive(incoming)
+    prev_low = _sos_filter(outgoing, "lowpass", 180)
+    next_low = _sos_filter(incoming, "lowpass", 180)
+    prev_vocal_region = _sos_filter(prev_harmonic, "highpass", 180)
+    next_vocal_region = _sos_filter(next_harmonic, "highpass", 180)
+
+    overlap = (
+        prev_percussive * (0.98 - 0.2 * x)
+        + prev_low * np.power(1 - x, 1.1) * 0.6
+        + prev_vocal_region * np.power(1 - x, 5.0) * 0.22
+        + next_vocal_region * fast_entry
+        + next_percussive * np.power(late, 1.7) * 0.82
+        + next_low * np.power(very_late, 1.8) * 0.88
+    )
+    return np.clip(overlap, -1, 1).astype(np.float32)
+
+
+def _smoothstep(x: np.ndarray) -> np.ndarray:
+    return (x * x * (3 - 2 * x)).astype(np.float32)
+
+
+def _harmonic_percussive(buffer: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    try:
+        harmonic, percussive = librosa.effects.hpss(buffer, kernel_size=(31, 31), margin=(1.0, 4.0))
+    except Exception:
+        low = _sos_filter(buffer, "lowpass", 220)
+        high = _sos_filter(buffer, "highpass", 2600)
+        harmonic = buffer - high
+        percussive = high + low * 0.4
+    return np.ascontiguousarray(harmonic, dtype=np.float32), np.ascontiguousarray(percussive, dtype=np.float32)
+
+
 def _strategy_curves(strategy: str, x: np.ndarray, fade_out: np.ndarray, fade_in: np.ndarray) -> dict[str, np.ndarray]:
+    if strategy == "vocalHandoff":
+        return {
+            "prev_low": (0.85 - 0.45 * x),
+            "next_low": np.power(np.clip((x - 0.72) / 0.28, 0, 1), 1.5),
+            "prev_mid": np.power(1 - x, 2.4) * 0.45,
+            "next_mid": np.power(x, 0.62),
+            "prev_high": np.power(1 - x, 1.9) * 0.55,
+            "next_high": np.power(x, 0.75),
+        }
     if strategy == "vocalSafe":
         return {
             "prev_low": np.power(1 - x, 1.8),
