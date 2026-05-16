@@ -451,6 +451,69 @@ input[type="range"] {
   white-space: nowrap;
 }
 
+.teaching-debug {
+  border: 1px solid var(--line);
+  background: #15171c;
+  margin: 8px 0 10px;
+}
+
+.teaching-debug summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  color: var(--accent-2);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.debug-meter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.debug-meter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.debug-meter span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.debug-meter b {
+  color: var(--text);
+  text-align: right;
+}
+
+.debug-meter i {
+  grid-column: 1 / -1;
+  height: 4px;
+  background: linear-gradient(90deg, var(--accent-2) var(--value), rgba(255, 255, 255, 0.08) var(--value));
+}
+
+.debug-notes {
+  display: grid;
+  gap: 6px;
+  padding: 0 10px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.debug-notes span {
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+
 .teaching-reason {
   color: var(--muted);
   line-height: 1.55;

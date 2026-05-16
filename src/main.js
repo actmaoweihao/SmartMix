@@ -1927,6 +1927,7 @@ function renderTeachingPanel() {
   const recommendations = recommendNextTracks(currentAnalysis, candidateAnalyses, {
     targetEnergy: state.teaching.targetEnergy,
     beginnerMode: state.teaching.beginnerMode,
+    maxComplexity: state.teaching.maxComplexity,
     maxResults: 4,
   });
 
@@ -1968,6 +1969,7 @@ function renderTeachingCard(item, index) {
         <span>难度 ${rec.difficulty}/5</span>
       </div>
       <h3 title="${escapeHtml(target?.name || item.track.title)}">${escapeHtml(target?.name || item.track.title)}</h3>
+      ${renderTeachingDebug(rec.debug)}
       <p class="teaching-reason">${escapeHtml(explanation)}</p>
       <div class="teaching-steps">
         ${rec.stepByStep.slice(0, 5).map(renderTeachingStep).join("")}
@@ -1975,6 +1977,40 @@ function renderTeachingCard(item, index) {
       <div class="teaching-risk">${escapeHtml(riskLine(rec.method))}</div>
       <button type="button" data-teaching-apply="${escapeHtml(item.track.id)}">使用这个接法</button>
     </article>
+  `;
+}
+
+function renderTeachingDebug(debug) {
+  if (!debug) return "";
+  const metrics = [
+    ["人声安全", 1 - debug.vocalConflictScore],
+    ["乐句", debug.phraseScore],
+    ["新手", debug.beginnerScore],
+    ["能量", debug.energyScore],
+    ["BPM", debug.bpmScore],
+    ["调性", debug.keyScore],
+  ];
+  return `
+    <details class="teaching-debug">
+      <summary>评分拆解 · ${Math.round(debug.finalScore * 100)} / 100</summary>
+      <div class="debug-meter-grid">
+        ${metrics.map(([label, value]) => renderDebugMeter(label, value)).join("")}
+      </div>
+      <div class="debug-notes">
+        ${(debug.reasons || []).slice(0, 5).map((reason) => `<span>${escapeHtml(reason)}</span>`).join("")}
+      </div>
+    </details>
+  `;
+}
+
+function renderDebugMeter(label, value) {
+  const percent = Math.round(clamp(Number(value) || 0, 0, 1) * 100);
+  return `
+    <div class="debug-meter">
+      <span>${escapeHtml(label)}</span>
+      <b>${percent}</b>
+      <i style="--value:${percent}%"></i>
+    </div>
   `;
 }
 

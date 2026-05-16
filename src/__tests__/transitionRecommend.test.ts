@@ -67,8 +67,18 @@ describe("recommendTransition", () => {
     const practice = generatePracticePlan("beginner", [current, candidate]);
 
     expect(next.reasons.length).toBeGreaterThan(2);
+    expect(next.bestTransition.debug?.reasons.length).toBeGreaterThan(0);
     expect(explanation).toContain("为什么");
     expect(practice.exercises).toHaveLength(4);
+  });
+
+  it("passes maxComplexity through next-track recommendations", () => {
+    const current = makeTrack({ id: "a", title: "A", bpm: 92, camelotKey: "8A" });
+    const candidate = makeTrack({ id: "b", title: "B", bpm: 128, camelotKey: "3B" });
+    const next = recommendNextTracks(current, [candidate], { beginnerMode: true, maxComplexity: 2, maxResults: 1 })[0];
+
+    expect(next.bestTransition.difficulty).toBeLessThanOrEqual(2);
+    expect(next.bestTransition.method).not.toBe("wide_bpm_loop");
   });
 
   it("case 1 avoids long beatmix when both tracks are in dense vocal sections", () => {
