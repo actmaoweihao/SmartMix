@@ -12,7 +12,7 @@ export function buildBreakdownSwitch(outgoing: TrackAnalysis, incoming: TrackAna
     incomingRoles: ["breakdown", "entry", "drop"],
     overlapDuration: Math.min(phraseSeconds(outgoing, 4), 8),
     methodFit: 0.84,
-    reason: "空拍切换利用 A 歌能量下降的窗口，让跨 BPM 或跨风格更自然。",
+    reason: "空拍切换利用 A 歌能量下降的窗口，让跨 BPM 或跨风格衔接更自然。",
     steps: [
       { atBeatOffset: -16, atTimeOffset: -phraseSeconds(outgoing, 4), action: "filter_sweep", targetDeck: "A", value: "highpass", explanation: "A 歌进入空拍时做高通扫频，减少低频和旋律占用。" },
       { atBeatOffset: 0, atTimeOffset: 0, action: "press_play", targetDeck: "B", explanation: "在空拍乐句边界启动 B 歌。" },

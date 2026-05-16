@@ -3,12 +3,12 @@ import type { TransitionRecommendation } from "../analysis/types";
 export function explainTransition(rec: TransitionRecommendation): string {
   const conflict = rec.debug?.vocalConflictScore ?? 0;
   const why = conflict > 0.42
-    ? `${rec.reason} 这段衔接里两首歌都有明显人声，如果硬做长时间 beatmix，两段歌词会打架，所以要避免两段人声重叠。`
+    ? `${rec.reason} 这段衔接里两首歌都有明显人声，长时间叠加容易让歌词打架，所以更适合缩短 overlap 或改用效果器过渡。`
     : rec.reason;
   const exit = `A 歌建议从 ${formatTime(rec.outgoingCue.time)} 的${sectionName(rec.outgoingCue.sectionType)}位置退出。`;
   const entry = `B 歌建议从 ${formatTime(rec.incomingCue.time)} 的${sectionName(rec.incomingCue.sectionType)}强拍进入。`;
   const operations = rec.stepByStep
-    .map((step) => `${formatOffset(step.atBeatOffset)}，${step.targetDeck} Deck ${actionName(step.action)}：${step.explanation}`)
+    .map((step) => `${formatOffset(step.atBeatOffset)}，${step.targetDeck} Deck ${actionName(step.action)}，${step.explanation}`)
     .slice(0, 5)
     .join(" ");
   return `推荐用「${methodName(rec.method)}」。为什么这样接：${why}${exit}${entry}具体操作：${operations}${riskHint(rec)}`;
@@ -21,7 +21,7 @@ function methodName(method: string): string {
     quick_cut: "快切",
     beatmix: "对拍混音",
     bass_swap: "低频替换",
-    echo_out: "回声退出",
+    echo_out: "Echo Out",
     filter_sweep: "滤波扫频",
     breakdown_switch: "空拍切换",
     wide_bpm_loop: "大 BPM 差 Loop",
@@ -32,11 +32,11 @@ function methodName(method: string): string {
 }
 
 function riskHint(rec: TransitionRecommendation): string {
-  if (rec.method === "beatmix" || rec.method === "bass_swap") return "翻车风险：两个低频同时打开会轰，先关 B 歌低频，到下一段乐句再交换。";
-  if (rec.method === "quick_cut") return "翻车风险：不要提前放 B 歌，否则两段人声会重叠；一定要在乐句第一拍切。";
-  if (rec.method === "echo_out") return "翻车风险：Echo 太长会盖住新歌，B 歌一进来就把 A 歌音量收掉。";
-  if (rec.method === "breakdown_switch") return "翻车风险：空拍里不要叠太多旋律，滤波要收干净再让 B 歌进来。";
-  return "翻车风险：听到两首歌主唱同时出现，就缩短 overlap 或改用快切。";
+  if (rec.method === "beatmix" || rec.method === "bass_swap") return "翻车风险：两边低频不要同时全开；先关 B 歌低频，到下一个乐句边界再交换。";
+  if (rec.method === "quick_cut") return "翻车风险：不要提前放 B 歌；一定要在乐句第一拍切，避免两段人声重叠。";
+  if (rec.method === "echo_out") return "翻车风险：Echo 尾巴不要太长；B 歌一进来就把 A 歌音量收干净。";
+  if (rec.method === "breakdown_switch") return "翻车风险：空拍里不要叠太多旋律；滤波要收干净再让 B 歌进入。";
+  return "翻车风险：听到两首歌主唱同时出现时，缩短 overlap 或改用快切。";
 }
 
 function formatTime(time: number): string {

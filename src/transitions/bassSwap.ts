@@ -12,7 +12,7 @@ export function buildBassSwap(outgoing: TrackAnalysis, incoming: TrackAnalysis, 
     incomingRoles: ["entry", "drop"],
     overlapDuration: phraseSeconds(outgoing, 8),
     methodFit: 0.9,
-    reason: "低频替换适合鼓点稳定但低频会撞的两首歌。",
+    reason: "低频替换适合鼓点稳定、调性兼容，但两首歌低频会互相遮挡的场景。",
     steps: [
       { atBeatOffset: 0, atTimeOffset: 0, action: "press_play", targetDeck: "B", explanation: "让 B 歌从乐句第一拍进入。" },
       { atBeatOffset: 0, atTimeOffset: 0, action: "eq_low_cut", targetDeck: "B", value: 0, explanation: "B 歌低频先关掉，只露出中高频和节奏提示。" },

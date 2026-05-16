@@ -12,7 +12,7 @@ export function buildWideBpmLoop(outgoing: TrackAnalysis, incoming: TrackAnalysi
     incomingRoles: ["entry", "drop"],
     overlapDuration: 8,
     methodFit: context.beginnerMode ? 0.45 : 0.8,
-    reason: "大 BPM 差过渡用无人声 loop 缓慢变速，难度较高但适合跨风格。",
+    reason: "大 BPM 差 Loop 用无人声片段缓慢变速，难度较高，但适合跨风格过渡。",
     steps: [
       { atBeatOffset: -16, atTimeOffset: -8, action: "start_loop", targetDeck: "A", value: "4 beats", explanation: "在 A 歌无人声片段设置 4 拍 loop。" },
       { atBeatOffset: -8, atTimeOffset: -4, action: "halve_loop", targetDeck: "A", value: "2 beats", explanation: "逐步收紧 loop，制造转场张力。" },

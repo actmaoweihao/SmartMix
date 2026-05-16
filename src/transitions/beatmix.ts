@@ -12,7 +12,7 @@ export function buildBeatmix(outgoing: TrackAnalysis, incoming: TrackAnalysis, c
     incomingRoles: ["entry"],
     overlapDuration: phraseSeconds(outgoing, 8),
     methodFit: 0.92,
-    reason: "对拍混音适合 BPM 接近、调性相容且人声不密集的 intro/outro。",
+    reason: "对拍混音适合 BPM 接近、调性兼容且人声不密集的 intro/outro。",
     steps: [
       { atBeatOffset: -32, atTimeOffset: -phraseSeconds(outgoing, 8), action: "set_cue", targetDeck: "B", explanation: "把 B 歌前奏第一拍对准 A 歌尾奏乐句。" },
       { atBeatOffset: 0, atTimeOffset: 0, action: "press_play", targetDeck: "B", explanation: "A 歌尾奏开始时播放 B 歌。" },
