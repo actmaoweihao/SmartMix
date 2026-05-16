@@ -8,6 +8,17 @@ import numpy as np
 from backend.loudness import loudness_metrics, normalize_loudness
 from backend.analysis import _transition_candidates
 from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade, _dynamic_eq_overlap, _resolve_mix_strategy
+from backend.seamless import (
+    _automation_curves,
+    _energy_handoff_profile,
+    _estimate_transient_shift_samples,
+    _render_transition_audio,
+    _seconds_to_samples,
+    _shift_audio,
+    _vocal_handoff_timing,
+    compute_tempo_adjustment,
+    generate_seamless_transition,
+)
 from backend.transition import plan_transition
 
 
@@ -167,6 +178,179 @@ class CrossfadePlanTests(unittest.TestCase):
         self.assertEqual(overlap.shape, (2, SAMPLE_RATE * 4))
         self.assertFalse(np.isnan(overlap).any())
         self.assertLessEqual(np.max(np.abs(overlap)), 1.0)
+
+
+class SeamlessTransitionTests(unittest.TestCase):
+    def test_compute_tempo_adjustment_allows_small_bpm_change(self) -> None:
+        plan = compute_tempo_adjustment(120, 122, {"targetMode": "quality"})
+
+        self.assertTrue(plan["shouldStretch"])
+        self.assertAlmostEqual(plan["stretchRatio"], 120 / 122, places=3)
+        self.assertEqual(plan["risk"], "low")
+
+    def test_compute_tempo_adjustment_rejects_large_bpm_change(self) -> None:
+        plan = compute_tempo_adjustment(128, 95, {"targetMode": "quality"})
+
+        self.assertFalse(plan["shouldStretch"])
+        self.assertEqual(plan["risk"], "high")
+
+    def test_stem_render_keeps_rhythm_bed_before_handoff(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        import soundfile as sf
+
+        seconds = 4
+        samples = SAMPLE_RATE * seconds
+        outgoing = np.zeros((2, samples), dtype=np.float32)
+        incoming = np.zeros((2, samples), dtype=np.float32)
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outgoing_paths = {}
+            incoming_paths = {}
+            for stem, value in {"vocals": 0.2, "drums": 0.3, "bass": 0.1, "other": 0.04}.items():
+                path = root / f"out_{stem}.wav"
+                sf.write(path, np.full((samples, 2), value, dtype=np.float32), SAMPLE_RATE)
+                outgoing_paths[stem] = path
+            for stem, value in {"vocals": -0.2, "drums": -0.3, "bass": -0.1, "other": -0.04}.items():
+                path = root / f"in_{stem}.wav"
+                sf.write(path, np.full((samples, 2), value, dtype=np.float32), SAMPLE_RATE)
+                incoming_paths[stem] = path
+
+            rendered = _render_transition_audio(
+                outgoing,
+                incoming,
+                {"method": "bass_swap"},
+                2,
+                0.8,
+                {"used": True, "paths": {"outgoing": outgoing_paths, "incoming": incoming_paths}},
+            )
+
+        start = _seconds_to_samples(2)
+        early = rendered[:, start : start + _seconds_to_samples(0.25)]
+        late = rendered[:, start + _seconds_to_samples(1.75) : start + _seconds_to_samples(2)]
+        self.assertGreater(float(np.mean(early)), 0.1)
+        self.assertLess(float(np.mean(late)), -0.1)
+        self.assertLessEqual(float(np.max(np.abs(rendered))), 1.0)
+
+    def test_full_mix_fallback_uses_layered_overlap_not_hard_switch(self) -> None:
+        seconds = 4
+        t = np.linspace(0, seconds, SAMPLE_RATE * seconds, endpoint=False, dtype=np.float32)
+        outgoing = np.vstack([0.3 * signal_like_clicks(t, 2) + 0.14 * np.sin(2 * np.pi * 90 * t)] * 2).astype(np.float32)
+        incoming = np.vstack([0.25 * signal_like_clicks(t, 4) - 0.12 * np.sin(2 * np.pi * 140 * t)] * 2).astype(np.float32)
+
+        rendered = _render_transition_audio(
+            outgoing,
+            incoming,
+            {"method": "beatmix"},
+            2,
+            0.7,
+            {"used": False, "paths": None},
+        )
+
+        overlap_start = _seconds_to_samples(2)
+        early = rendered[:, overlap_start : overlap_start + _seconds_to_samples(0.4)]
+        middle = rendered[:, overlap_start + _seconds_to_samples(0.8) : overlap_start + _seconds_to_samples(1.2)]
+        self.assertEqual(rendered.shape, (2, SAMPLE_RATE * 6))
+        self.assertFalse(np.isnan(rendered).any())
+        self.assertGreater(float(np.mean(np.abs(early))), 0.02)
+        self.assertGreater(float(np.mean(np.abs(middle))), 0.02)
+        self.assertLessEqual(float(np.max(np.abs(rendered))), 1.0)
+
+    def test_transient_shift_estimator_aligns_delayed_incoming_drums(self) -> None:
+        samples = SAMPLE_RATE
+        reference = np.zeros((2, samples), dtype=np.float32)
+        delayed = np.zeros((2, samples), dtype=np.float32)
+        reference[:, 10_000] = 1.0
+        delayed[:, 10_420] = 1.0
+
+        shift = _estimate_transient_shift_samples(reference, delayed, max_shift_ms=20)
+        aligned = _shift_audio(delayed, shift)
+
+        self.assertAlmostEqual(shift, -420, delta=8)
+        self.assertEqual(int(np.argmax(aligned[0])), 10_000)
+
+    def test_vocal_handoff_waits_for_incoming_phrase(self) -> None:
+        samples = SAMPLE_RATE * 4
+        outgoing = np.zeros((2, samples), dtype=np.float32)
+        incoming = np.zeros((2, samples), dtype=np.float32)
+        outgoing[:, : SAMPLE_RATE] = 0.25
+        incoming[:, int(samples * 0.62) :] = 0.25
+
+        timing = _vocal_handoff_timing(outgoing, incoming, vocal_conflict=0.7, method="beatmix")
+
+        self.assertLess(timing["outgoingEndFraction"], 0.35)
+        self.assertGreaterEqual(timing["incomingStartFraction"], 0.58)
+
+    def test_energy_handoff_ducks_hot_incoming_intro(self) -> None:
+        samples = SAMPLE_RATE * 4
+        outgoing = np.full((2, samples), 0.12, dtype=np.float32)
+        incoming = np.full((2, samples), 0.42, dtype=np.float32)
+
+        profile = _energy_handoff_profile(outgoing, incoming, "beatmix")
+        curves = _automation_curves(samples, "beatmix", 0.1, None, profile)
+
+        self.assertLess(profile["incomingTrimDb"], -3)
+        self.assertLess(float(curves["in_drums"][0, SAMPLE_RATE // 2]), float(curves["in_drums"][0, -1]))
+
+    @patch("backend.seamless._rubberband_command", return_value=None)
+    @patch("backend.seamless._demucs_available", return_value=False)
+    def test_generate_seamless_transition_falls_back_without_external_tools(self, _demucs, _rubberband) -> None:
+        seconds = 16
+        t = np.linspace(0, seconds, SAMPLE_RATE * seconds, endpoint=False, dtype=np.float32)
+        outgoing = np.vstack([0.12 * np.sin(2 * np.pi * 220 * t), 0.12 * np.sin(2 * np.pi * 220 * t)]).astype(np.float32)
+        incoming = np.vstack([0.12 * np.sin(2 * np.pi * 330 * t), 0.12 * np.sin(2 * np.pi * 330 * t)]).astype(np.float32)
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        import soundfile as sf
+
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_path = tmp_path / "out.wav"
+            in_path = tmp_path / "in.wav"
+            sf.write(out_path, outgoing.T, SAMPLE_RATE)
+            sf.write(in_path, incoming.T, SAMPLE_RATE)
+            analysis_a = {
+                "duration": seconds,
+                "bpm": 120,
+                "key": "8A",
+                "camelot": "8A",
+                "bars": [0, 2, 4, 6, 8, 10, 12, 14],
+                "phrases": [0, 8],
+                "transition_candidates": {"outro": 8, "outro_vocal_density": 0.05},
+                "vocal_density_curve": [{"time": 8, "density": 0.05}],
+            }
+            analysis_b = {
+                "duration": seconds,
+                "bpm": 122,
+                "key": "8A",
+                "camelot": "8A",
+                "bars": [0, 2, 4, 6, 8, 10, 12, 14],
+                "phrases": [0, 8],
+                "transition_candidates": {"intro": 0, "intro_vocal_density": 0.05},
+                "vocal_density_curve": [{"time": 0, "density": 0.05}],
+            }
+            result = generate_seamless_transition(
+                out_path,
+                in_path,
+                analysis_a,
+                analysis_b,
+                {
+                    "method": "beatmix",
+                    "overlapDuration": 4,
+                    "outgoingCue": {"time": 8, "role": "outro", "sectionType": "outro"},
+                    "incomingCue": {"time": 0, "role": "entry", "sectionType": "intro"},
+                },
+                {"useStemSeparation": True, "previewDurationBeforeTransition": 4, "previewDurationAfterTransition": 4},
+            )
+
+        self.assertTrue(Path(result["audioPath"]).exists())
+        self.assertFalse(result["processingReport"]["usedStemSeparation"])
+        self.assertGreaterEqual(len(result["warnings"]), 1)
+        self.assertEqual(result["processingReport"]["crossfadeCurve"], "equal_power")
+        self.assertIn("transientShiftMs", result["processingReport"])
+        self.assertIn("incomingVocalDelayMs", result["processingReport"])
+        self.assertIn("incomingEnergyTrimDb", result["processingReport"])
 
 
 if __name__ == "__main__":

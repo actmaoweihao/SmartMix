@@ -25,12 +25,16 @@ const state = {
     targetEnergy: "keep",
     beginnerMode: true,
     maxComplexity: 3,
+    previews: {},
+    loadingPreviewId: null,
   },
   match: {
     fileA: null,
     fileB: null,
     result: null,
+    repairResult: null,
     loading: false,
+    repairLoading: false,
     error: "",
   },
   settings: {
@@ -324,6 +328,7 @@ const els = {
   matchFileA: document.querySelector("#matchFileA"),
   matchFileB: document.querySelector("#matchFileB"),
   matchButton: document.querySelector("#matchButton"),
+  repairMatchButton: null,
   matchResult: document.querySelector("#matchResult"),
   projectName: document.querySelector("#projectName"),
   saveProject: document.querySelector("#saveProject"),
@@ -348,7 +353,19 @@ pingBackend();
 loadProjectList();
 render();
 
+function ensureRepairMatchButton() {
+  if (els.repairMatchButton || !els.matchButton) return;
+  const button = document.createElement("button");
+  button.id = "repairMatchButton";
+  button.type = "button";
+  button.className = "secondary";
+  button.textContent = "自动修复匹配";
+  els.matchButton.insertAdjacentElement("afterend", button);
+  els.repairMatchButton = button;
+}
+
 function bindEvents() {
+  ensureRepairMatchButton();
   els.fileInput.addEventListener("change", (event) => addFiles([...event.target.files]));
   els.sortButton.addEventListener("click", applySort);
   els.playButton.addEventListener("click", () => previewMix(state.playbackOffset));
@@ -366,13 +383,16 @@ function bindEvents() {
   els.teachingContent.addEventListener("click", teachingPanelClick);
   els.matchFileA.addEventListener("change", () => {
     state.match.fileA = els.matchFileA.files?.[0] || null;
+    state.match.repairResult = null;
     renderMatchResult();
   });
   els.matchFileB.addEventListener("change", () => {
     state.match.fileB = els.matchFileB.files?.[0] || null;
+    state.match.repairResult = null;
     renderMatchResult();
   });
   els.matchButton.addEventListener("click", calculatePairMatch);
+  els.repairMatchButton.addEventListener("click", repairPairMatch);
 
   els.sortMode.addEventListener("change", syncSettings);
   els.crossfade.addEventListener("input", syncSettings);
@@ -530,9 +550,43 @@ async function calculatePairMatch() {
   }
 }
 
+async function repairPairMatch() {
+  if (!state.match.fileA || !state.match.fileB) {
+    state.match.error = "请先选择两首音频。";
+    renderMatchResult();
+    return;
+  }
+  state.match.repairLoading = true;
+  state.match.error = "";
+  state.match.repairResult = null;
+  renderMatchResult();
+  try {
+    await assertBackendReachable();
+    const form = new FormData();
+    form.append("file_a", state.match.fileA);
+    form.append("file_b", state.match.fileB);
+    form.append("process_target", "auto");
+    form.append("include_key", "true");
+    form.append("include_tempo", "true");
+    form.append("include_energy", "true");
+    form.append("max_tempo_change_percent", "10");
+    form.append("max_pitch_shift_semitones", "4");
+    form.append("format", "wav");
+    state.match.repairResult = await fetchJson(`${API}/api/match/repair`, { method: "POST", body: form });
+    state.match.result = state.match.repairResult.original_match || state.match.result;
+    setStatus("已生成匹配修复版本");
+  } catch (error) {
+    state.match.error = error.message || "自动修复匹配失败";
+  } finally {
+    state.match.repairLoading = false;
+    renderMatchResult();
+  }
+}
+
 function renderMatchResult() {
   if (!els.matchResult) return;
   els.matchButton.disabled = state.match.loading || !state.match.fileA || !state.match.fileB;
+  if (els.repairMatchButton) els.repairMatchButton.disabled = state.match.loading || state.match.repairLoading || !state.match.fileA || !state.match.fileB;
   if (state.match.loading) {
     els.matchResult.innerHTML = `<div class="match-loading">正在分析两首歌并计算匹配度...</div>`;
     return;
@@ -557,9 +611,12 @@ function renderMatchResult() {
       <strong>${Math.round(result.overall_score)}</strong>
       <em>Recommended direction: ${escapeHtml(result.recommended_direction)}</em>
     </div>
+    ${renderTrackAnalysisSummary(result.track_a, result.track_b)}
     ${renderDirectionMatch("A → B", forward)}
     ${renderDirectionMatch("B → A", reverse)}
     ${renderTuneRecommendations(result.tuning_recommendations || [])}
+    ${state.match.repairLoading ? `<div class="match-loading">正在生成匹配修复版本，这可能需要几十秒...</div>` : ""}
+    ${renderRepairResult(state.match.repairResult)}
   `;
 }
 
@@ -587,6 +644,71 @@ function renderTuneRecommendations(recommendations) {
         .join("")}
     </div>
   `;
+}
+
+function renderRepairResult(result) {
+  if (!result) return "";
+  const plan = result.repair_plan || {};
+  const repaired = result.repaired_track;
+  const original = result.original_match;
+  const repairedMatch = result.repaired_match;
+  const operations = plan.operations || [];
+  const before = original ? `${Math.round(original.overall_score)} / ${escapeHtml(original.overall_level)}` : "--";
+  const after = repairedMatch ? `${Math.round(repairedMatch.overall_score)} / ${escapeHtml(repairedMatch.overall_level)}` : "--";
+  return `
+    <div class="repair-result">
+      <div class="direction-head">
+        <strong>自动修复匹配</strong>
+        <span>${escapeHtml(before)} → ${escapeHtml(after)}</span>
+      </div>
+      <p>${escapeHtml(plan.explanation || "已生成处理计划。")}</p>
+      <div class="preview-report">
+        ${operations.length ? operations.map(renderRepairOperation).join("") : "<span>无需处理</span>"}
+      </div>
+      ${repaired ? `
+        <div class="repair-audio">
+          <audio controls src="${API}${escapeHtml(repaired.url)}"></audio>
+          <a class="download-link" href="${API}${escapeHtml(repaired.url)}" download="${escapeHtml(repaired.name || "match-repaired.wav")}">下载处理后的歌曲</a>
+        </div>
+      ` : ""}
+      ${(result.warnings || []).map((warning) => `<small>${escapeHtml(warning)}</small>`).join("")}
+    </div>
+  `;
+}
+
+function renderRepairOperation(operation) {
+  if (operation.type === "pitch") {
+    return `<span>Pitch ${escapeHtml(operation.from_camelot || "--")} → ${escapeHtml(operation.target_camelot || "--")} (${operation.semitones > 0 ? "+" : ""}${operation.semitones || 0} st)</span>`;
+  }
+  if (operation.type === "tempo") {
+    return `<span>Tempo ${operation.from_bpm || "--"} → ${operation.target_bpm || "--"} BPM (${operation.change_percent || 0}%)</span>`;
+  }
+  if (operation.type === "energy") {
+    return `<span>Energy ${operation.source_lufs || "--"} → ${operation.target_lufs || "--"} LUFS · low x${operation.low_gain || 1}</span>`;
+  }
+  return `<span>${escapeHtml(operation.type || "process")}</span>`;
+}
+
+function renderTrackAnalysisSummary(trackA, trackB) {
+  return `
+    <div class="component-grid match-track-summary">
+      ${renderTrackSummaryCard("Song A analysis", trackA)}
+      ${renderTrackSummaryCard("Song B analysis", trackB)}
+    </div>
+  `;
+}
+
+function renderTrackSummaryCard(label, track) {
+  const energyIndex = track?.energy_profile?.energy_index;
+  const lufs = track?.energy_profile?.lufs;
+  const duration = Number.isFinite(track?.duration) ? `${Math.round(track.duration)}s` : "--";
+  const energy = Number.isFinite(energyIndex) ? `${energyIndex}` : "--";
+  const loudness = Number.isFinite(lufs) ? `${lufs} LUFS` : "--";
+  return renderComponent(
+    label,
+    Number.isFinite(energyIndex) ? energyIndex : 0,
+    `${track?.bpm ?? "--"} BPM · ${track?.key || "--"} · ${track?.camelot || "--"} · energy ${energy} · ${loudness} · ${duration}`,
+  );
 }
 
 function renderDirectionMatch(title, direction) {
@@ -1672,9 +1794,59 @@ function syncTeachingSettings() {
 }
 
 function teachingPanelClick(event) {
+  const previewButton = event.target.closest("[data-teaching-preview]");
+  if (previewButton) {
+    generateTeachingPreview(previewButton.dataset.teachingPreview);
+    return;
+  }
   const button = event.target.closest("[data-teaching-apply]");
   if (!button) return;
   applyTeachingRecommendation(button.dataset.teachingApply);
+}
+
+async function generateTeachingPreview(nextId) {
+  const current = selectedTrack()?.status === "ready" ? selectedTrack() : playableTracks()[0];
+  const next = state.tracks.find((track) => track.localId === nextId);
+  if (!current?.id || !next?.id) {
+    setStatus("需要先上传并完成后端分析，才能生成真实过渡试听");
+    return;
+  }
+  const rec = recommendTransition(toTeachingAnalysis(current), toTeachingAnalysis(next), {
+    targetEnergy: state.teaching.targetEnergy,
+    beginnerMode: state.teaching.beginnerMode,
+    maxComplexity: state.teaching.maxComplexity,
+  })[0];
+  state.teaching.loadingPreviewId = nextId;
+  renderTeachingPanel();
+  try {
+    const result = await fetchJson(`${API}/api/transition-preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outgoingTrackId: current.id,
+        incomingTrackId: next.id,
+        recommendation: rec,
+        options: {
+          targetMode: "quality",
+          useStemSeparation: true,
+          stemEngine: "demucs",
+          timeStretchEngine: "rubberband",
+          preserveFormants: true,
+          previewDurationBeforeTransition: 8,
+          previewDurationAfterTransition: 8,
+          exportFormat: "wav",
+          beginnerSafeMode: state.teaching.beginnerMode,
+        },
+      }),
+    });
+    state.teaching.previews[nextId] = result;
+    setStatus("已生成无缝过渡试听");
+  } catch (error) {
+    setStatus(error.message || "过渡试听生成失败");
+  } finally {
+    state.teaching.loadingPreviewId = null;
+    renderTeachingPanel();
+  }
 }
 
 function applyTeachingRecommendation(nextId) {
@@ -1970,6 +2142,8 @@ function renderTeachingCard(item, index) {
   const target = state.tracks.find((track) => track.localId === item.track.id);
   const rec = item.bestTransition;
   const explanation = explainTransition(rec);
+  const preview = state.teaching.previews[item.track.id];
+  const isLoading = state.teaching.loadingPreviewId === item.track.id;
   return `
     <article class="teaching-card">
       <div class="teaching-card-head">
@@ -1992,8 +2166,35 @@ function renderTeachingCard(item, index) {
         ${rec.stepByStep.slice(0, 5).map(renderTeachingStep).join("")}
       </div>
       <div class="teaching-risk">${escapeHtml(riskLine(rec.method))}</div>
-      <button type="button" data-teaching-apply="${escapeHtml(item.track.id)}">使用这个接法</button>
+      ${preview ? renderPreviewResult(preview) : ""}
+      <div class="teaching-card-actions">
+        <button type="button" data-teaching-preview="${escapeHtml(item.track.id)}" ${isLoading ? "disabled" : ""}>${isLoading ? "生成中..." : "生成无缝试听"}</button>
+        <button type="button" data-teaching-apply="${escapeHtml(item.track.id)}">使用这个接法</button>
+      </div>
     </article>
+  `;
+}
+
+function renderPreviewResult(preview) {
+  const report = preview.processingReport || {};
+  return `
+    <div class="preview-result">
+      <div>
+        <strong>试听已生成</strong>
+        <a href="${API}${preview.url}" target="_blank" rel="noreferrer">打开 WAV</a>
+      </div>
+      <div class="preview-report">
+        <span>Tempo ${Math.round(report.tempoChangePercent || 0)}%</span>
+        <span>Drift ${Math.round(report.transientShiftMs || 0)}ms</span>
+        <span>Vocal +${Math.round(report.incomingVocalDelayMs || 0)}ms</span>
+        <span>Energy ${Math.round(report.incomingEnergyTrimDb || 0)}dB</span>
+        <span>Pitch ${report.pitchShiftSemitones || 0} st</span>
+        <span>Vocal ${Math.round((report.vocalConflictAfter || 0) * 100)}%</span>
+        <span>Risk ${Math.round((report.riskScore || 0) * 100)}</span>
+      </div>
+      <p>${escapeHtml(report.explanation || "")}</p>
+      ${(preview.warnings || []).length ? `<small>${escapeHtml(preview.warnings.slice(0, 2).join("；"))}</small>` : ""}
+    </div>
   `;
 }
 

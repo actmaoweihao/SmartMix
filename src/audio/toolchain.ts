@@ -11,10 +11,13 @@ export type CommandProbe = (command: string, args: string[]) => Promise<boolean>
 
 export async function checkAudioToolchain(probe: CommandProbe = defaultProbe): Promise<AudioToolchainStatus> {
   const [rubberbandAvailable, pythonAvailable, demucsAvailable, spleeterAvailable, essentiaAvailable] = await Promise.all([
-    probe("rubberband", ["--version"]),
+    probeAny(probe, [
+      ["rubberband-r3", ["--version"]],
+      ["rubberband", ["--version"]],
+    ]),
     probe("python", ["--version"]),
-    probe("python", ["-m", "demucs", "--help"]),
-    probe("python", ["-m", "spleeter", "--help"]),
+    probe("python", ["-c", "import demucs; print('ok')"]),
+    probe("python", ["-c", "import spleeter; print('ok')"]),
     probe("python", ["-c", "import essentia; print('ok')"]),
   ]);
   const warnings: string[] = [];
@@ -23,6 +26,13 @@ export async function checkAudioToolchain(probe: CommandProbe = defaultProbe): P
   if (!essentiaAvailable) warnings.push("Essentia 不可用，将跳过变速/变调后的二次验证。");
   if (!pythonAvailable) warnings.push("Python 不可用，外部音频工具 wrapper 无法执行。");
   return { rubberbandAvailable, demucsAvailable, spleeterAvailable, essentiaAvailable, pythonAvailable, warnings };
+}
+
+async function probeAny(probe: CommandProbe, commands: Array<[string, string[]]>): Promise<boolean> {
+  for (const [command, args] of commands) {
+    if (await probe(command, args)) return true;
+  }
+  return false;
 }
 
 async function defaultProbe(command: string, args: string[]): Promise<boolean> {

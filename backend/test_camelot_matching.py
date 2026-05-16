@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from backend.matching import camelot_key_distance, key_label_to_camelot, parse_camelot
+from backend.matching import adjusted_total_score, camelot_key_distance, key_label_to_camelot, parse_camelot, total_rank
 
 
 class CamelotMatchingTests(unittest.TestCase):
@@ -50,6 +50,18 @@ class CamelotMatchingTests(unittest.TestCase):
     def test_strict_parse(self) -> None:
         self.assertEqual(parse_camelot("12b"), (12, "B"))
         self.assertIsNone(parse_camelot("13A"))
+
+    def test_low_energy_match_cannot_be_perfect_even_with_same_key_and_bpm(self) -> None:
+        key_eval = {"score": 100, "relation": "same"}
+        bpm_eval = {"score": 100}
+        energy_eval = {"score": 50.4}
+        structure_eval = {"score": 96}
+        raw = 92.2
+
+        adjusted = adjusted_total_score(raw, key_eval, bpm_eval, energy_eval, structure_eval)
+
+        self.assertEqual(adjusted, 89.0)
+        self.assertEqual(total_rank(adjusted, key_eval, bpm_eval, energy_eval, structure_eval), "recommended")
 
 
 if __name__ == "__main__":

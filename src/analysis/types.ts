@@ -50,7 +50,17 @@ export type BpmScore = {
 
 export type KeyScore = {
   score: number;
-  relation: "same" | "adjacent" | "relative_major_minor" | "energy_boost" | "energy_drop" | "clash" | "unknown";
+  relation:
+    | "same"
+    | "adjacent"
+    | "relative_major_minor"
+    | "energy_boost"
+    | "energy_drop"
+    | "diagonal_mix"
+    | "jaws_mix"
+    | "mood_shifter"
+    | "clash"
+    | "unknown";
   explanation: string;
   debug?: KeyCompatibilityDebug;
 };

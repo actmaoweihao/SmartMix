@@ -86,6 +86,13 @@ def camelot_num_dist(n1: int, n2: int) -> int:
     return min(diff, 12 - diff)
 
 
+def camelot_clockwise_delta(n1: int, n2: int) -> int:
+    forward = (n2 - n1) % 12
+    if forward == 0:
+        return 0
+    return forward if forward <= 7 else forward - 12
+
+
 def camelot_key_distance(code1: str | None, code2: str | None) -> dict[str, Any]:
     parsed1 = parse_camelot(code1)
     parsed2 = parse_camelot(code2)
@@ -113,6 +120,7 @@ def camelot_key_distance(code1: str | None, code2: str | None) -> dict[str, Any]
     normalized1 = f"{n1}{m1}"
     normalized2 = f"{n2}{m2}"
     d_num = camelot_num_dist(n1, n2)
+    clockwise = camelot_clockwise_delta(n1, n2)
 
     if n1 == n2 and m1 == m2:
         return _key_result(
@@ -148,6 +156,54 @@ def camelot_key_distance(code1: str | None, code2: str | None) -> dict[str, Any]
             88,
             "adjacent",
             f"{normalized1} -> {normalized2} is an adjacent Camelot key with wrap-around support.",
+            warnings,
+        )
+    if m1 == m2 and clockwise == 2:
+        return _key_result(
+            code1,
+            code2,
+            parsed1,
+            parsed2,
+            2,
+            80,
+            "energy_boost",
+            f"{normalized1} -> {normalized2} is Energy Boost (+2 on the Camelot Wheel); use with controlled overlap.",
+            warnings,
+        )
+    if m1 != m2 and clockwise == -1:
+        return _key_result(
+            code1,
+            code2,
+            parsed1,
+            parsed2,
+            d_num,
+            74,
+            "diagonal_mix",
+            f"{normalized1} -> {normalized2} is Diagonal Mix; treat it as a special-effect transition.",
+            warnings,
+        )
+    if m1 == m2 and clockwise == 7:
+        return _key_result(
+            code1,
+            code2,
+            parsed1,
+            parsed2,
+            d_num,
+            62,
+            "jaws_mix",
+            f"{normalized1} -> {normalized2} is Jaw's Mix (+7); use short cuts or dramatic sections.",
+            warnings,
+        )
+    if m1 != m2 and clockwise == 4:
+        return _key_result(
+            code1,
+            code2,
+            parsed1,
+            parsed2,
+            d_num,
+            66,
+            "mood_shifter",
+            f"{normalized1} -> {normalized2} is Mood Shifter (+4 across A/B); use short blends or section switches.",
             warnings,
         )
 
@@ -201,8 +257,10 @@ def _key_result(
 def camelot_rank(relation: str) -> str:
     if relation == "same":
         return "perfect"
-    if relation in {"relative_major_minor", "adjacent"}:
+    if relation in {"relative_major_minor", "adjacent", "energy_boost"}:
         return "recommended"
+    if relation in {"diagonal_mix", "jaws_mix", "mood_shifter"}:
+        return "special_effect"
     if relation == "unknown":
         return "unknown"
     return "clash"
@@ -235,17 +293,19 @@ def evaluate_direction(prev_track: dict[str, Any], next_track: dict[str, Any]) -
     energy_eval = energy_match_score(prev_track, next_track)
     structure_eval = structure_match_score(prev_track, next_track)
 
-    total = round(
+    raw_total = round(
         key_eval["score"] * 0.45
         + bpm_eval["score"] * 0.30
         + energy_eval["score"] * 0.15
         + structure_eval["score"] * 0.10,
         1,
     )
+    total = adjusted_total_score(raw_total, key_eval, bpm_eval, energy_eval, structure_eval)
     return {
         "direction": f"{prev_track.get('name', 'A')} -> {next_track.get('name', 'B')}",
         "total_score": total,
-        "level": total_rank(total),
+        "raw_total_score": raw_total,
+        "level": total_rank(total, key_eval, bpm_eval, energy_eval, structure_eval),
         "components": {
             "camelot": {
                 **key_eval,
@@ -361,7 +421,49 @@ def recommend_transition(prev_track: dict[str, Any], next_track: dict[str, Any])
     ).to_dict()
 
 
-def total_rank(score: float) -> str:
+def adjusted_total_score(
+    raw_score: float,
+    key_eval: dict[str, Any],
+    bpm_eval: dict[str, Any],
+    energy_eval: dict[str, Any],
+    structure_eval: dict[str, Any],
+) -> float:
+    """Keep weighted scoring, but stop one weak pillar from being hidden by Camelot/BPM."""
+    score = float(raw_score)
+    if key_eval.get("relation") == "clash":
+        score = min(score, 79.0)
+    if key_eval.get("relation") == "unknown":
+        score = min(score, 84.0)
+    if float(energy_eval.get("score") or 0) < 60:
+        score = min(score, 89.0)
+    if float(bpm_eval.get("score") or 0) < 70:
+        score = min(score, 84.0)
+    if float(structure_eval.get("score") or 0) < 70:
+        score = min(score, 84.0)
+    return round(score, 1)
+
+
+def total_rank(
+    score: float,
+    key_eval: dict[str, Any] | None = None,
+    bpm_eval: dict[str, Any] | None = None,
+    energy_eval: dict[str, Any] | None = None,
+    structure_eval: dict[str, Any] | None = None,
+) -> str:
+    if key_eval and key_eval.get("relation") == "clash":
+        return "usable" if score >= 60 else "avoid"
+    if key_eval and key_eval.get("relation") == "unknown" and score >= 85:
+        return "recommended"
+    if energy_eval and float(energy_eval.get("score") or 0) < 60 and score >= 90:
+        return "recommended"
+    if bpm_eval and float(bpm_eval.get("score") or 0) < 70 and score >= 85:
+        return "usable"
+    if structure_eval and float(structure_eval.get("score") or 0) < 70 and score >= 85:
+        return "usable"
+    return _rank_from_score(score)
+
+
+def _rank_from_score(score: float) -> str:
     if score >= 90:
         return "perfect"
     if score >= 75:

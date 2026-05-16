@@ -90,10 +90,19 @@ describe("Camelot key compatibility", () => {
     const neutral = scoreKeyCompatibility(makeTrack({ camelotKey: "8A" }), makeTrack({ camelotKey: "9A" }));
     const up = scoreKeyCompatibility(makeTrack({ camelotKey: "8A" }), makeTrack({ camelotKey: "9A" }), { targetEnergy: "up" });
     const down = scoreKeyCompatibility(makeTrack({ camelotKey: "8A" }), makeTrack({ camelotKey: "7A" }), { targetEnergy: "down" });
+    const boost = scoreKeyCompatibility(makeTrack({ camelotKey: "8A" }), makeTrack({ camelotKey: "10A" }));
 
     expect(neutral.relation).toBe("adjacent");
     expect(up.relation).toBe("energy_boost");
     expect(down.relation).toBe("energy_drop");
+    expect(boost.relation).toBe("energy_boost");
+    expect(boost.score).toBeGreaterThan(0.75);
+  });
+
+  it("supports special-effect Camelot relationships from the DJ Studio table", () => {
+    expect(scoreKeyCompatibility(makeTrack({ camelotKey: "8A" }), makeTrack({ camelotKey: "7B" })).relation).toBe("diagonal_mix");
+    expect(scoreKeyCompatibility(makeTrack({ camelotKey: "8A" }), makeTrack({ camelotKey: "3A" })).relation).toBe("jaws_mix");
+    expect(scoreKeyCompatibility(makeTrack({ camelotKey: "8A" }), makeTrack({ camelotKey: "11B" })).relation).toBe("mood_shifter");
   });
 
   it("exports strict Camelot parsing for debugging and tests", () => {

@@ -69,6 +69,7 @@ export function scoreKeyCompatibility(
   const bParsed = keyB.parsed;
   const aCode = keyA.normalized;
   const bCode = keyB.normalized;
+  const clockwise = clockwiseDelta(aParsed.number, bParsed.number);
 
   if (aCode === bCode) {
     return buildScore({
@@ -76,7 +77,7 @@ export function scoreKeyCompatibility(
       keyB,
       relation: "same",
       score: 1,
-      explanation: `${aCode} -> ${bCode} 是完全相同的 Camelot 调性，适合稳定的 harmonic mixing 和较长叠加。`,
+      explanation: `${aCode} -> ${bCode} 是 Perfect Mix：完全相同的 Camelot 调性，适合稳定 harmonic mixing 和较长叠加。`,
       warnings,
     });
   }
@@ -87,21 +88,63 @@ export function scoreKeyCompatibility(
       keyB,
       relation: "relative_major_minor",
       score: 0.93,
-      explanation: `${aCode} -> ${bCode} 是同数字 A/B 的关系大小调，旋律与和声通常高度兼容。`,
+      explanation: `${aCode} -> ${bCode} 是 Scale Change：同数字 A/B 互换，属于关系大小调，通常高度兼容。`,
       warnings,
     });
   }
 
-  const clockwise = clockwiseDelta(aParsed.number, bParsed.number);
   if (aParsed.letter === bParsed.letter && Math.abs(clockwise) === 1) {
     const directionalRelation = energyRelation(clockwise, context.targetEnergy);
-    const score = directionalRelation === "adjacent" ? 0.88 : targetEnergyScore(directionalRelation, context.targetEnergy);
     return buildScore({
       keyA,
       keyB,
       relation: directionalRelation,
-      score,
-      explanation: adjacentExplanation(aCode, bCode, clockwise, directionalRelation, context.targetEnergy),
+      score: directionalRelation === "adjacent" ? 0.88 : 0.9,
+      explanation: `${aCode} -> ${bCode} 是 ${clockwise === 1 ? "+1 Mix" : "-1 Mix"}：同字母相邻 Camelot 调性，适合顺滑混音。`,
+      warnings,
+    });
+  }
+
+  if (aParsed.letter === bParsed.letter && clockwise === 2) {
+    return buildScore({
+      keyA,
+      keyB,
+      relation: "energy_boost",
+      score: context.targetEnergy === "up" ? 0.84 : 0.8,
+      explanation: `${aCode} -> ${bCode} 是 Energy Boost：同字母顺时针 +2，用于明显提能量，建议控制叠加长度。`,
+      warnings,
+    });
+  }
+
+  if (aParsed.letter !== bParsed.letter && clockwise === -1) {
+    return buildScore({
+      keyA,
+      keyB,
+      relation: "diagonal_mix",
+      score: 0.74,
+      explanation: `${aCode} -> ${bCode} 是 Diagonal Mix：跨 A/B 且逆时针 -1，属于特殊效果型兼容，优先短叠加或效果器过渡。`,
+      warnings,
+    });
+  }
+
+  if (aParsed.letter === bParsed.letter && clockwise === 7) {
+    return buildScore({
+      keyA,
+      keyB,
+      relation: "jaws_mix",
+      score: 0.62,
+      explanation: `${aCode} -> ${bCode} 是 Jaw's Mix：同字母 +7 的戏剧化跳转，适合短切或特殊段落，不建议长时间叠加。`,
+      warnings,
+    });
+  }
+
+  if (aParsed.letter !== bParsed.letter && clockwise === 4) {
+    return buildScore({
+      keyA,
+      keyB,
+      relation: "mood_shifter",
+      score: 0.66,
+      explanation: `${aCode} -> ${bCode} 是 Mood Shifter：跨 A/B 且顺时针 +4，适合改变情绪色彩，建议用短混或段落切换。`,
       warnings,
     });
   }
@@ -111,7 +154,7 @@ export function scoreKeyCompatibility(
     keyB,
     relation: "clash",
     score: 0.24,
-    explanation: `${aCode} -> ${bCode} 不属于同调、相邻调或关系大小调，调性不兼容，不建议长时间叠加；可考虑 quick cut、echo out、fade 或 end-to-end。`,
+    explanation: `${aCode} -> ${bCode} 不属于 Perfect、±1、Energy Boost、Scale Change、Diagonal、Jaw's 或 Mood Shifter，调性不兼容，不建议长时间叠加。`,
     warnings,
   });
 }
@@ -121,11 +164,7 @@ export function scoreCamelotKeys(
   inputB: unknown,
   context: Pick<TransitionContext, "targetEnergy"> = {},
 ): KeyScore {
-  return scoreKeyCompatibility(
-    keyInputToTrack(inputA, "A"),
-    keyInputToTrack(inputB, "B"),
-    context,
-  );
+  return scoreKeyCompatibility(keyInputToTrack(inputA, "A"), keyInputToTrack(inputB, "B"), context);
 }
 
 export function toCamelot(track: TrackAnalysis): string | null {
@@ -135,10 +174,8 @@ export function toCamelot(track: TrackAnalysis): string | null {
 export function normalizeKeyToCamelot(value: unknown): string | null {
   const normalized = normalizeInput(value);
   if (!normalized) return null;
-
   const direct = parseCamelotKey(normalized);
   if (direct) return `${direct.number}${direct.letter}`;
-
   const traditional = normalizeTraditionalKeyName(normalized);
   return traditional ? CAMELOT_MAP[traditional] ?? null : null;
 }
@@ -155,7 +192,6 @@ export function parseCamelotKey(value: unknown): ParsedCamelotKey | null {
 function resolveTrackKey(track: TrackAnalysis, label: string): ResolvedKey {
   const warnings: string[] = [];
   const camelotInput = normalizeInput(track.camelotKey);
-
   if (camelotInput) {
     const parsed = parseCamelotKey(camelotInput);
     if (!parsed) {
@@ -165,13 +201,11 @@ function resolveTrackKey(track: TrackAnalysis, label: string): ResolvedKey {
     const normalized = `${parsed.number}${parsed.letter}`;
     return { input: camelotInput, normalized, parsed, warnings };
   }
-
   const keyInput = normalizeInput(track.key);
   if (!keyInput) {
     warnings.push(`${label}: missing musical key`);
     return { input: "", warnings };
   }
-
   const normalized = normalizeKeyToCamelot(keyInput) ?? undefined;
   const parsed = normalized ? parseCamelotKey(normalized) ?? undefined : undefined;
   if (!normalized || !parsed) warnings.push(`${label}: unsupported musical key "${keyInput}"`);
@@ -198,12 +232,7 @@ function buildScore(input: {
     explanation: input.explanation,
     warnings: input.warnings,
   };
-  return {
-    score: debug.score,
-    relation: input.relation,
-    explanation: input.explanation,
-    debug,
-  };
+  return { score: debug.score, relation: input.relation, explanation: input.explanation, debug };
 }
 
 function normalizeInput(value: unknown): string {
@@ -242,36 +271,13 @@ function normalizeTraditionalKeyName(value: string): string | null {
 function clockwiseDelta(from: number, to: number): number {
   const forward = (to - from + 12) % 12;
   if (forward === 0) return 0;
-  return forward <= 6 ? forward : forward - 12;
+  return forward <= 7 ? forward : forward - 12;
 }
 
-function energyRelation(
-  clockwise: number,
-  targetEnergy: TransitionContext["targetEnergy"],
-): KeyScore["relation"] {
+function energyRelation(clockwise: number, targetEnergy: TransitionContext["targetEnergy"]): KeyScore["relation"] {
   if (targetEnergy === "up" && clockwise === 1) return "energy_boost";
   if (targetEnergy === "down" && clockwise === -1) return "energy_drop";
   return "adjacent";
-}
-
-function targetEnergyScore(relation: KeyScore["relation"], targetEnergy: TransitionContext["targetEnergy"]): number {
-  if (relation === "energy_boost") return targetEnergy === "up" ? 0.9 : 0.86;
-  if (relation === "energy_drop") return targetEnergy === "down" ? 0.9 : 0.86;
-  return 0.88;
-}
-
-function adjacentExplanation(
-  aCode: string,
-  bCode: string,
-  clockwise: number,
-  relation: KeyScore["relation"],
-  targetEnergy: TransitionContext["targetEnergy"],
-): string {
-  const direction = clockwise === 1 ? "顺时针相邻" : "逆时针相邻";
-  if (relation === "energy_boost") return `${aCode} -> ${bCode} 是同字母的${direction} Camelot 调性，符合目标能量提升。`;
-  if (relation === "energy_drop") return `${aCode} -> ${bCode} 是同字母的${direction} Camelot 调性，符合目标能量回落。`;
-  const targetNote = targetEnergy ? "，但不把它强行解释为目标能量方向" : "";
-  return `${aCode} -> ${bCode} 是同字母的${direction} Camelot 相邻调，适合 harmonic mixing${targetNote}。`;
 }
 
 function keyInputToTrack(input: unknown, label: string): TrackAnalysis {
