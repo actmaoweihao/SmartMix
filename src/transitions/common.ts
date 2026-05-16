@@ -23,7 +23,7 @@ export function buildRecommendation(input: BuildInput): TransitionRecommendation
   const outgoingCue = bestCue(input.outgoing, input.outgoingRoles);
   const incomingCue = bestCue(input.incoming, input.incomingRoles);
   const bpm = scoreBpmCompatibility(input.outgoing, input.incoming);
-  const key = scoreKeyCompatibility(input.outgoing, input.incoming);
+  const key = scoreKeyCompatibility(input.outgoing, input.incoming, input.context);
   const phrase = phraseAlignmentScore(outgoingCue, incomingCue);
   const vocal = detectVocalConflict(input.outgoing, input.incoming, outgoingCue.time, incomingCue.time, input.overlapDuration);
   const energy = energyFlowScore(input.outgoing, input.incoming, input.context.targetEnergy ?? "keep");
@@ -42,6 +42,7 @@ export function buildRecommendation(input: BuildInput): TransitionRecommendation
   const debugReasons = [
     `bpm=${bpm.category}`,
     `key=${key.relation}`,
+    `keyScore=${Math.round(key.score * 100)}%`,
     `vocalConflict=${Math.round(vocal.score * 100)}%`,
     `phrase=${Math.round(phrase * 100)}%`,
     `section=${Math.round(section * 100)}%`,

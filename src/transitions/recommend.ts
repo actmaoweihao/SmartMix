@@ -49,7 +49,7 @@ export function recommendNextTracks(
     .map((track) => {
       const bestTransition = recommendTransition(currentTrack, track, options)[0];
       const bpm = scoreBpmCompatibility(currentTrack, track);
-      const key = scoreKeyCompatibility(currentTrack, track);
+      const key = scoreKeyCompatibility(currentTrack, track, options);
       const energyDirection = trackAverageEnergy(track) >= trackAverageEnergy(currentTrack) ? "能量可上扬" : "能量会回落";
       return {
         track,
@@ -69,11 +69,12 @@ function adjustForMethod(
   context: TransitionContext,
 ): TransitionRecommendation {
   const bpm = scoreBpmCompatibility(outgoing, incoming);
-  const key = scoreKeyCompatibility(outgoing, incoming);
+  const key = scoreKeyCompatibility(outgoing, incoming, context);
   const vocal = detectVocalConflict(outgoing, incoming, rec.outgoingCue.time, rec.incomingCue.time, rec.overlapDuration || 4);
   const rawBpmDiff = Math.abs(outgoing.bpm - incoming.bpm);
   const isWideWithoutHalfTime = rawBpmDiff > 12 && bpm.bpmDiff > 3;
   const longBlend = ["beatmix", "bass_swap", "wide_bpm_loop", "loop_build", "acapella_mashup"].includes(rec.method);
+  const shortOrEffect = ["fade", "end_to_end", "quick_cut", "echo_out"].includes(rec.method);
   const incomingCueEnergy = energyAt(incoming, rec.incomingCue.time);
   const outgoingCueEnergy = energyAt(outgoing, rec.outgoingCue.time);
   const reasons = [...(rec.debug?.reasons ?? [])];
@@ -83,7 +84,7 @@ function adjustForMethod(
   if (longBlend && vocal.score > 0.35) {
     const penalty = vocal.score > 0.65 ? 0.5 : 0.3 + vocal.score * 0.22;
     score -= penalty;
-    reasons.push("两首歌在重叠区都有人声，长时间叠加会让歌词打架");
+    reasons.push("两首歌在叠加区都有人声，长时间叠加会让歌词打架");
   }
   if (["beatmix", "bass_swap"].includes(rec.method)) {
     if (bpm.category === "same" && vocal.score < 0.3) score += 0.08;
@@ -113,11 +114,11 @@ function adjustForMethod(
     if (context.beginnerMode) {
       score -= 0.48;
       beginnerPenalty += 0.48;
-      reasons.push("新手模式下 Loop 变速难度太高，降权");
+      reasons.push("新手模式中 Loop 变速难度太高，已降权");
     }
   }
   if (context.beginnerMode) {
-    if (["fade", "end_to_end", "quick_cut", "echo_out"].includes(rec.method)) score += 0.12;
+    if (shortOrEffect) score += 0.12;
     if (rec.difficulty >= 4) {
       const penalty = rec.difficulty === 5 ? 0.28 : 0.18;
       score -= penalty;
@@ -127,22 +128,25 @@ function adjustForMethod(
   if (isWideWithoutHalfTime) {
     if (["beatmix", "bass_swap"].includes(rec.method)) {
       score -= 0.4;
-      reasons.push("BPM 差超过 12，且不是 half-time/double-time，不适合长时间对拍");
+      reasons.push("BPM 差超过 12 且不是 half-time/double-time，不适合长时间对拍");
     }
     if (["echo_out", "quick_cut", "breakdown_switch"].includes(rec.method)) {
       score += 0.2;
-      reasons.push("BPM 差较大，短切或效果退出更稳定");
+      reasons.push("BPM 差较大，短切或效果器退出更稳定");
     }
   }
   if (key.relation === "clash") {
     reasons.push("调性不兼容，不建议长时间叠加");
-    if (longBlend) {
-      score -= 0.24;
-    }
-    if (["fade", "quick_cut", "echo_out"].includes(rec.method)) {
-      score += 0.12;
+    if (longBlend) score -= 0.36;
+    if (shortOrEffect) {
+      score += 0.14;
       reasons.push("调性不兼容时短过渡更稳");
     }
+  }
+  if (key.relation === "unknown") {
+    reasons.push("未能识别调性，因此更建议使用短切或效果器过渡");
+    if (longBlend) score -= 0.18;
+    if (shortOrEffect) score += 0.08;
   }
   if (rec.method === "breakdown_switch" && (bpm.category === "medium" || bpm.category === "wide" || isWideWithoutHalfTime)) score += 0.2;
   if (rec.method === "breakdown_switch" && rec.outgoingCue.sectionType === "breakdown" && vocal.score < 0.25 && isWideWithoutHalfTime) {
@@ -157,7 +161,7 @@ function adjustForMethod(
   }
   if ((context.targetEnergy ?? "keep") === "keep" && ["drop", "chorus"].includes(rec.incomingCue.role) && incomingCueEnergy - outgoingCueEnergy > 0.25) {
     score -= 0.18;
-    reasons.push("目标是保持能量，直接切入高能 drop/chorus 会太突兀");
+    reasons.push("目标是保持能量，直接切入高能 drop/chorus 会太突然");
   }
   if (context.targetEnergy === "down" && ["fade", "end_to_end", "breakdown_switch"].includes(rec.method)) score += 0.1;
 
@@ -178,7 +182,13 @@ function adjustForMethod(
 }
 
 function enrichReason(reason: string, reasons: string[]): string {
-  const important = reasons.filter((item) => item.includes("人声") || item.includes("BPM 差") || item.includes("调性") || item.includes("能量"));
+  const important = reasons.filter(
+    (item) =>
+      item.includes("人声") ||
+      item.includes("BPM 差") ||
+      item.includes("调性") ||
+      item.includes("能量"),
+  );
   if (!important.length) return reason;
   return `${reason} ${[...new Set(important)].join("；")}。`;
 }

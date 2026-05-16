@@ -52,6 +52,26 @@ export type KeyScore = {
   score: number;
   relation: "same" | "adjacent" | "relative_major_minor" | "energy_boost" | "energy_drop" | "clash" | "unknown";
   explanation: string;
+  debug?: KeyCompatibilityDebug;
+};
+
+export type KeyCompatibilityDebug = {
+  inputA: string;
+  inputB: string;
+  normalizedA?: string;
+  normalizedB?: string;
+  parsedA?: {
+    number: number;
+    letter: "A" | "B";
+  };
+  parsedB?: {
+    number: number;
+    letter: "A" | "B";
+  };
+  relation: KeyScore["relation"];
+  score: number;
+  explanation: string;
+  warnings: string[];
 };
 
 export type VocalConflictScore = {

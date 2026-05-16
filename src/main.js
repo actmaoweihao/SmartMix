@@ -655,6 +655,9 @@ async function uploadAndAnalyze(track) {
     track.mode = result.mode;
     track.energy = result.energy || 0;
     track.energy_profile = result.energy_profile || null;
+    track.energy_curve = result.energy_curve || result.transition_candidates?.energy_curve || null;
+    track.vocal_density_curve = result.vocal_density_curve || result.transition_candidates?.vocal_density_curve || null;
+    track.sections = result.sections || result.transition_candidates?.sections || null;
     track.intro_low = result.intro_low || 0;
     track.outro_low = result.outro_low || 0;
     track.loudness_lufs = result.loudness_lufs;
@@ -729,6 +732,9 @@ function applyLocalFallbackAnalysis(track, error) {
   track.mode = key.mode;
   track.energy = envelope.energy;
   track.energy_profile = envelope.energyProfile;
+  track.energy_curve = null;
+  track.vocal_density_curve = null;
+  track.sections = null;
   track.intro_low = envelope.introLow;
   track.outro_low = envelope.outroLow;
   track.loudness_lufs = localLoudness(mono);
@@ -1030,7 +1036,14 @@ function keyDistance(a, b) {
   const codeA = a.camelot || keyLabelToCamelot(a.key, a.mode);
   const codeB = b.camelot || keyLabelToCamelot(b.key, b.mode);
   if (!codeA || !codeB) return 0.5;
-  return Math.min(1, camelotDistance(codeA, codeB) / 6);
+  const relation = camelotRelation(codeA, codeB);
+  return {
+    same: 0,
+    relative_major_minor: 0.08,
+    adjacent: 0.12,
+    clash: 0.85,
+    unknown: 0.5,
+  }[relation];
 }
 
 const KEY_TO_CAMELOT = {
@@ -1053,7 +1066,11 @@ function keyLabelToCamelot(label, mode) {
 }
 
 function parseCamelot(code) {
-  return { num: Number(code.slice(0, -1)), mode: code.slice(-1) };
+  const match = String(code || "").trim().toUpperCase().match(/^(\d{1,2})([AB])$/);
+  if (!match) return null;
+  const num = Number(match[1]);
+  if (!Number.isInteger(num) || num < 1 || num > 12) return null;
+  return { num, mode: match[2] };
 }
 
 function camelotNumDistance(a, b) {
@@ -1061,17 +1078,14 @@ function camelotNumDistance(a, b) {
   return Math.min(diff, 12 - diff);
 }
 
-function camelotDistance(codeA, codeB) {
+function camelotRelation(codeA, codeB) {
   const a = parseCamelot(codeA);
   const b = parseCamelot(codeB);
-  const dNum = camelotNumDistance(a.num, b.num);
-  let score;
-  if (a.num === b.num) score = 0;
-  else if (a.mode === b.mode) score = dNum;
-  else score = dNum + 2;
-  if (dNum === 5) score -= 1;
-  if (dNum >= 6) score += 1;
-  return Math.max(0, score);
+  if (!a || !b) return "unknown";
+  if (a.num === b.num && a.mode === b.mode) return "same";
+  if (a.num === b.num && a.mode !== b.mode) return "relative_major_minor";
+  if (a.mode === b.mode && camelotNumDistance(a.num, b.num) === 1) return "adjacent";
+  return "clash";
 }
 
 async function previewMix(offset = 0) {
@@ -1429,6 +1443,9 @@ function exportableTrack(track) {
     beat_confidence: track.beat_confidence || 0,
     energy: track.energy,
     energy_profile: track.energy_profile,
+    energy_curve: track.energy_curve,
+    vocal_density_curve: track.vocal_density_curve,
+    sections: track.sections,
     intro_low: track.intro_low,
     outro_low: track.outro_low,
     loudness_lufs: track.loudness_lufs,
@@ -2175,6 +2192,16 @@ function teachingBeatGrid(track, bpm) {
 }
 
 function teachingSections(track, bpm) {
+  if (Array.isArray(track.sections) && track.sections.length) {
+    return track.sections.map((section) => ({
+      type: section.type,
+      startTime: Number(section.startTime) || 0,
+      endTime: Number(section.endTime) || 0,
+      startBeat: Number(section.startBeat) || 0,
+      endBeat: Number(section.endBeat) || 0,
+      confidence: Number(section.confidence) || 0.5,
+    })).filter((section) => section.endTime > section.startTime);
+  }
   const duration = Math.max(track.duration || 0, 1);
   const introEnd = clamp(track.introPoint || track.transition_candidates?.intro || duration * 0.12, 2, duration * 0.35);
   const outroStart = clamp(track.outroPoint || track.transition_candidates?.outro || duration * 0.82, duration * 0.55, duration - 1);
@@ -2201,6 +2228,12 @@ function teachingSections(track, bpm) {
 }
 
 function teachingEnergyCurve(track) {
+  if (Array.isArray(track.energy_curve) && track.energy_curve.length) {
+    return track.energy_curve.map((point) => ({
+      time: Number(point.time) || 0,
+      energy: clamp(Number(point.energy) || 0, 0, 1),
+    }));
+  }
   const duration = Math.max(track.duration || 0, 1);
   const base = Number(track.energy) || 0.5;
   const intro = track.transition_candidates?.intro_energy ?? track.energy_profile?.intro_relative_energy ?? base * 0.75;
@@ -2215,6 +2248,12 @@ function teachingEnergyCurve(track) {
 }
 
 function teachingVocalCurve(track) {
+  if (Array.isArray(track.vocal_density_curve) && track.vocal_density_curve.length) {
+    return track.vocal_density_curve.map((point) => ({
+      time: Number(point.time) || 0,
+      density: clamp(Number(point.density) || 0, 0, 1),
+    }));
+  }
   const duration = Math.max(track.duration || 0, 1);
   const intro = track.transition_candidates?.intro_vocal_density;
   const outro = track.transition_candidates?.outro_vocal_density;

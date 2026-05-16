@@ -29,7 +29,7 @@ def analyze_audio(path: Path) -> dict:
     key = _estimate_key(y, sr)
     energy = _energy_metrics(y, sr)
     loudness = loudness_metrics(y, sr)
-    candidates = _transition_candidates(y, sr, duration, beat_grid["bars"], energy)
+    candidates = _transition_candidates(y, sr, duration, beat_grid["bars"], energy, bpm)
 
     return {
         "duration": duration,
@@ -50,6 +50,9 @@ def analyze_audio(path: Path) -> dict:
         "loudness_lufs": loudness["lufs"],
         "true_peak_db": loudness["peak_db"],
         "transition_candidates": candidates,
+        "sections": candidates.get("sections", []),
+        "vocal_density_curve": candidates.get("vocal_density_curve", []),
+        "energy_curve": candidates.get("energy_curve", []),
         "peaks": _waveform_peaks(y, 720),
     }
 
@@ -320,7 +323,7 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[float], energy: dict) -> dict:
+def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[float], energy: dict, bpm: float | None = None) -> dict:
     if not bars:
         intro = min(max(energy["intro_low"], 4.0), duration * 0.35)
         outro = max(intro + 1.0, duration - min(max(energy["outro_low"], 8.0), duration * 0.35))
@@ -330,6 +333,9 @@ def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[f
             "confidence": 0.35,
             "intro_vocal_density": None,
             "outro_vocal_density": None,
+            "sections": _fallback_sections(duration, float(bpm or 120), intro, outro),
+            "vocal_density_curve": [],
+            "energy_curve": [],
             "method": "energy-fallback",
         }
 
@@ -354,8 +360,100 @@ def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[f
         "outro_vocal_density": round(float(outro_feature["vocal_density"]), 3) if outro_feature else None,
         "intro_energy": round(float(intro_feature["energy"]), 3) if intro_feature else None,
         "outro_energy": round(float(outro_feature["energy"]), 3) if outro_feature else None,
+        "sections": _structure_sections(duration, float(bpm or 120), bars, features, float(intro), float(outro)),
+        "vocal_density_curve": _curve_points(features, "vocal_density"),
+        "energy_curve": _curve_points(features, "energy"),
         "method": "bar-vocal-energy",
     }
+
+
+def _curve_points(features: list[dict], key: str, limit: int = 48) -> list[dict]:
+    if not features:
+        return []
+    step = max(1, int(np.ceil(len(features) / limit)))
+    return [{"time": round(float(item["time"]), 3), "density" if key == "vocal_density" else "energy": round(float(item[key]), 3)} for item in features[::step]]
+
+
+def _structure_sections(duration: float, bpm: float, bars: list[float], features: list[dict], intro: float, outro: float) -> list[dict]:
+    if duration <= 0:
+        return []
+    intro_end = _clamp_time(intro, 2.0, duration * 0.35)
+    outro_start = _clamp_time(outro, max(intro_end + 4.0, duration * 0.55), max(intro_end + 4.0, duration - 1.0))
+    beat_seconds = 60 / max(bpm, 1)
+    phrase = 32 * beat_seconds
+    middle_features = [item for item in features if intro_end <= item["time"] <= outro_start]
+    breakdown_feature = _pick_breakdown_feature(middle_features, duration)
+    breakdown_start = breakdown_feature["time"] if breakdown_feature else _nearest_bar_time(bars, duration * 0.66)
+    breakdown_start = _clamp_time(breakdown_start, intro_end + phrase, max(intro_end + phrase, outro_start - phrase))
+    breakdown_end = min(outro_start, breakdown_start + phrase)
+    chorus_start = _nearest_bar_time(bars, max(intro_end + phrase, duration * 0.38))
+    chorus_end = min(breakdown_start, chorus_start + phrase * 2)
+    drop_start = min(outro_start, breakdown_end)
+
+    specs = [
+        ("intro", 0.0, intro_end, 0.82),
+        ("verse", intro_end, min(chorus_start, breakdown_start), 0.58),
+        ("chorus", chorus_start, chorus_end, 0.72),
+        ("bridge", chorus_end, breakdown_start, 0.5),
+        ("breakdown", breakdown_start, breakdown_end, 0.64),
+        ("drop", drop_start, outro_start, 0.62),
+        ("outro", outro_start, duration, 0.78),
+    ]
+    return _clean_sections(specs, beat_seconds)
+
+
+def _fallback_sections(duration: float, bpm: float, intro: float, outro: float) -> list[dict]:
+    intro_end = _clamp_time(intro, 2.0, duration * 0.35)
+    outro_start = _clamp_time(outro, duration * 0.55, max(duration - 1.0, 1.0))
+    specs = [
+        ("intro", 0.0, intro_end, 0.45),
+        ("verse", intro_end, duration * 0.38, 0.35),
+        ("chorus", duration * 0.38, duration * 0.58, 0.35),
+        ("bridge", duration * 0.58, duration * 0.68, 0.3),
+        ("breakdown", duration * 0.68, min(duration * 0.78, outro_start), 0.3),
+        ("drop", min(duration * 0.78, outro_start), outro_start, 0.3),
+        ("outro", outro_start, duration, 0.45),
+    ]
+    return _clean_sections(specs, 60 / max(bpm, 1))
+
+
+def _pick_breakdown_feature(features: list[dict], duration: float) -> dict | None:
+    candidates = [item for item in features if duration * 0.35 <= item["time"] <= duration * 0.82]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: item["energy"] * 0.65 + item["vocal_density"] * 0.25 + abs(item["position"] - 0.68) * 0.1)
+
+
+def _nearest_bar_time(bars: list[float], target: float) -> float:
+    if not bars:
+        return float(target)
+    return float(min(bars, key=lambda value: abs(value - target)))
+
+
+def _clean_sections(specs: list[tuple[str, float, float, float]], beat_seconds: float) -> list[dict]:
+    sections = []
+    for section_type, start, end, confidence in specs:
+        start = max(0.0, float(start))
+        end = max(start, float(end))
+        if end - start < 1.0:
+            continue
+        sections.append(
+            {
+                "type": section_type,
+                "startTime": round(start, 3),
+                "endTime": round(end, 3),
+                "startBeat": int(round(start / beat_seconds)),
+                "endBeat": int(round(end / beat_seconds)),
+                "confidence": round(float(confidence), 2),
+            }
+        )
+    return sections
+
+
+def _clamp_time(value: float, low: float, high: float) -> float:
+    if high < low:
+        return float(low)
+    return float(max(low, min(high, value)))
 
 
 def _bar_features(y: np.ndarray, sr: int, bars: list[float], duration: float) -> list[dict]:

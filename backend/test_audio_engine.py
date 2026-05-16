@@ -95,6 +95,9 @@ class AnalysisCandidateTests(unittest.TestCase):
         self.assertEqual(candidates["method"], "bar-vocal-energy")
         self.assertIn("intro_vocal_density", candidates)
         self.assertIn("outro_vocal_density", candidates)
+        self.assertIn("sections", candidates)
+        self.assertIn("vocal_density_curve", candidates)
+        self.assertIn("energy_curve", candidates)
 
 
 class CrossfadePlanTests(unittest.TestCase):

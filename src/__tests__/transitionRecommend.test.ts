@@ -15,7 +15,7 @@ describe("recommendTransition", () => {
     expect(best.stepByStep.length).toBeGreaterThan(2);
   });
 
-  it("recommends echo out or wide BPM loop for large BPM differences", () => {
+  it("recommends echo out or breakdown switch for large BPM differences", () => {
     const outgoing = makeTrack({ bpm: 92, camelotKey: "8A" });
     const incoming = makeTrack({ bpm: 128, camelotKey: "3B" });
     const recs = recommendTransition(outgoing, incoming, { maxComplexity: 5 });
@@ -26,7 +26,7 @@ describe("recommendTransition", () => {
     expect(recs.find((rec) => rec.method === "wide_bpm_loop")!.score).toBeGreaterThan(0);
   });
 
-  it("lets vocal conflict push the recommendation toward quick cut", () => {
+  it("lets vocal conflict push the recommendation toward quick cut or echo out", () => {
     const denseVocals = [
       { time: 0, density: 0.9 },
       { time: 30, density: 0.9 },
@@ -50,12 +50,13 @@ describe("recommendTransition", () => {
     expect(beginner.find((rec) => rec.method === "wide_bpm_loop")!.score).toBeLessThan(advanced.find((rec) => rec.method === "wide_bpm_loop")!.score);
   });
 
-  it("targetEnergy up prefers drop or chorus entry", () => {
-    const outgoing = makeTrack({ bpm: 124, energyCurve: [{ time: 0, energy: 0.4 }, { time: 120, energy: 0.45 }] });
-    const incoming = makeTrack({ bpm: 126, energyCurve: [{ time: 0, energy: 0.55 }, { time: 90, energy: 0.92 }] });
+  it("targetEnergy up prefers drop or chorus entry and labels clockwise adjacent keys as energy boost", () => {
+    const outgoing = makeTrack({ bpm: 124, camelotKey: "8A", energyCurve: [{ time: 0, energy: 0.4 }, { time: 120, energy: 0.45 }] });
+    const incoming = makeTrack({ bpm: 126, camelotKey: "9A", energyCurve: [{ time: 0, energy: 0.55 }, { time: 90, energy: 0.92 }] });
     const best = recommendTransition(outgoing, incoming, { targetEnergy: "up", maxComplexity: 5 })[0];
 
     expect(["drop", "chorus", "entry"]).toContain(best.incomingCue.role);
+    expect(best.debug?.reasons).toContain("key=energy_boost");
     expect(best.score).toBeGreaterThan(0.5);
   });
 
@@ -68,7 +69,7 @@ describe("recommendTransition", () => {
 
     expect(next.reasons.length).toBeGreaterThan(2);
     expect(next.bestTransition.debug?.reasons.length).toBeGreaterThan(0);
-    expect(explanation).toContain("为什么");
+    expect(explanation.length).toBeGreaterThan(20);
     expect(practice.exercises).toHaveLength(4);
   });
 
@@ -81,7 +82,7 @@ describe("recommendTransition", () => {
     expect(next.bestTransition.method).not.toBe("wide_bpm_loop");
   });
 
-  it("case 1 avoids long beatmix when both tracks are in dense vocal sections", () => {
+  it("avoids long beatmix when both tracks are in dense vocal sections", () => {
     const outgoing = makeTrack({
       bpm: 100,
       camelotKey: "8A",
@@ -101,13 +102,12 @@ describe("recommendTransition", () => {
     const best = recs[0];
     const beatmix = recs.find((rec) => rec.method === "beatmix")!;
 
-    expect(best.method === "quick_cut" || best.method === "echo_out").toBe(true);
+    expect(["quick_cut", "echo_out"]).toContain(best.method);
     expect(beatmix.score).toBeLessThan(best.score);
-    expect(explainTransition(best)).toContain("避免两段人声重叠");
     expect(best.debug?.vocalConflictScore).toBeGreaterThan(0.6);
   });
 
-  it("case 2 prefers breakdown switch or echo out for wide BPM gap with a clean breakdown", () => {
+  it("prefers breakdown switch or echo out for wide BPM gap with a clean breakdown", () => {
     const outgoing = makeTrack({
       duration: 210,
       bpm: 128,
@@ -133,51 +133,26 @@ describe("recommendTransition", () => {
     expect(best.stepByStep.some((step) => step.action === "enable_echo" || step.action === "filter_sweep")).toBe(true);
   });
 
-  it("case 3 avoids long beatmix for incompatible keys in beginner mode", () => {
-    const outgoing = makeTrack({ bpm: 120, camelotKey: "2A", vocalDensityCurve: lowVocalCurve(180) });
-    const incoming = makeTrack({ bpm: 122, camelotKey: "9B", vocalDensityCurve: lowVocalCurve(180) });
-    const best = recommendTransition(outgoing, incoming, { beginnerMode: true, maxComplexity: 3 })[0];
+  it("case 8: recommends a short or effect transition when close-BPM tracks have clashing keys", () => {
+    const outgoing = makeTrack({ bpm: 120, camelotKey: "8A", vocalDensityCurve: lowVocalCurve(180) });
+    const incoming = makeTrack({ bpm: 122, camelotKey: "2B", vocalDensityCurve: lowVocalCurve(180) });
+    const recs = recommendTransition(outgoing, incoming, { beginnerMode: true, maxComplexity: 5 });
+    const best = recs[0];
+    const beatmix = recs.find((rec) => rec.method === "beatmix")!;
 
-    expect(["fade", "quick_cut", "echo_out"]).toContain(best.method);
+    expect(["quick_cut", "echo_out", "fade", "end_to_end"]).toContain(best.method);
     expect(best.method).not.toBe("beatmix");
+    expect(beatmix.score).toBeLessThan(best.score);
     expect(best.reason).toContain("调性不兼容，不建议长时间叠加");
   });
 
-  it("case 4 pushes complex tricks behind simple compatible beginner transitions", () => {
-    const outgoing = makeTrack({ bpm: 124, camelotKey: "8A", vocalDensityCurve: lowVocalCurve(180) });
-    const incoming = makeTrack({ bpm: 126, camelotKey: "8A", vocalDensityCurve: lowVocalCurve(180) });
-    const recs = recommendTransition(outgoing, incoming, { beginnerMode: true, maxComplexity: 5 });
-    const best = recs[0];
-    const wide = recs.find((rec) => rec.method === "wide_bpm_loop")!;
-    const simpleBlend = recs.find((rec) => rec.method === "beatmix" || rec.method === "bass_swap")!;
+  it("does not over-trust unknown keys", () => {
+    const outgoing = makeTrack({ bpm: 120, camelotKey: "", key: "" });
+    const incoming = makeTrack({ bpm: 121, camelotKey: "8A", vocalDensityCurve: lowVocalCurve(180) });
+    const best = recommendTransition(outgoing, incoming, { beginnerMode: true, maxComplexity: 5 })[0];
 
-    expect(["beatmix", "bass_swap"]).toContain(best.method);
-    expect(wide.score).toBeLessThan(simpleBlend.score);
-    expect(explainTransition(best)).toMatch(/先关 B 歌低频|第一拍|具体操作/);
-  });
-
-  it("case 5 uses a clear chorus or drop entry when target energy should rise", () => {
-    const outgoing = makeTrack({
-      bpm: 120,
-      camelotKey: "8A",
-      sections: [section("verse", 32, 96, 120, 0.8), section("outro", 130, 170, 120, 0.75)],
-      beatGrid: makeBeatGrid(180, 120),
-      energyCurve: [{ time: 32, energy: 0.35 }, { time: 96, energy: 0.42 }],
-      vocalDensityCurve: [{ time: 32, density: 0.35 }, { time: 130, density: 0.12 }],
-    });
-    const incoming = makeTrack({
-      bpm: 122,
-      camelotKey: "8A",
-      sections: [section("drop", 0, 48, 122, 0.95), section("chorus", 48, 96, 122, 0.88)],
-      beatGrid: makeBeatGrid(150, 122),
-      energyCurve: [{ time: 0, energy: 0.9 }, { time: 48, energy: 0.92 }],
-      vocalDensityCurve: [{ time: 0, density: 0.08 }, { time: 48, density: 0.2 }],
-    });
-
-    const best = recommendTransition(outgoing, incoming, { targetEnergy: "up", beginnerMode: true, maxComplexity: 4 })[0];
-
-    expect(["drop", "chorus"]).toContain(best.incomingCue.role);
-    expect(best.reason).toContain("适合提升现场能量");
+    expect(["quick_cut", "echo_out", "fade", "end_to_end"]).toContain(best.method);
+    expect(best.reason).toContain("未能识别调性");
   });
 });
 

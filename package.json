@@ -15,6 +15,7 @@
     "setup:tuning": "python -m pip install -r backend/requirements-tuning.txt"
   },
   "devDependencies": {
+    "@types/node": "^25.8.0",
     "concurrently": "^9.2.1",
     "typescript": "^6.0.3",
     "vite": "^7.2.4",
