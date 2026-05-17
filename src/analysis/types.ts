@@ -24,11 +24,41 @@ export type TrackAnalysis = {
   bpm: number;
   key: string;
   camelotKey?: string;
+  style?: TrackStyle;
+  styleConfidence?: number;
+  styleProfile?: {
+    primary?: TrackStyle;
+    label?: string;
+    confidence?: number;
+    scores?: Partial<Record<TrackStyle, number>>;
+    metrics?: Record<string, number>;
+  };
   energyCurve: Array<{ time: number; energy: number }>;
   sections: SongSection[];
   beatGrid: BeatGridPoint[];
   hasVocalAtTime?: (time: number) => boolean;
   vocalDensityCurve?: Array<{ time: number; density: number }>;
+};
+
+export type TrackStyle =
+  | "house"
+  | "techno"
+  | "drum_bass"
+  | "hiphop"
+  | "rnb"
+  | "rock"
+  | "pop"
+  | "ambient"
+  | "electronic"
+  | "unknown";
+
+export type StyleScore = {
+  score: number;
+  relation: "same" | "same_family" | "bridge" | "contrast" | "unknown";
+  from?: TrackStyle;
+  to?: TrackStyle;
+  confidence: number;
+  explanation: string;
 };
 
 export type CuePoint = {
@@ -154,6 +184,7 @@ export type TransitionDebugBreakdown = {
   vocalConflictScore: number;
   phraseScore: number;
   energyScore: number;
+  styleScore: number;
   beginnerScore: number;
   beginnerPenalty: number;
   sectionSuitability: number;

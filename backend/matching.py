@@ -46,6 +46,24 @@ KEY_TO_CAMELOT = {
 }
 
 UNKNOWN_KEY_LABELS = {"unknown", "未知"}
+STYLE_FAMILIES = {
+    "dance": {"house", "techno", "drum_bass", "electronic"},
+    "urban": {"hiphop", "rnb"},
+    "band": {"rock", "pop"},
+    "chill": {"ambient", "rnb", "electronic"},
+}
+STYLE_BRIDGES = {
+    frozenset(("house", "techno")),
+    frozenset(("house", "electronic")),
+    frozenset(("techno", "electronic")),
+    frozenset(("drum_bass", "electronic")),
+    frozenset(("hiphop", "rnb")),
+    frozenset(("pop", "rnb")),
+    frozenset(("pop", "rock")),
+    frozenset(("pop", "house")),
+    frozenset(("pop", "electronic")),
+    frozenset(("ambient", "electronic")),
+}
 
 
 def key_label_to_camelot(label: str | None, mode: str | None = None) -> str | None:
@@ -304,30 +322,33 @@ def evaluate_direction(prev_track: dict[str, Any], next_track: dict[str, Any]) -
     bpm_eval = bpm_match_score(prev_track.get("bpm"), next_track.get("bpm"))
     energy_eval = energy_match_score(prev_track, next_track)
     structure_eval = structure_match_score(prev_track, next_track)
+    style_eval = style_match_score(prev_track, next_track)
 
     raw_total = round(
-        key_eval["score"] * 0.45
-        + bpm_eval["score"] * 0.30
+        key_eval["score"] * 0.40
+        + bpm_eval["score"] * 0.25
         + energy_eval["score"] * 0.15
-        + structure_eval["score"] * 0.10,
+        + structure_eval["score"] * 0.10
+        + style_eval["score"] * 0.10,
         1,
     )
-    total = adjusted_total_score(raw_total, key_eval, bpm_eval, energy_eval, structure_eval)
+    total = adjusted_total_score(raw_total, key_eval, bpm_eval, energy_eval, structure_eval, style_eval)
     return {
         "direction": f"{prev_track.get('name', 'A')} -> {next_track.get('name', 'B')}",
         "total_score": total,
         "raw_total_score": raw_total,
-        "level": total_rank(total, key_eval, bpm_eval, energy_eval, structure_eval),
+        "level": total_rank(total, key_eval, bpm_eval, energy_eval, structure_eval, style_eval),
         "components": {
             "camelot": {
                 **key_eval,
                 "from": prev_camelot,
                 "to": next_camelot,
-                "weight": 0.45,
+                "weight": 0.40,
             },
-            "bpm": {**bpm_eval, "weight": 0.30},
+            "bpm": {**bpm_eval, "weight": 0.25},
             "energy": {**energy_eval, "weight": 0.15},
             "structure": {**structure_eval, "weight": 0.10},
+            "style": {**style_eval, "weight": 0.10},
         },
         "transition": recommend_transition(prev_track, next_track),
     }
@@ -420,6 +441,65 @@ def structure_match_score(prev_track: dict[str, Any], next_track: dict[str, Any]
     }
 
 
+def style_match_score(prev_track: dict[str, Any], next_track: dict[str, Any]) -> dict[str, Any]:
+    prev_style = _track_style(prev_track)
+    next_style = _track_style(next_track)
+    prev_conf = _track_style_confidence(prev_track)
+    next_conf = _track_style_confidence(next_track)
+    confidence = min(prev_conf, next_conf)
+
+    if not prev_style or not next_style or prev_style == "unknown" or next_style == "unknown" or confidence < 0.28:
+        return {
+            "score": 62,
+            "relation": "unknown",
+            "from": prev_style,
+            "to": next_style,
+            "confidence": round(confidence, 2),
+            "reason": "At least one track has uncertain style; using a neutral style score.",
+        }
+    if prev_style == next_style:
+        return {
+            "score": 100,
+            "relation": "same",
+            "from": prev_style,
+            "to": next_style,
+            "confidence": round(confidence, 2),
+            "reason": f"Both tracks are classified as {prev_style}; long blends and phrase-based transitions are more likely to feel coherent.",
+        }
+
+    pair = frozenset((prev_style, next_style))
+    if pair in STYLE_BRIDGES:
+        return {
+            "score": 84,
+            "relation": "bridge",
+            "from": prev_style,
+            "to": next_style,
+            "confidence": round(confidence, 2),
+            "reason": f"{prev_style} -> {next_style} is a known bridge pairing; use BPM/key/section checks to choose blend length.",
+        }
+
+    prev_family = _style_family(prev_style)
+    next_family = _style_family(next_style)
+    if prev_family and prev_family == next_family:
+        return {
+            "score": 76,
+            "relation": "same_family",
+            "from": prev_style,
+            "to": next_style,
+            "confidence": round(confidence, 2),
+            "reason": f"{prev_style} and {next_style} share the {prev_family} family, but may need shorter or EQ-aware transitions.",
+        }
+
+    return {
+        "score": 46,
+        "relation": "contrast",
+        "from": prev_style,
+        "to": next_style,
+        "confidence": round(confidence, 2),
+        "reason": f"{prev_style} -> {next_style} is a strong style contrast; prefer quick cuts, effects, or breakdown switches over long blends.",
+    }
+
+
 def recommend_transition(prev_track: dict[str, Any], next_track: dict[str, Any]) -> dict[str, Any]:
     return plan_transition(
         prev_track,
@@ -439,6 +519,7 @@ def adjusted_total_score(
     bpm_eval: dict[str, Any],
     energy_eval: dict[str, Any],
     structure_eval: dict[str, Any],
+    style_eval: dict[str, Any] | None = None,
 ) -> float:
     """Keep weighted scoring, but stop one weak pillar from being hidden by Camelot/BPM."""
     score = float(raw_score)
@@ -458,6 +539,8 @@ def adjusted_total_score(
         score = min(score, 84.0)
     if float(structure_eval.get("score") or 0) < 70:
         score = min(score, 84.0)
+    if style_eval and style_eval.get("relation") == "contrast":
+        score = min(score, 86.0)
     return round(score, 1)
 
 
@@ -467,6 +550,7 @@ def total_rank(
     bpm_eval: dict[str, Any] | None = None,
     energy_eval: dict[str, Any] | None = None,
     structure_eval: dict[str, Any] | None = None,
+    style_eval: dict[str, Any] | None = None,
 ) -> str:
     if key_eval and key_eval.get("relation") == "clash":
         return "usable" if score >= 60 else "avoid"
@@ -483,6 +567,8 @@ def total_rank(
     if bpm_eval and float(bpm_eval.get("score") or 0) < 70 and score >= 85:
         return "usable"
     if structure_eval and float(structure_eval.get("score") or 0) < 70 and score >= 85:
+        return "usable"
+    if style_eval and style_eval.get("relation") == "contrast" and score >= 85:
         return "usable"
     return _rank_from_score(score)
 
@@ -505,7 +591,50 @@ def _track_camelot(track: dict[str, Any]) -> str | None:
     return key_label_to_camelot(track.get("key"), track.get("mode"))
 
 
+def _track_style(track: dict[str, Any]) -> str | None:
+    raw = track.get("style") or track.get("genre")
+    if not raw and isinstance(track.get("style_profile"), dict):
+        raw = track["style_profile"].get("primary")
+    if not raw:
+        return None
+    value = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "hip_hop": "hiphop",
+        "hiphop_rap": "hiphop",
+        "rap": "hiphop",
+        "dnb": "drum_bass",
+        "drum_and_bass": "drum_bass",
+        "edm": "electronic",
+        "electronica": "electronic",
+        "r&b": "rnb",
+        "r_b": "rnb",
+    }
+    return aliases.get(value, value)
+
+
+def _track_style_confidence(track: dict[str, Any]) -> float:
+    value = track.get("style_confidence")
+    if value is None and isinstance(track.get("style_profile"), dict):
+        value = track["style_profile"].get("confidence")
+    if value is None:
+        return 0.5 if _track_style(track) else 0.0
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _style_family(style: str | None) -> str | None:
+    if not style:
+        return None
+    for family, styles in STYLE_FAMILIES.items():
+        if style in styles:
+            return family
+    return None
+
+
 def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
+    style_profile = track.get("style_profile") or {}
     return {
         "name": track.get("name"),
         "bpm": track.get("bpm"),
@@ -513,6 +642,10 @@ def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
         "camelot": _track_camelot(track),
         "energy": track.get("energy"),
         "energy_profile": track.get("energy_profile"),
+        "style": _track_style(track),
+        "style_label": track.get("style_label") or style_profile.get("label"),
+        "style_confidence": _track_style_confidence(track),
+        "style_profile": style_profile or None,
         "duration": track.get("duration"),
     }
 

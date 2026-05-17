@@ -1,5 +1,6 @@
 import "./styles.css";
 import { explainTransition } from "./explain/explainTransition";
+import { normalizeStyle, scoreStyleCompatibility, styleDistance, styleFamily, styleLabel } from "./analysis/style";
 import { recommendNextTracks, recommendTransition } from "./transitions/recommend";
 
 const API_HOST = window.location.hostname || "127.0.0.1";
@@ -88,6 +89,7 @@ app.innerHTML = `
           <select id="sortMode">
             <option value="recommended">综合推荐</option>
             <option value="harmonic">谐和优先</option>
+            <option value="styleFlow">风格连续</option>
             <option value="bpmAsc">BPM 升序</option>
             <option value="bpmDesc">BPM 降序</option>
             <option value="energyArc">能量弧线</option>
@@ -168,7 +170,7 @@ app.innerHTML = `
 
       <section class="workspace" aria-label="曲目工作台">
         <div id="dropZone" class="drop-zone">
-          <div><span class="pulse-dot"></span><p>拖入音频文件，后端会立刻分析 BPM、调性和能量</p></div>
+          <div><span class="pulse-dot"></span><p>拖入音频文件，后端会立刻分析 BPM、调性、风格和能量</p></div>
         </div>
 
         <section class="match-panel" aria-label="两首歌匹配评分">
@@ -189,7 +191,7 @@ app.innerHTML = `
               <input id="matchFileB" type="file" accept="audio/*" />
             </label>
           </div>
-          <div id="matchResult" class="match-result">上传任意两首歌，系统会用 Camelot、BPM、能量和结构可过渡性计算匹配分。</div>
+          <div id="matchResult" class="match-result">上传任意两首歌，系统会用 Camelot、BPM、风格、能量和结构可过渡性计算匹配分。</div>
         </section>
 
         <section id="teachingPanel" class="teaching-panel" aria-label="DJ 接歌教学" hidden>
@@ -271,6 +273,7 @@ app.innerHTML = `
                 <th>时长</th>
                 <th>BPM</th>
                 <th>调性</th>
+                <th>风格</th>
                 <th>能量</th>
                 <th>过渡</th>
                 <th>状态</th>
@@ -490,6 +493,10 @@ async function addFiles(files) {
       key_index: null,
       mode: null,
       camelot: null,
+      style: "unknown",
+      style_label: "Unknown",
+      style_confidence: 0,
+      style_profile: null,
       energy: 0,
       intro_low: 0,
       outro_low: 0,
@@ -777,6 +784,7 @@ async function uploadAndAnalyze(track) {
     track.mode = result.mode;
     track.energy = result.energy || 0;
     track.energy_profile = result.energy_profile || null;
+    applyTrackStyle(track, result);
     track.energy_curve = result.energy_curve || result.transition_candidates?.energy_curve || null;
     track.vocal_density_curve = result.vocal_density_curve || result.transition_candidates?.vocal_density_curve || null;
     track.sections = result.sections || result.transition_candidates?.sections || null;
@@ -854,6 +862,7 @@ function applyLocalFallbackAnalysis(track, error) {
   track.mode = key.mode;
   track.energy = envelope.energy;
   track.energy_profile = envelope.energyProfile;
+  applyTrackStyle(track, estimateLocalStyle(track.bpm, envelope.energy, envelope.energyProfile));
   track.energy_curve = null;
   track.vocal_density_curve = null;
   track.sections = null;
@@ -962,6 +971,59 @@ function buildLocalEnergyProfile(values, samples, sampleRate, average, peak) {
     transition_contrast: round4(components.transition_contrast / 100),
     components,
   };
+}
+
+function applyTrackStyle(track, source) {
+  const profile = source?.style_profile || source?.styleProfile || source || {};
+  const style = normalizeStyle(source?.style || source?.genre || profile.primary);
+  track.style = style || "unknown";
+  track.style_label = source?.style_label || profile.label || styleLabel(track.style);
+  track.style_confidence = clamp(Number(source?.style_confidence ?? source?.styleConfidence ?? profile.confidence ?? 0), 0, 1);
+  track.style_profile = {
+    ...(profile && typeof profile === "object" ? profile : {}),
+    primary: track.style,
+    label: track.style_label,
+    confidence: track.style_confidence,
+  };
+}
+
+function estimateLocalStyle(bpm, energy, profile = {}) {
+  const tempo = Number(bpm) || 0;
+  const halfTempo = tempo >= 130 ? tempo / 2 : tempo;
+  const low = Number(profile.low_frequency_ratio) || 0;
+  const dynamic = clamp((Number(profile.dynamic_range_db) || 0) / 18, 0, 1);
+  const energyValue = clamp(Number(energy) || 0, 0, 1);
+  const scores = {
+    house: rangeAffinity(tempo, 116, 132, 12) * 0.45 + energyValue * 0.25 + low * 0.2 + (1 - dynamic) * 0.1,
+    hiphop: rangeAffinity(halfTempo, 70, 104, 18) * 0.46 + low * 0.25 + (1 - energyValue * 0.45) * 0.14 + dynamic * 0.15,
+    rock: rangeAffinity(tempo, 86, 172, 24) * 0.35 + dynamic * 0.32 + energyValue * 0.2 + (1 - low) * 0.13,
+    pop: rangeAffinity(tempo, 88, 132, 20) * 0.34 + (1 - Math.abs(energyValue - 0.6) / 0.6) * 0.3 + dynamic * 0.14 + (1 - low) * 0.12,
+    electronic: rangeAffinity(tempo, 100, 150, 26) * 0.34 + energyValue * 0.28 + low * 0.2 + (1 - dynamic) * 0.18,
+    ambient: (1 - energyValue) * 0.45 + dynamic * 0.25 + (1 - low) * 0.15 + (tempo ? 0 : 0.15),
+  };
+  const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const [primary, topScore] = ranked[0];
+  const secondScore = ranked[1]?.[1] || 0;
+  const confidence = clamp(0.2 + topScore * 0.4 + Math.max(0, topScore - secondScore) * 1.2, 0, 0.72);
+  return {
+    style: primary,
+    style_label: styleLabel(primary),
+    style_confidence: confidence,
+    style_profile: {
+      primary,
+      label: styleLabel(primary),
+      confidence,
+      scores,
+      method: "browser-fallback-heuristic",
+    },
+  };
+}
+
+function rangeAffinity(value, low, high, grace) {
+  if (!value) return 0.35;
+  if (value >= low && value <= high) return 1;
+  if (value < low) return clamp(1 - (low - value) / grace, 0, 1);
+  return clamp(1 - (value - high) / grace, 0, 1);
 }
 
 function percentile(sortedValues, p) {
@@ -1573,6 +1635,10 @@ function exportableTrack(track) {
     camelot: track.camelot,
     key_index: track.key_index,
     mode: track.mode,
+    style: track.style,
+    style_label: track.style_label,
+    style_confidence: track.style_confidence,
+    style_profile: track.style_profile,
     beats: track.beats || [],
     bars: track.bars || [],
     phrases: track.phrases || [],
@@ -1854,7 +1920,11 @@ async function generateTeachingPreview(nextId) {
         },
       }),
     });
-    state.teaching.previews[nextId] = result;
+    state.teaching.previews[nextId] = {
+      ...result,
+      outgoingLocalId: current.localId,
+      incomingLocalId: next.localId,
+    };
     setStatus("已生成无缝过渡试听");
   } catch (error) {
     setStatus(error.message || "过渡试听生成失败");
@@ -1873,10 +1943,12 @@ function applyTeachingRecommendation(nextId) {
     beginnerMode: state.teaching.beginnerMode,
     maxComplexity: state.teaching.maxComplexity,
   })[0];
+  const preview = teachingPreviewFor(nextId, current.localId);
+  const effective = effectiveTeachingCue(rec, preview);
 
-  current.outroPoint = clamp(rec.outgoingCue.time, 0.5, Math.max(0.5, current.duration - 0.25));
-  next.introPoint = clamp(rec.incomingCue.time, 0, Math.max(0, next.duration - 0.25));
-  applyRecommendedMixSettings(rec);
+  current.outroPoint = clamp(effective.outgoingTime, 0.5, Math.max(0.5, current.duration - 0.25));
+  next.introPoint = clamp(effective.incomingTime, 0, Math.max(0, next.duration - 0.25));
+  applyRecommendedMixSettings({ ...rec, method: effective.method, overlapDuration: effective.overlapDuration });
 
   const currentIndex = state.tracks.findIndex((track) => track.localId === current.localId);
   const nextIndex = state.tracks.findIndex((track) => track.localId === next.localId);
@@ -1886,7 +1958,7 @@ function applyTeachingRecommendation(nextId) {
     state.tracks.splice(insertAt, 0, picked);
   }
   state.selectedId = current.localId;
-  setStatus(`已应用教学接法：${methodLabel(rec.method)}`);
+  setStatus(`已应用教学接法：${methodLabel(effective.method)} · A OUT ${formatTime(effective.outgoingTime)} / B IN ${formatTime(effective.incomingTime)}`);
   applySettingsToControls();
   render();
 }
@@ -2157,7 +2229,8 @@ function renderTeachingCard(item, index) {
   const target = state.tracks.find((track) => track.localId === item.track.id);
   const rec = item.bestTransition;
   const explanation = explainTransition(rec);
-  const preview = state.teaching.previews[item.track.id];
+  const preview = teachingPreviewFor(item.track.id);
+  const effective = effectiveTeachingCue(rec, preview);
   const isLoading = state.teaching.loadingPreviewId === item.track.id;
   return `
     <article class="teaching-card">
@@ -2169,11 +2242,12 @@ function renderTeachingCard(item, index) {
         <b>${Math.round(item.totalScore * 100)}</b>
       </div>
       <div class="teaching-pair">
-        <span>A OUT ${formatTime(rec.outgoingCue.time)}</span>
-        <span>B IN ${formatTime(rec.incomingCue.time)}</span>
-        <span>Overlap ${formatTime(rec.overlapDuration)}</span>
+        <span class="${effective.adjusted ? "cue-adjusted" : ""}">A OUT ${formatTime(effective.outgoingTime)}</span>
+        <span class="${effective.adjusted ? "cue-adjusted" : ""}">B IN ${formatTime(effective.incomingTime)}</span>
+        <span>Overlap ${formatTime(effective.overlapDuration)}</span>
         <span>难度 ${rec.difficulty}/5</span>
       </div>
+      ${effective.adjusted ? renderCueAdjustmentNote(rec, effective) : ""}
       <h3 title="${escapeHtml(target?.name || item.track.title)}">${escapeHtml(target?.name || item.track.title)}</h3>
       ${renderTeachingDebug(rec.debug)}
       <p class="teaching-reason">${escapeHtml(explanation)}</p>
@@ -2194,6 +2268,15 @@ function renderPreviewResult(preview) {
   const report = preview.processingReport || {};
   const bands = report.incomingBandTrimDb || {};
   const bandSummary = `L${Math.round(bands.lowTrimDb || 0)}/M${Math.round(bands.midTrimDb || 0)}/H${Math.round(bands.highTrimDb || 0)}dB`;
+  const guardLabel = report.outgoingVocalGuarded ? "A guard on" : "A guard off";
+  const methodLabel = report.strategyAdapted ? `${report.requestedMethod}->${report.renderMethod}` : report.renderMethod || preview.method;
+  const overlapLabel = report.requestedOverlapDuration && report.renderOverlapDuration && Math.abs(report.requestedOverlapDuration - report.renderOverlapDuration) > 0.1
+    ? `${formatTime(report.requestedOverlapDuration)}->${formatTime(report.renderOverlapDuration)}`
+    : formatTime(report.renderOverlapDuration || report.overlapDuration || 0);
+  const cueRefinement = report.cueRefinement || {};
+  const cueLabel = cueRefinement.enabled
+    ? `Cue A${formatSignedSeconds(cueRefinement.outgoingShiftSec)} B${formatSignedSeconds(cueRefinement.incomingShiftSec)}`
+    : "Cue original";
   return `
     <div class="preview-result">
       <div>
@@ -2201,18 +2284,73 @@ function renderPreviewResult(preview) {
         <a href="${API}${preview.url}" target="_blank" rel="noreferrer">打开 WAV</a>
       </div>
       <div class="preview-report">
+        <span>${escapeHtml(methodLabel || "")}</span>
+        <span>${escapeHtml(cueLabel)}</span>
+        <span>Overlap ${overlapLabel}</span>
         <span>Tempo ${Math.round(report.tempoChangePercent || 0)}%</span>
         <span>Drift ${Math.round(report.transientShiftMs || 0)}ms</span>
         <span>Vocal +${Math.round(report.incomingVocalDelayMs || 0)}ms</span>
         <span>Energy ${Math.round(report.incomingEnergyTrimDb || 0)}dB</span>
         <span>Bands ${bandSummary}</span>
-        ${report.outgoingVocalGuarded ? "<span>A vocal guard</span>" : ""}
+        <span>Glue ${Math.round((report.glueWet || 0) * 100)}%</span>
+        <span>Bridge ${Math.round((report.rhythmBridgeWet || 0) * 100)}%</span>
+        <span>${guardLabel}</span>
         <span>Pitch ${report.pitchShiftSemitones || 0} st</span>
         <span>Vocal ${Math.round((report.vocalConflictAfter || 0) * 100)}%</span>
         <span>Risk ${Math.round((report.riskScore || 0) * 100)}</span>
       </div>
       <p>${escapeHtml(report.explanation || "")}</p>
       ${(preview.warnings || []).length ? `<small>${escapeHtml(preview.warnings.slice(0, 2).join("；"))}</small>` : ""}
+    </div>
+  `;
+}
+
+function teachingPreviewFor(nextId, currentId = selectedTrack()?.localId) {
+  const preview = state.teaching.previews[nextId];
+  if (!preview) return null;
+  if (currentId && preview.outgoingLocalId && preview.outgoingLocalId !== currentId) return null;
+  return preview;
+}
+
+function effectiveTeachingCue(rec, preview) {
+  const alignment = preview?.alignment || {};
+  const report = preview?.processingReport || {};
+  const outgoingTime = Number(preview?.outgoingCue?.time ?? alignment.outgoingExitTime ?? rec.outgoingCue.time);
+  const incomingTime = Number(preview?.incomingCue?.time ?? alignment.incomingEntryTime ?? rec.incomingCue.time);
+  const overlapDuration = Number(report.renderOverlapDuration ?? alignment.overlapDuration ?? rec.overlapDuration ?? 0);
+  const method = report.renderMethod || preview?.method || rec.method;
+  const outgoingShift = outgoingTime - Number(rec.outgoingCue.time || 0);
+  const incomingShift = incomingTime - Number(rec.incomingCue.time || 0);
+  const adjusted = Boolean(
+    preview &&
+      ((report.cueRefinement || {}).enabled ||
+        Math.abs(outgoingShift) > 0.05 ||
+        Math.abs(incomingShift) > 0.05 ||
+        method !== rec.method ||
+        Math.abs(overlapDuration - Number(rec.overlapDuration || 0)) > 0.1),
+  );
+  return {
+    outgoingTime,
+    incomingTime,
+    overlapDuration,
+    method,
+    adjusted,
+    outgoingShift,
+    incomingShift,
+    methodAdjusted: method !== rec.method,
+  };
+}
+
+function renderCueAdjustmentNote(rec, effective) {
+  const parts = [];
+  if (Math.abs(effective.outgoingShift) > 0.05) parts.push(`A OUT ${formatSignedSeconds(effective.outgoingShift)}`);
+  if (Math.abs(effective.incomingShift) > 0.05) parts.push(`B IN ${formatSignedSeconds(effective.incomingShift)}`);
+  if (effective.methodAdjusted) parts.push(`${methodLabel(rec.method)} -> ${methodLabel(effective.method)}`);
+  return `
+    <div class="cue-adjustment-note">
+      <strong>实际试听 cue</strong>
+      <span>${escapeHtml(parts.length ? parts.join(" · ") : "已按渲染结果同步")}</span>
+      <small>使用这个接法时会采用这里的 A OUT / B IN，而不是原始推荐点。</small>
     </div>
   `;
 }
@@ -2543,6 +2681,12 @@ function riskLine(method) {
 function formatSignedTime(seconds) {
   const sign = seconds >= 0 ? "+" : "-";
   return `${sign}${formatTime(Math.abs(seconds))}`;
+}
+
+function formatSignedSeconds(seconds) {
+  const value = Number(seconds || 0);
+  const sign = value >= 0 ? "+" : "-";
+  return `${sign}${Math.abs(value).toFixed(1)}s`;
 }
 
 function drawEmptyWave(ctx, width, height) {

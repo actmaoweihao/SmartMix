@@ -16,6 +16,18 @@ from .matching import key_label_to_camelot
 KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+STYLE_LABELS = {
+    "house": "House",
+    "techno": "Techno",
+    "drum_bass": "Drum & Bass",
+    "hiphop": "Hip-Hop",
+    "rnb": "R&B",
+    "rock": "Rock",
+    "pop": "Pop",
+    "ambient": "Ambient",
+    "electronic": "Electronic",
+    "unknown": "Unknown",
+}
 
 
 def analyze_audio(path: Path) -> dict:
@@ -28,6 +40,7 @@ def analyze_audio(path: Path) -> dict:
     bpm = beat_grid["bpm"] or _estimate_bpm(y, sr)
     key = _estimate_key(y, sr)
     energy = _energy_metrics(y, sr)
+    style = _estimate_style(y, sr, bpm, energy, beat_grid["confidence"])
     loudness = loudness_metrics(y, sr)
     candidates = _transition_candidates(y, sr, duration, beat_grid["bars"], energy, bpm)
 
@@ -45,6 +58,10 @@ def analyze_audio(path: Path) -> dict:
         "mode": key["mode"],
         "energy": energy["energy"],
         "energy_profile": energy["energy_profile"],
+        "style": style["primary"],
+        "style_label": style["label"],
+        "style_confidence": style["confidence"],
+        "style_profile": style,
         "intro_low": energy["intro_low"],
         "outro_low": energy["outro_low"],
         "loudness_lufs": loudness["lufs"],
@@ -302,6 +319,163 @@ def _energy_profile(y: np.ndarray, sr: int, rms: np.ndarray, frame_length: int, 
         "transition_contrast": round(float(transition_contrast), 4),
         "components": {key: round(float(value), 1) for key, value in components.items()},
     }
+
+
+def _estimate_style(y: np.ndarray, sr: int, bpm: float | None, energy: dict, beat_confidence: float = 0.0) -> dict:
+    metrics = _style_metrics(y, sr, bpm, energy, beat_confidence)
+    tempo = metrics["bpm"]
+    half_tempo = tempo / 2 if tempo >= 130 else tempo
+    low = metrics["low_frequency_ratio"]
+    percussive = metrics["percussive_ratio"]
+    vocal = metrics["vocal_density"]
+    brightness = metrics["brightness"]
+    zcr = metrics["zero_crossing_rate"]
+    regularity = metrics["beat_regularity"]
+    energy_value = metrics["energy"]
+    dynamic = metrics["dynamic_range"]
+
+    scores = {
+        "house": (
+            _range_affinity(tempo, 116, 132, 12) * 0.34
+            + low * 0.19
+            + percussive * 0.18
+            + regularity * 0.16
+            + (1 - vocal) * 0.06
+            + energy_value * 0.07
+        ),
+        "techno": (
+            _range_affinity(tempo, 124, 146, 14) * 0.33
+            + percussive * 0.22
+            + low * 0.18
+            + regularity * 0.15
+            + (1 - vocal) * 0.08
+            + energy_value * 0.04
+        ),
+        "drum_bass": (
+            _range_affinity(tempo, 160, 178, 10) * 0.42
+            + percussive * 0.20
+            + low * 0.18
+            + brightness * 0.12
+            + (1 - vocal) * 0.08
+        ),
+        "hiphop": (
+            _range_affinity(half_tempo, 70, 104, 18) * 0.34
+            + low * 0.22
+            + vocal * 0.14
+            + percussive * 0.13
+            + (1 - brightness) * 0.10
+            + (1 - regularity * 0.45) * 0.07
+        ),
+        "rnb": (
+            _range_affinity(half_tempo, 64, 104, 16) * 0.30
+            + vocal * 0.24
+            + low * 0.15
+            + (1 - zcr) * 0.13
+            + (1 - percussive * 0.55) * 0.10
+            + (1 - brightness * 0.5) * 0.08
+        ),
+        "rock": (
+            _range_affinity(tempo, 86, 172, 24) * 0.24
+            + brightness * 0.22
+            + zcr * 0.18
+            + dynamic * 0.14
+            + vocal * 0.12
+            + (1 - low) * 0.10
+        ),
+        "pop": (
+            _range_affinity(tempo, 88, 132, 20) * 0.25
+            + vocal * 0.22
+            + (1 - abs(energy_value - 0.62) / 0.62) * 0.16
+            + (1 - abs(brightness - 0.45) / 0.55) * 0.13
+            + regularity * 0.12
+            + (1 - abs(low - 0.22) / 0.5) * 0.12
+        ),
+        "ambient": (
+            (1 - percussive) * 0.30
+            + (1 - regularity) * 0.22
+            + (1 - energy_value) * 0.18
+            + dynamic * 0.12
+            + (1 - vocal) * 0.10
+            + (1 - zcr) * 0.08
+        ),
+        "electronic": (
+            _range_affinity(tempo, 100, 150, 26) * 0.22
+            + percussive * 0.20
+            + regularity * 0.18
+            + low * 0.16
+            + brightness * 0.12
+            + (1 - vocal) * 0.12
+        ),
+    }
+    normalized_scores = {style: round(float(_clamp01(score)), 3) for style, score in scores.items()}
+    ranked = sorted(normalized_scores.items(), key=lambda item: item[1], reverse=True)
+    primary, top_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    if top_score < 0.32:
+        primary = "unknown"
+    confidence = _clamp01(0.25 + top_score * 0.45 + max(0.0, top_score - second_score) * 1.3)
+    if primary == "unknown":
+        confidence = min(confidence, 0.25)
+    return {
+        "primary": primary,
+        "label": STYLE_LABELS.get(primary, primary.title()),
+        "confidence": round(float(confidence), 2),
+        "scores": normalized_scores,
+        "metrics": metrics,
+        "method": "heuristic-audio-features",
+    }
+
+
+def _style_metrics(y: np.ndarray, sr: int, bpm: float | None, energy: dict, beat_confidence: float) -> dict:
+    hop = 1024
+    profile = energy.get("energy_profile") or {}
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
+    spectral_centroid = _safe_feature_mean(lambda: librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop)[0], 1800.0)
+    spectral_rolloff = _safe_feature_mean(lambda: librosa.feature.spectral_rolloff(y=y, sr=sr, hop_length=hop, roll_percent=0.85)[0], 4200.0)
+    zcr = _safe_feature_mean(lambda: librosa.feature.zero_crossing_rate(y, frame_length=2048, hop_length=hop)[0], 0.08)
+    percussive_ratio = _percussive_ratio(y)
+    vocal_density = float(np.mean(_vocal_density_curve(y, sr, hop, len(rms)))) if len(rms) else 0.5
+    return {
+        "bpm": round(float(bpm or 0), 2),
+        "energy": round(float(energy.get("energy") or 0), 4),
+        "low_frequency_ratio": round(float(profile.get("low_frequency_ratio") or 0), 4),
+        "dynamic_range": round(_clamp01(float(profile.get("dynamic_range_db") or 0) / 18), 4),
+        "brightness": round(_clamp01(spectral_centroid / 4200), 4),
+        "spectral_rolloff": round(_clamp01(spectral_rolloff / 9000), 4),
+        "zero_crossing_rate": round(_clamp01(zcr / 0.18), 4),
+        "percussive_ratio": round(float(percussive_ratio), 4),
+        "vocal_density": round(_clamp01(vocal_density), 4),
+        "beat_regularity": round(_clamp01(float(beat_confidence or 0)), 4),
+    }
+
+
+def _safe_feature_mean(factory, fallback: float) -> float:
+    try:
+        values = np.asarray(factory(), dtype=np.float32)
+        finite = values[np.isfinite(values)]
+        return float(np.mean(finite)) if finite.size else fallback
+    except Exception:
+        return fallback
+
+
+def _percussive_ratio(y: np.ndarray) -> float:
+    try:
+        harmonic, percussive = librosa.effects.hpss(y)
+        harmonic_energy = float(np.mean(np.square(harmonic)))
+        percussive_energy = float(np.mean(np.square(percussive)))
+        return _clamp01(percussive_energy / (harmonic_energy + percussive_energy + 1e-12))
+    except Exception:
+        return 0.5
+
+
+def _range_affinity(value: float, low: float, high: float, grace: float) -> float:
+    if value <= 0:
+        return 0.35
+    if low <= value <= high:
+        return 1.0
+    if value < low:
+        return _clamp01(1 - (low - value) / max(grace, 1e-9))
+    return _clamp01(1 - (value - high) / max(grace, 1e-9))
 
 
 def _low_frequency_ratio(y: np.ndarray, sr: int, hop_length: int) -> float:

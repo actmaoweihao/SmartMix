@@ -1,6 +1,7 @@
 import { scoreBpmCompatibility } from "../analysis/bpm";
 import { energyAt, trackAverageEnergy } from "../analysis/energy";
 import { scoreKeyCompatibility } from "../analysis/key";
+import { scoreStyleCompatibility, styleFamily, styleLabel } from "../analysis/style";
 import { detectVocalConflict } from "../analysis/vocal";
 import type { TrackAnalysis, TransitionContext, TransitionRecommendation } from "../analysis/types";
 import { buildBassSwap } from "./bassSwap";
@@ -50,12 +51,13 @@ export function recommendNextTracks(
       const bestTransition = recommendTransition(currentTrack, track, options)[0];
       const bpm = scoreBpmCompatibility(currentTrack, track);
       const key = scoreKeyCompatibility(currentTrack, track, options);
+      const style = scoreStyleCompatibility(currentTrack, track);
       const energyDirection = trackAverageEnergy(track) >= trackAverageEnergy(currentTrack) ? "能量可上扬" : "能量会回落";
       return {
         track,
         totalScore: bestTransition.score,
         bestTransition,
-        reasons: [`BPM ${bpm.category}`, key.explanation, energyDirection, bestTransition.reason],
+        reasons: [`BPM ${bpm.category}`, key.explanation, style.explanation, energyDirection, bestTransition.reason],
       };
     })
     .sort((a, b) => b.totalScore - a.totalScore)
@@ -70,12 +72,14 @@ function adjustForMethod(
 ): TransitionRecommendation {
   const bpm = scoreBpmCompatibility(outgoing, incoming);
   const key = scoreKeyCompatibility(outgoing, incoming, context);
+  const style = scoreStyleCompatibility(outgoing, incoming);
   const vocal = detectVocalConflict(outgoing, incoming, rec.outgoingCue.time, rec.incomingCue.time, rec.overlapDuration || 4);
   const rawBpmDiff = Math.abs(outgoing.bpm - incoming.bpm);
   const isWideWithoutHalfTime = rawBpmDiff > 12 && bpm.bpmDiff > 3;
   const longBlend = ["beatmix", "bass_swap", "wide_bpm_loop", "loop_build", "acapella_mashup"].includes(rec.method);
   const shortOrEffect = ["fade", "end_to_end", "quick_cut", "echo_out"].includes(rec.method);
   const specialEffectKey = ["diagonal_mix", "jaws_mix", "mood_shifter"].includes(key.relation);
+  const sameDanceFamily = styleFamily(style.from) === "dance" && styleFamily(style.to) === "dance";
   const incomingCueEnergy = energyAt(incoming, rec.incomingCue.time);
   const outgoingCueEnergy = energyAt(outgoing, rec.outgoingCue.time);
   const reasons = [...(rec.debug?.reasons ?? [])];
@@ -90,6 +94,10 @@ function adjustForMethod(
   if (["beatmix", "bass_swap"].includes(rec.method)) {
     if (bpm.category === "same" && vocal.score < 0.3) score += 0.08;
     if (key.score >= 0.82 && vocal.score < 0.3) score += 0.04;
+    if (sameDanceFamily && style.score >= 0.76 && bpm.score >= 0.75) {
+      score += 0.08;
+      reasons.push(`${styleLabel(style.from)} 到 ${styleLabel(style.to)} 都是舞曲同族，适合低频替换或长一点的对拍`);
+    }
     if (context.beginnerMode && bpm.category === "same" && key.score >= 0.82 && vocal.score < 0.22) {
       score += 0.38;
       reasons.push("BPM 和调性都稳且人声少，新手可以练简单对拍或低频替换");
@@ -135,6 +143,15 @@ function adjustForMethod(
       score += 0.2;
       reasons.push("BPM 差较大，短切或效果器退出更稳定");
     }
+  }
+  if (style.relation === "contrast") {
+    reasons.push(style.explanation);
+    if (longBlend) score -= 0.22;
+    if (["quick_cut", "echo_out", "breakdown_switch", "fade", "end_to_end"].includes(rec.method)) score += 0.12;
+  } else if (style.relation === "same" && longBlend && bpm.score >= 0.7 && vocal.score < 0.35) {
+    score += 0.06;
+  } else if (style.relation === "bridge" && ["quick_cut", "echo_out", "breakdown_switch", "bass_swap"].includes(rec.method)) {
+    score += 0.05;
   }
   if (key.relation === "clash") {
     reasons.push("调性不兼容，不建议长时间叠加");
@@ -193,6 +210,7 @@ function enrichReason(reason: string, reasons: string[]): string {
       item.includes("人声") ||
       item.includes("BPM 差") ||
       item.includes("调性") ||
+      item.includes("风格") ||
       item.includes("能量"),
   );
   if (!important.length) return reason;

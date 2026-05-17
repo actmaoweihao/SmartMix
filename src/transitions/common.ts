@@ -2,6 +2,7 @@ import { scoreBpmCompatibility } from "../analysis/bpm";
 import { energyFlowScore } from "../analysis/energy";
 import { scoreKeyCompatibility } from "../analysis/key";
 import { bestCue, phraseAlignmentScore } from "../analysis/phrase";
+import { scoreStyleCompatibility } from "../analysis/style";
 import { detectVocalConflict } from "../analysis/vocal";
 import type { CuePoint, DJActionStep, TrackAnalysis, TransitionContext, TransitionMethod, TransitionRecommendation } from "../analysis/types";
 
@@ -27,22 +28,26 @@ export function buildRecommendation(input: BuildInput): TransitionRecommendation
   const phrase = phraseAlignmentScore(outgoingCue, incomingCue);
   const vocal = detectVocalConflict(input.outgoing, input.incoming, outgoingCue.time, incomingCue.time, input.overlapDuration);
   const energy = energyFlowScore(input.outgoing, input.incoming, input.context.targetEnergy ?? "keep");
+  const style = scoreStyleCompatibility(input.outgoing, input.incoming);
   const beginner = beginnerSuitability(input.difficulty, input.context);
   const section = sectionSuitability(input.method, outgoingCue, incomingCue, input.context);
   const weighted =
-    0.25 * (1 - vocal.score) +
-    0.2 * phrase +
-    0.15 * beginner +
-    0.15 * energy +
+    0.23 * (1 - vocal.score) +
+    0.18 * phrase +
+    0.13 * beginner +
+    0.14 * energy +
     0.1 * bpm.score +
     0.1 * key.score +
+    0.07 * style.score +
     0.05 * section;
   const complexityPenalty = input.context.maxComplexity && input.difficulty > input.context.maxComplexity ? 0.35 : 0;
   const score = clamp01(weighted * input.methodFit - complexityPenalty);
   const debugReasons = [
     `bpm=${bpm.category}`,
     `key=${key.relation}`,
+    `style=${style.relation}`,
     `keyScore=${Math.round(key.score * 100)}%`,
+    `styleScore=${Math.round(style.score * 100)}%`,
     `vocalConflict=${Math.round(vocal.score * 100)}%`,
     `phrase=${Math.round(phrase * 100)}%`,
     `section=${Math.round(section * 100)}%`,
@@ -54,7 +59,7 @@ export function buildRecommendation(input: BuildInput): TransitionRecommendation
     outgoingCue,
     incomingCue,
     overlapDuration: input.overlapDuration,
-    reason: `${input.reason} BPM: ${bpm.category}, 调性: ${key.relation}, 人声冲突: ${Math.round(vocal.score * 100)}%。`,
+    reason: `${input.reason} BPM: ${bpm.category}, 调性: ${key.relation}, 风格: ${style.relation}, 人声冲突: ${Math.round(vocal.score * 100)}%。`,
     stepByStep: input.steps,
     debug: {
       method: input.method,
@@ -64,6 +69,7 @@ export function buildRecommendation(input: BuildInput): TransitionRecommendation
       vocalConflictScore: round(vocal.score),
       phraseScore: round(phrase),
       energyScore: round(energy),
+      styleScore: round(style.score),
       beginnerScore: round(beginner),
       beginnerPenalty: round(complexityPenalty),
       sectionSuitability: round(section),

@@ -9,13 +9,17 @@ from backend.loudness import loudness_metrics, normalize_loudness
 from backend.analysis import _transition_candidates
 from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade, _dynamic_eq_overlap, _resolve_mix_strategy
 from backend.seamless import (
+    _adapt_render_method,
+    _refine_alignment_for_smoothness,
     _automation_curves,
     _energy_handoff_profile,
     _estimate_transient_shift_samples,
     _frequency_handoff_profile,
     _render_transition_audio,
+    _rhythm_bridge_layer,
     _seconds_to_samples,
     _shift_audio,
+    _transition_glue_layer,
     _vocal_handoff_timing,
     compute_tempo_adjustment,
     generate_seamless_transition,
@@ -218,18 +222,21 @@ class SeamlessTransitionTests(unittest.TestCase):
                 sf.write(path, np.full((samples, 2), value, dtype=np.float32), SAMPLE_RATE)
                 incoming_paths[stem] = path
 
+            stem_report = {"used": True, "paths": {"outgoing": outgoing_paths, "incoming": incoming_paths}}
             rendered = _render_transition_audio(
                 outgoing,
                 incoming,
                 {"method": "bass_swap"},
                 2,
                 0.8,
-                {"used": True, "paths": {"outgoing": outgoing_paths, "incoming": incoming_paths}},
+                stem_report,
             )
 
-        start = _seconds_to_samples(2)
+        start = rendered.shape[1] - samples
+        active_samples = _seconds_to_samples(stem_report["renderOverlapDuration"])
         early = rendered[:, start : start + _seconds_to_samples(0.25)]
-        late = rendered[:, start + _seconds_to_samples(1.75) : start + _seconds_to_samples(2)]
+        late_start = start + max(0, active_samples - _seconds_to_samples(0.25))
+        late = rendered[:, late_start : late_start + _seconds_to_samples(0.25)]
         self.assertGreater(float(np.mean(early)), 0.1)
         self.assertLess(float(np.mean(late)), -0.1)
         self.assertLessEqual(float(np.max(np.abs(rendered))), 1.0)
@@ -298,6 +305,144 @@ class SeamlessTransitionTests(unittest.TestCase):
         self.assertLess(timing["outgoingEndFraction"], 0.32)
         self.assertLess(float(curves["out_vocals"][0, int(samples * 0.34)]), 0.08)
 
+    def test_vocal_guard_detects_later_outgoing_phrase_reentry(self) -> None:
+        samples = SAMPLE_RATE * 4
+        outgoing = np.zeros((2, samples), dtype=np.float32)
+        incoming = np.zeros((2, samples), dtype=np.float32)
+        outgoing[:, int(samples * 0.24) : int(samples * 0.36)] = 0.24
+        outgoing[:, int(samples * 0.46) : int(samples * 0.62)] = 0.24
+        incoming[:, int(samples * 0.54) :] = 0.3
+
+        timing = _vocal_handoff_timing(outgoing, incoming, vocal_conflict=0.75, method="beatmix")
+
+        self.assertTrue(timing["outgoingGuarded"])
+        self.assertLess(timing["outgoingEndFraction"], 0.46)
+
+    def test_adaptive_render_method_avoids_long_blend_for_high_risk_vocals(self) -> None:
+        quick = _adapt_render_method(
+            "beatmix",
+            0.76,
+            {"outgoingGuarded": True, "incomingStartFraction": 0.72},
+            {"incomingTrimDb": -2},
+            {"lowTrimDb": -1, "midTrimDb": 0, "highTrimDb": 0},
+        )
+        echo = _adapt_render_method(
+            "bass_swap",
+            0.6,
+            {"outgoingGuarded": True, "incomingStartFraction": 0.5},
+            {"incomingTrimDb": -5},
+            {"lowTrimDb": -5, "midTrimDb": 0, "highTrimDb": 0},
+        )
+
+        self.assertEqual(quick, "echo_out")
+        self.assertEqual(echo, "echo_out")
+
+    def test_adapted_render_method_shortens_active_overlap(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        import soundfile as sf
+
+        seconds = 10
+        samples = SAMPLE_RATE * seconds
+        outgoing = np.zeros((2, samples), dtype=np.float32)
+        incoming = np.zeros((2, samples), dtype=np.float32)
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outgoing_paths = {}
+            incoming_paths = {}
+            for stem in ("drums", "bass", "other", "vocals"):
+                out = np.zeros((samples, 2), dtype=np.float32)
+                inc = np.zeros((samples, 2), dtype=np.float32)
+                if stem == "vocals":
+                    out[SAMPLE_RATE * 2 : int(SAMPLE_RATE * 3.5)] = 0.25
+                    out[int(SAMPLE_RATE * 5.6) : int(SAMPLE_RATE * 7.0)] = 0.25
+                    inc[int(SAMPLE_RATE * 5.5) :] = 0.3
+                else:
+                    out[:] = 0.08
+                    inc[:] = 0.22
+                out_path = root / f"out_{stem}.wav"
+                in_path = root / f"in_{stem}.wav"
+                sf.write(out_path, out, SAMPLE_RATE)
+                sf.write(in_path, inc, SAMPLE_RATE)
+                outgoing_paths[stem] = out_path
+                incoming_paths[stem] = in_path
+
+            stem_report = {"used": True, "paths": {"outgoing": outgoing_paths, "incoming": incoming_paths}}
+            rendered = _render_transition_audio(outgoing, incoming, {"method": "beatmix"}, 8, 0.8, stem_report)
+
+        self.assertTrue(stem_report["renderMethod"] in {"quick_cut", "echo_out"})
+        self.assertEqual(stem_report["renderMethod"], "echo_out")
+        self.assertAlmostEqual(stem_report["renderOverlapDuration"], 8.0, places=1)
+        self.assertGreater(rendered.shape[1], SAMPLE_RATE * 11)
+
+    def test_cue_refinement_prefers_nearby_lower_vocal_bar(self) -> None:
+        track_a = {
+            "bars": [96, 100, 104, 108, 112],
+            "phrases": [96, 112],
+            "vocal_density_curve": [{"time": 100, "density": 0.8}, {"time": 104, "density": 0.08}],
+            "energy_curve": [{"time": 100, "energy": 0.6}, {"time": 104, "energy": 0.42}],
+        }
+        track_b = {
+            "bars": [0, 4, 8, 12],
+            "phrases": [0, 8],
+            "vocal_density_curve": [{"time": 0, "density": 0.1}],
+            "energy_curve": [{"time": 0, "energy": 0.45}],
+        }
+        alignment = {
+            "outgoingExitTime": 100,
+            "incomingEntryTime": 0,
+            "outgoingDownbeatTime": 100,
+            "incomingDownbeatTime": 0,
+            "overlapDuration": 8,
+            "phraseAligned": True,
+            "alignmentConfidence": 0.8,
+        }
+
+        refined = _refine_alignment_for_smoothness(track_a, track_b, alignment, {"method": "beatmix"})
+
+        self.assertTrue(refined["cueRefinement"]["enabled"])
+        self.assertEqual(refined["outgoingExitTime"], 104)
+
+    def test_cue_refinement_avoids_next_outgoing_vocal_inside_overlap(self) -> None:
+        track_a = {
+            "bars": [96, 100, 104, 108, 112, 116],
+            "phrases": [96, 112],
+            "vocal_density_curve": [
+                {"time": 100, "density": 0.55},
+                {"time": 104, "density": 0.05},
+                {"time": 108, "density": 0.86},
+                {"time": 112, "density": 0.06},
+                {"time": 116, "density": 0.04},
+            ],
+            "energy_curve": [
+                {"time": 100, "energy": 0.58},
+                {"time": 104, "energy": 0.5},
+                {"time": 108, "energy": 0.63},
+                {"time": 112, "energy": 0.42},
+            ],
+        }
+        track_b = {
+            "bars": [0, 4, 8, 12],
+            "phrases": [0, 8],
+            "vocal_density_curve": [{"time": 0, "density": 0.08}],
+            "energy_curve": [{"time": 0, "energy": 0.48}],
+        }
+        alignment = {
+            "outgoingExitTime": 100,
+            "incomingEntryTime": 0,
+            "outgoingDownbeatTime": 100,
+            "incomingDownbeatTime": 0,
+            "overlapDuration": 8,
+            "phraseAligned": True,
+            "alignmentConfidence": 0.8,
+        }
+
+        refined = _refine_alignment_for_smoothness(track_a, track_b, alignment, {"method": "beatmix"})
+
+        self.assertTrue(refined["cueRefinement"]["enabled"])
+        self.assertGreaterEqual(refined["outgoingExitTime"], 112)
+
     def test_energy_handoff_ducks_hot_incoming_intro(self) -> None:
         samples = SAMPLE_RATE * 4
         outgoing = np.full((2, samples), 0.12, dtype=np.float32)
@@ -321,6 +466,33 @@ class SeamlessTransitionTests(unittest.TestCase):
         self.assertLess(profile["lowTrimDb"], -4)
         self.assertGreater(profile["midTrimDb"], -1)
         self.assertLess(float(curves["in_bass"][0, SAMPLE_RATE // 2]), float(curves["in_bass"][0, -1]))
+
+    def test_transition_glue_layer_masks_middle_without_loud_edges(self) -> None:
+        samples = SAMPLE_RATE * 2
+        t = np.linspace(0, 2, samples, endpoint=False, dtype=np.float32)
+        outgoing = np.vstack([0.18 * np.sin(2 * np.pi * 1200 * t)] * 2).astype(np.float32)
+        incoming = np.vstack([0.18 * np.sin(2 * np.pi * 1800 * t)] * 2).astype(np.float32)
+
+        glue = _transition_glue_layer(outgoing, incoming, "echo_out", 0.4)
+
+        edge_energy = float(np.mean(np.abs(glue[:, : SAMPLE_RATE // 20]))) + float(np.mean(np.abs(glue[:, -SAMPLE_RATE // 20 :])))
+        middle_energy = float(np.mean(np.abs(glue[:, SAMPLE_RATE // 2 : SAMPLE_RATE])))
+        self.assertGreater(middle_energy, edge_energy)
+        self.assertLessEqual(float(np.max(np.abs(glue))), 0.35)
+
+    def test_rhythm_bridge_keeps_high_percussion_without_low_kick(self) -> None:
+        samples = SAMPLE_RATE * 2
+        t = np.linspace(0, 2, samples, endpoint=False, dtype=np.float32)
+        drums = np.vstack([
+            0.4 * np.sin(2 * np.pi * 90 * t) + 0.25 * np.sin(2 * np.pi * 6500 * t)
+        ] * 2).astype(np.float32)
+
+        bridge = _rhythm_bridge_layer(drums, "beatmix", 0.3)
+        low = np.mean(np.abs(np.fft.rfft(bridge[0])[:80]))
+        high = np.mean(np.abs(np.fft.rfft(bridge[0])[1200:4000]))
+
+        self.assertGreater(float(high), float(low) * 2)
+        self.assertGreater(float(np.mean(np.abs(bridge[:, : SAMPLE_RATE // 10]))), float(np.mean(np.abs(bridge[:, -SAMPLE_RATE // 10 :]))) * 5)
 
     @patch("backend.seamless._rubberband_command", return_value=None)
     @patch("backend.seamless._demucs_available", return_value=False)
@@ -382,6 +554,15 @@ class SeamlessTransitionTests(unittest.TestCase):
         self.assertIn("incomingEnergyTrimDb", result["processingReport"])
         self.assertIn("incomingBandTrimDb", result["processingReport"])
         self.assertIn("outgoingVocalGuarded", result["processingReport"])
+        self.assertIn("renderMethod", result["processingReport"])
+        self.assertIn("strategyAdapted", result["processingReport"])
+        self.assertIn("renderOverlapDuration", result["processingReport"])
+        self.assertIn("glueWet", result["processingReport"])
+        self.assertIn("rhythmBridgeWet", result["processingReport"])
+        self.assertEqual(result["outgoingCue"]["time"], result["alignment"]["outgoingExitTime"])
+        self.assertEqual(result["incomingCue"]["time"], result["alignment"]["incomingEntryTime"])
+        self.assertIn("requestedOutgoingCue", result)
+        self.assertIn("requestedIncomingCue", result)
 
 
 if __name__ == "__main__":

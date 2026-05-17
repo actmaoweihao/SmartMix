@@ -50,6 +50,7 @@ def generate_seamless_transition(
     warnings: list[str] = []
     rec = recommendation or _fallback_recommendation(outgoing_analysis, incoming_analysis)
     alignment = align_transition_cues(outgoing_analysis, incoming_analysis, rec)
+    alignment = _refine_alignment_for_smoothness(outgoing_analysis, incoming_analysis, alignment, rec)
     if not alignment["phraseAligned"]:
         warnings.append("Cue points could not both snap to 8/16-bar phrase boundaries; preview may feel less seamless.")
 
@@ -79,7 +80,8 @@ def generate_seamless_transition(
         vocal_conflict_before = _vocal_conflict(outgoing_analysis, incoming_analysis, alignment["outgoingExitTime"], alignment["incomingEntryTime"], overlap)
         stem_report = _maybe_separate_transition_stems(outgoing_segment, incoming_segment, workspace, opts, warnings)
         rendered = _render_transition_audio(outgoing_segment, incoming_segment, rec, overlap, vocal_conflict_before, stem_report)
-        loudness = _match_loudness_report(outgoing_segment[:, : _seconds_to_samples(before)], incoming_segment[:, _seconds_to_samples(overlap) :])
+        render_overlap = float(stem_report.get("renderOverlapDuration") or overlap)
+        loudness = _match_loudness_report(outgoing_segment[:, : _seconds_to_samples(before)], incoming_segment[:, _seconds_to_samples(render_overlap) :])
         rendered = normalize_loudness(rendered, SAMPLE_RATE, -16)
         rendered = _limit_peak(rendered)
 
@@ -90,7 +92,8 @@ def generate_seamless_transition(
         if opts.get("exportFormat") == "mp3":
             output_path = _convert_to_mp3(wav_path)
 
-    vocal_conflict_after = _estimate_after_conflict(vocal_conflict_before, rec)
+    render_overlap = float(stem_report.get("renderOverlapDuration") or overlap)
+    vocal_conflict_after = _estimate_after_conflict(vocal_conflict_before, {"method": stem_report.get("renderMethod") or rec.get("method")})
     report = {
         "bpmBefore": {"outgoing": outgoing_analysis.get("bpm"), "incoming": incoming_analysis.get("bpm")},
         "bpmAfter": {"outgoing": outgoing_analysis.get("bpm"), "incoming": tempo["targetBpm"] if tempo["shouldStretch"] else incoming_analysis.get("bpm")},
@@ -100,16 +103,26 @@ def generate_seamless_transition(
         "pitchShiftSemitones": pitch["semitones"] if pitch["shouldPitchShift"] else 0,
         "usedStemSeparation": stem_report["used"],
         "usedFormantPreservation": bool(opts.get("preserveFormants") and pitch["shouldPitchShift"]),
-        "crossfadeCurve": _curve_for_method(rec.get("method")),
-        "overlapDuration": overlap,
+        "crossfadeCurve": _curve_for_method(stem_report.get("renderMethod") or rec.get("method")),
+        "overlapDuration": render_overlap,
+        "requestedOverlapDuration": overlap,
+        "renderOverlapDuration": render_overlap,
         "vocalConflictBefore": vocal_conflict_before,
         "vocalConflictAfter": vocal_conflict_after,
         "loudnessMatchDb": loudness["loudnessDifferenceDb"],
         "transientShiftMs": round((stem_report.get("transientShiftSamples") or 0) / SAMPLE_RATE * 1000, 2),
-        "incomingVocalDelayMs": round(((stem_report.get("vocalHandoff") or {}).get("incomingStartFraction") or 0) * overlap * 1000, 2),
+        "incomingVocalDelayMs": round(((stem_report.get("vocalHandoff") or {}).get("incomingStartFraction") or 0) * render_overlap * 1000, 2),
         "incomingEnergyTrimDb": round(float((stem_report.get("energyHandoff") or {}).get("incomingTrimDb") or 0), 2),
         "incomingBandTrimDb": stem_report.get("frequencyHandoff") or {},
+        "glueWet": round(float(stem_report.get("glueWet") or 0), 3),
+        "rhythmBridgeWet": round(float(stem_report.get("rhythmBridgeWet") or 0), 3),
         "outgoingVocalGuarded": bool((stem_report.get("vocalHandoff") or {}).get("outgoingGuarded")),
+        "outgoingNextVocalStartMs": round(((stem_report.get("vocalHandoff") or {}).get("outgoingNextVocalStartFraction") or 0) * render_overlap * 1000, 2),
+        "outgoingVocalCutMs": round(((stem_report.get("vocalHandoff") or {}).get("outgoingEndFraction") or 0) * render_overlap * 1000, 2),
+        "requestedMethod": rec.get("method", "beatmix"),
+        "renderMethod": stem_report.get("renderMethod") or rec.get("method", "beatmix"),
+        "strategyAdapted": bool(stem_report.get("renderMethod") and stem_report.get("renderMethod") != rec.get("method", "beatmix")),
+        "cueRefinement": alignment.get("cueRefinement") or {},
         "riskScore": _risk_score(tempo, pitch, vocal_conflict_before, stem_report["used"]),
         "explanation": _processing_explanation(
             rec,
@@ -122,18 +135,27 @@ def generate_seamless_transition(
             stem_report.get("vocalHandoff") or {},
             stem_report.get("energyHandoff") or {},
             stem_report.get("frequencyHandoff") or {},
-            overlap,
+            stem_report.get("renderMethod") or rec.get("method", "beatmix"),
+            render_overlap,
         ),
     }
+    outgoing_cue = {**(rec.get("outgoingCue") or {})}
+    incoming_cue = {**(rec.get("incomingCue") or {})}
+    outgoing_cue["time"] = alignment["outgoingExitTime"]
+    incoming_cue["time"] = alignment["incomingEntryTime"]
+    outgoing_cue["adjusted"] = bool((alignment.get("cueRefinement") or {}).get("enabled"))
+    incoming_cue["adjusted"] = bool((alignment.get("cueRefinement") or {}).get("enabled"))
     return {
         "audioPath": str(output_path),
         "url": f"/api/exports/{output_path.name}",
         "previewStartTime": out_start,
         "previewEndTime": out_start + rendered.shape[1] / SAMPLE_RATE,
-        "outgoingCue": rec.get("outgoingCue"),
-        "incomingCue": rec.get("incomingCue"),
+        "outgoingCue": outgoing_cue,
+        "incomingCue": incoming_cue,
+        "requestedOutgoingCue": rec.get("outgoingCue"),
+        "requestedIncomingCue": rec.get("incomingCue"),
         "alignment": alignment,
-        "method": rec.get("method", "beatmix"),
+        "method": stem_report.get("renderMethod") or rec.get("method", "beatmix"),
         "processingReport": report,
         "warnings": warnings,
     }
@@ -155,6 +177,69 @@ def align_transition_cues(outgoing: dict[str, Any], incoming: dict[str, Any], re
         "phraseAligned": phrase_aligned,
         "alignmentConfidence": round(max(0.25, (0.9 if phrase_aligned else 0.62) - min(0.3, drift / 16)), 2),
     }
+
+
+def _refine_alignment_for_smoothness(outgoing: dict[str, Any], incoming: dict[str, Any], alignment: dict[str, Any], rec: dict[str, Any]) -> dict[str, Any]:
+    method = rec.get("method", "beatmix")
+    overlap = float(alignment.get("overlapDuration") or rec.get("overlapDuration") or 8)
+    outgoing_refined = _best_local_cue(outgoing, float(alignment["outgoingExitTime"]), "outgoing", method, overlap)
+    incoming_refined = _best_local_cue(incoming, float(alignment["incomingEntryTime"]), "incoming", method, overlap)
+    before_conflict = _vocal_conflict(outgoing, incoming, float(alignment["outgoingExitTime"]), float(alignment["incomingEntryTime"]), overlap)
+    after_conflict = _vocal_conflict(outgoing, incoming, outgoing_refined["time"], incoming_refined["time"], overlap)
+    if after_conflict <= before_conflict + 0.04 or outgoing_refined["improved"] or incoming_refined["improved"]:
+        refined = {**alignment}
+        refined["outgoingExitTime"] = round(outgoing_refined["time"], 3)
+        refined["incomingEntryTime"] = round(incoming_refined["time"], 3)
+        refined["outgoingDownbeatTime"] = round(outgoing_refined["time"], 3)
+        refined["incomingDownbeatTime"] = round(incoming_refined["time"], 3)
+        refined["cueRefinement"] = {
+            "enabled": bool(outgoing_refined["improved"] or incoming_refined["improved"]),
+            "outgoingShiftSec": round(outgoing_refined["time"] - float(alignment["outgoingExitTime"]), 3),
+            "incomingShiftSec": round(incoming_refined["time"] - float(alignment["incomingEntryTime"]), 3),
+            "vocalConflictBefore": before_conflict,
+            "vocalConflictAfter": after_conflict,
+        }
+        if refined["cueRefinement"]["enabled"]:
+            refined["alignmentConfidence"] = round(min(0.95, float(refined["alignmentConfidence"]) + 0.05), 2)
+        return refined
+    return {**alignment, "cueRefinement": {"enabled": False, "vocalConflictBefore": before_conflict, "vocalConflictAfter": before_conflict}}
+
+
+def _best_local_cue(track: dict[str, Any], cue_time: float, role: str, method: str, overlap: float) -> dict[str, Any]:
+    bars = [float(value) for value in track.get("bars") or []]
+    phrases = [float(value) for value in track.get("phrases") or []]
+    anchors = sorted(set(bars + phrases))
+    if not anchors:
+        return {"time": cue_time, "improved": False}
+    window_before = 24 if role == "outgoing" else 8
+    window_after = 16 if role == "outgoing" else 24
+    candidates = [value for value in anchors if cue_time - window_before <= value <= cue_time + window_after]
+    if not candidates:
+        return {"time": cue_time, "improved": False}
+    original_score = _cue_smoothness_score(track, cue_time, cue_time, role, method, overlap)
+    best = min(candidates, key=lambda value: _cue_smoothness_score(track, value, cue_time, role, method, overlap))
+    best_score = _cue_smoothness_score(track, best, cue_time, role, method, overlap)
+    return {"time": best, "improved": best_score + 0.04 < original_score and abs(best - cue_time) >= 0.25}
+
+
+def _cue_smoothness_score(track: dict[str, Any], candidate: float, original: float, role: str, method: str, overlap: float) -> float:
+    vocal_curve = track.get("vocal_density_curve") or []
+    energy_curve = track.get("energy_curve") or []
+    vocal = _curve_value(vocal_curve, candidate, "density")
+    vocal_window = _curve_average(vocal_curve, candidate, max(2.0, overlap * (0.85 if role == "outgoing" else 0.55)), "density")
+    vocal_peak = _curve_peak(vocal_curve, candidate, max(2.0, overlap * (0.9 if role == "outgoing" else 0.55)), "density")
+    early_vocal = _curve_average(vocal_curve, candidate + 1.0, max(1.0, min(4.0, overlap * 0.35)), "density")
+    energy = _curve_value(energy_curve, candidate, "energy")
+    energy_window = _curve_average(energy_curve, candidate, max(2.0, overlap * 0.65), "energy")
+    local_after = _curve_value(energy_curve, candidate + 4, "energy")
+    distance_penalty = abs(candidate - original) / 30
+    phrase_bonus = 0 if candidate in [float(v) for v in track.get("phrases") or []] else 0.05
+    if role == "outgoing":
+        energy_shape = max(0.0, local_after - energy) * 0.2
+        next_phrase_penalty = max(0.0, vocal_peak - vocal) * 0.5
+        return vocal * 0.2 + vocal_window * 0.28 + vocal_peak * 0.38 + energy_window * 0.08 + energy_shape + next_phrase_penalty + distance_penalty + phrase_bonus
+    intro_penalty = 0.0 if method in {"beatmix", "bass_swap", "echo_out"} else 0.04
+    return vocal * 0.22 + early_vocal * 0.42 + max(0.0, energy_window - 0.75) * 0.12 + distance_penalty + phrase_bonus + intro_penalty
 
 
 def compute_tempo_adjustment(outgoing_bpm: float, incoming_bpm: float, options: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -184,8 +269,6 @@ def compute_pitch_shift_for_harmonic_mixing(outgoing_key: str | None, incoming_k
 def _render_transition_audio(outgoing: np.ndarray, incoming: np.ndarray, rec: dict[str, Any], overlap: float, vocal_conflict: float, stem_report: dict[str, Any]) -> np.ndarray:
     before_samples = max(0, outgoing.shape[1] - _seconds_to_samples(overlap))
     overlap_samples = min(_seconds_to_samples(overlap), outgoing.shape[1] - before_samples, incoming.shape[1])
-    after = incoming[:, overlap_samples:]
-    outgoing_pre = outgoing[:, :before_samples]
     out_overlap = outgoing[:, before_samples : before_samples + overlap_samples]
     in_overlap = incoming[:, :overlap_samples]
     method = rec.get("method", "beatmix")
@@ -193,18 +276,25 @@ def _render_transition_audio(outgoing: np.ndarray, incoming: np.ndarray, rec: di
     if method == "echo_out":
         out_overlap = _apply_echo_tail(out_overlap, feedback=0.36, wet=0.42)
     if stem_report.get("used") and stem_report.get("paths"):
-        overlap_mix, shift, vocal_handoff, energy_handoff, frequency_handoff = _stem_overlap_from_paths(stem_report["paths"], before_samples, overlap_samples, method, vocal_conflict)
+        overlap_mix, shift, vocal_handoff, energy_handoff, frequency_handoff, render_method, active_overlap_samples = _stem_overlap_from_paths(stem_report["paths"], before_samples, overlap_samples, method, vocal_conflict)
     else:
-        overlap_mix, shift, vocal_handoff, energy_handoff, frequency_handoff = _stem_like_overlap(out_overlap, in_overlap, method, vocal_conflict, False)
+        overlap_mix, shift, vocal_handoff, energy_handoff, frequency_handoff, render_method, active_overlap_samples = _stem_like_overlap(out_overlap, in_overlap, method, vocal_conflict, False)
+    active_overlap_samples = min(active_overlap_samples, overlap_samples, incoming.shape[1])
+    outgoing_pre = outgoing[:, : max(0, outgoing.shape[1] - active_overlap_samples)]
+    after = incoming[:, active_overlap_samples:]
     stem_report["transientShiftSamples"] = int(shift)
     stem_report["vocalHandoff"] = vocal_handoff
     stem_report["energyHandoff"] = energy_handoff
     stem_report["frequencyHandoff"] = frequency_handoff
+    stem_report["renderMethod"] = render_method
+    stem_report["renderOverlapDuration"] = active_overlap_samples / SAMPLE_RATE
+    stem_report["glueWet"] = _glue_wet_for_method(render_method, vocal_conflict)
+    stem_report["rhythmBridgeWet"] = _rhythm_bridge_wet_for_method(render_method, vocal_conflict)
     outgoing_pre, overlap_mix, after = _smooth_transition_edges(outgoing_pre, overlap_mix, after)
     return np.concatenate([outgoing_pre, overlap_mix, after], axis=1)
 
 
-def _stem_like_overlap(outgoing: np.ndarray, incoming: np.ndarray, method: str, vocal_conflict: float, stems_used: bool) -> tuple[np.ndarray, int, dict[str, float], dict[str, float], dict[str, float]]:
+def _stem_like_overlap(outgoing: np.ndarray, incoming: np.ndarray, method: str, vocal_conflict: float, stems_used: bool) -> tuple[np.ndarray, int, dict[str, float], dict[str, float], dict[str, float], str, int]:
     samples = min(outgoing.shape[1], incoming.shape[1])
     outgoing = outgoing[:, :samples]
     incoming = incoming[:, :samples]
@@ -212,13 +302,31 @@ def _stem_like_overlap(outgoing: np.ndarray, incoming: np.ndarray, method: str, 
     in_low = _sos_filter(incoming, "lowpass", 160)
     out_harmonic, out_percussive = _hpss(outgoing - out_low)
     in_harmonic, in_percussive = _hpss(incoming - in_low)
-    vocal_handoff = _vocal_handoff_timing(out_harmonic, in_harmonic, vocal_conflict, method)
     shift = _estimate_transient_shift_samples(out_percussive, in_percussive)
     in_low = _shift_audio(in_low, shift)
     in_percussive = _shift_audio(in_percussive, shift)
+    vocal_handoff = _vocal_handoff_timing(out_harmonic, in_harmonic, vocal_conflict, method)
     energy_handoff = _energy_handoff_profile(out_low + out_percussive + out_harmonic * 0.35, in_low + in_percussive + in_harmonic * 0.35, method)
     frequency_handoff = _frequency_handoff_profile(outgoing, incoming, method)
-    curves = _automation_curves(samples, method, vocal_conflict, vocal_handoff, energy_handoff, frequency_handoff)
+    render_method = _adapt_render_method(method, vocal_conflict, vocal_handoff, energy_handoff, frequency_handoff)
+    active_samples = _active_overlap_samples(samples, render_method, method)
+    if active_samples < samples:
+        outgoing = outgoing[:, -active_samples:]
+        incoming = incoming[:, :active_samples]
+        samples = active_samples
+        out_low = _sos_filter(outgoing, "lowpass", 160)
+        in_low = _sos_filter(incoming, "lowpass", 160)
+        out_harmonic, out_percussive = _hpss(outgoing - out_low)
+        in_harmonic, in_percussive = _hpss(incoming - in_low)
+        in_low = _shift_audio(in_low, shift)
+        in_percussive = _shift_audio(in_percussive, shift)
+    if render_method != method:
+        vocal_handoff = _vocal_handoff_timing(out_harmonic, in_harmonic, vocal_conflict, render_method)
+        energy_handoff = _energy_handoff_profile(out_low + out_percussive + out_harmonic * 0.35, in_low + in_percussive + in_harmonic * 0.35, render_method)
+        frequency_handoff = _frequency_handoff_profile(outgoing, incoming, render_method)
+    if render_method == "echo_out":
+        out_harmonic = _apply_echo_tail(out_harmonic, feedback=0.28, wet=0.34)
+    curves = _automation_curves(samples, render_method, vocal_conflict, vocal_handoff, energy_handoff, frequency_handoff)
     mix = (
         out_low * curves["out_bass"]
         + in_low * curves["in_bass"]
@@ -226,13 +334,15 @@ def _stem_like_overlap(outgoing: np.ndarray, incoming: np.ndarray, method: str, 
         + in_percussive * curves["in_drums"]
         + out_harmonic * curves["out_harmonic"]
         + in_harmonic * curves["in_harmonic"]
+        + _transition_glue_layer(out_harmonic, in_harmonic, render_method, vocal_conflict)
+        + _rhythm_bridge_layer(out_percussive, render_method, vocal_conflict)
     )
     if vocal_conflict > 0.45:
         mix *= 0.92
-    return np.clip(mix, -1, 1).astype(np.float32), shift, vocal_handoff, energy_handoff, frequency_handoff
+    return np.clip(mix, -1, 1).astype(np.float32), shift, vocal_handoff, energy_handoff, frequency_handoff, render_method, samples
 
 
-def _stem_overlap_from_paths(stem_paths: dict[str, Any], before_samples: int, overlap_samples: int, method: str, vocal_conflict: float) -> tuple[np.ndarray, int, dict[str, float], dict[str, float], dict[str, float]]:
+def _stem_overlap_from_paths(stem_paths: dict[str, Any], before_samples: int, overlap_samples: int, method: str, vocal_conflict: float) -> tuple[np.ndarray, int, dict[str, float], dict[str, float], dict[str, float], str, int]:
     outgoing_stems = _load_stem_set(stem_paths.get("outgoing") or {}, before_samples + overlap_samples)
     incoming_stems = _load_stem_set(stem_paths.get("incoming") or {}, overlap_samples)
     out_slice = slice(before_samples, before_samples + overlap_samples)
@@ -256,8 +366,31 @@ def _stem_overlap_from_paths(stem_paths: dict[str, Any], before_samples: int, ov
         incoming_drums + incoming_bass + incoming_other + incoming_vocals * 0.35,
         method,
     )
-    curves = _automation_curves(overlap_samples, method, vocal_conflict, vocal_handoff, energy_handoff, frequency_handoff)
-    if method == "echo_out":
+    render_method = _adapt_render_method(method, vocal_conflict, vocal_handoff, energy_handoff, frequency_handoff)
+    active_samples = _active_overlap_samples(overlap_samples, render_method, method)
+    if active_samples < overlap_samples:
+        out_slice = slice(before_samples + overlap_samples - active_samples, before_samples + overlap_samples)
+        outgoing_vocals = outgoing_stems["vocals"][:, out_slice]
+        outgoing_drums = outgoing_stems["drums"][:, out_slice]
+        outgoing_bass = outgoing_stems["bass"][:, out_slice]
+        outgoing_other = outgoing_stems["other"][:, out_slice]
+        incoming_vocals = incoming_stems["vocals"][:, :active_samples]
+        incoming_drums = incoming_stems["drums"][:, :active_samples]
+        incoming_bass = incoming_stems["bass"][:, :active_samples]
+        incoming_other = incoming_stems["other"][:, :active_samples]
+        incoming_drums = _shift_audio(incoming_drums, shift)
+        incoming_bass = _shift_audio(incoming_bass, shift)
+        incoming_other = _shift_audio(incoming_other, shift)
+    if render_method != method:
+        vocal_handoff = _vocal_handoff_timing(outgoing_vocals, incoming_vocals, vocal_conflict, render_method)
+        energy_handoff = _energy_handoff_profile(outgoing_drums + outgoing_bass + outgoing_other * 0.5, incoming_drums + incoming_bass + incoming_other * 0.5, render_method)
+        frequency_handoff = _frequency_handoff_profile(
+            outgoing_drums + outgoing_bass + outgoing_other + outgoing_vocals * 0.35,
+            incoming_drums + incoming_bass + incoming_other + incoming_vocals * 0.35,
+            render_method,
+        )
+    curves = _automation_curves(active_samples, render_method, vocal_conflict, vocal_handoff, energy_handoff, frequency_handoff)
+    if render_method == "echo_out":
         outgoing_vocals = _apply_echo_tail(outgoing_vocals, feedback=0.34, wet=0.42)
         outgoing_other = _apply_echo_tail(outgoing_other, feedback=0.24, wet=0.3)
 
@@ -270,8 +403,10 @@ def _stem_overlap_from_paths(stem_paths: dict[str, Any], before_samples: int, ov
         + incoming_other * curves["in_other"]
         + outgoing_vocals * curves["out_vocals"]
         + incoming_vocals * curves["in_vocals"]
+        + _transition_glue_layer(outgoing_other + outgoing_vocals * 0.12, incoming_other, render_method, vocal_conflict)
+        + _rhythm_bridge_layer(outgoing_drums, render_method, vocal_conflict)
     )
-    return np.clip(mix, -1, 1).astype(np.float32), shift, vocal_handoff, energy_handoff, frequency_handoff
+    return np.clip(mix, -1, 1).astype(np.float32), shift, vocal_handoff, energy_handoff, frequency_handoff, render_method, active_samples
 
 
 def _load_stem_set(paths: dict[str, Any], samples: int) -> dict[str, np.ndarray]:
@@ -315,8 +450,8 @@ def _automation_curves(
         in_vocal_start = 0.66 if high_vocal_conflict else 0.38
     elif method == "echo_out":
         bass_start, bass_end = 0.22, 0.45
-        in_drum_start, in_drum_end = 0.38, 0.86
-        out_drum_start = 0.42
+        in_drum_start, in_drum_end = 0.14, 0.72
+        out_drum_start = 0.72
         out_vocal_end = 0.16 if high_vocal_conflict else 0.28
         in_vocal_start = 0.7 if high_vocal_conflict else 0.48
     else:
@@ -384,6 +519,43 @@ def _effective_overlap(suggested: float, method: str | None) -> float:
         "quick_cut": 1.5,
     }
     return max(0.5, float(suggested or 0), floors.get(method or "", 4.0))
+
+
+def _adapt_render_method(
+    method: str,
+    vocal_conflict: float,
+    vocal_handoff: dict[str, float],
+    energy_handoff: dict[str, float],
+    frequency_handoff: dict[str, float],
+) -> str:
+    if method not in {"beatmix", "bass_swap", "filter_sweep", "loop_build"}:
+        return method
+    guarded = bool(vocal_handoff.get("outgoingGuarded"))
+    energy_trim = abs(float(energy_handoff.get("incomingTrimDb") or 0))
+    band_trim = max(abs(float(frequency_handoff.get(key) or 0)) for key in ("lowTrimDb", "midTrimDb", "highTrimDb"))
+    incoming_delay = float(vocal_handoff.get("incomingStartFraction") or 0)
+    if vocal_conflict >= 0.72 and (guarded or incoming_delay >= 0.65):
+        return "echo_out"
+    if vocal_conflict >= 0.55 and (guarded or energy_trim >= 4.5 or band_trim >= 4.5):
+        return "echo_out"
+    if guarded and energy_trim >= 3.5:
+        return "echo_out"
+    return method
+
+
+def _active_overlap_samples(samples: int, render_method: str, requested_method: str) -> int:
+    if render_method == requested_method:
+        return samples
+    limits = {
+        "quick_cut": 2.25,
+        "echo_out": 8.0,
+        "fade": 3.0,
+        "breakdown_switch": 4.0,
+    }
+    limit = limits.get(render_method)
+    if not limit:
+        return samples
+    return max(1, min(samples, _seconds_to_samples(limit)))
 
 
 def _vocal_handoff_timing(outgoing_vocals: np.ndarray, incoming_vocals: np.ndarray, vocal_conflict: float, method: str) -> dict[str, float]:
@@ -510,6 +682,78 @@ def _band_gate(samples: int, trim_db: float, hold: float, release: float) -> np.
     return (trim_gain + (1 - trim_gain) * release_curve).astype(np.float32)
 
 
+def _transition_glue_layer(outgoing_texture: np.ndarray, incoming_texture: np.ndarray, method: str, vocal_conflict: float) -> np.ndarray:
+    samples = min(outgoing_texture.shape[1], incoming_texture.shape[1])
+    if samples <= 1:
+        return np.zeros_like(outgoing_texture[:, :samples])
+    outgoing_texture = outgoing_texture[:, :samples]
+    incoming_texture = incoming_texture[:, :samples]
+    wet = _glue_wet_for_method(method, vocal_conflict)
+    if wet <= 0:
+        return np.zeros_like(outgoing_texture)
+    out_space = _sos_filter(outgoing_texture, "highpass", 450)
+    in_space = _sos_filter(incoming_texture, "highpass", 450)
+    out_space = _sos_filter(out_space, "lowpass", 9000)
+    in_space = _sos_filter(in_space, "lowpass", 9000)
+    out_space = _apply_short_diffusion(out_space, feedback=0.18 if method == "quick_cut" else 0.24)
+    in_space = _apply_short_diffusion(in_space, feedback=0.12)
+    x = np.linspace(0, 1, samples, dtype=np.float32)
+    bridge = np.sin(np.pi * x).reshape(1, -1).astype(np.float32)
+    fade_out, fade_in = _fade_curves(samples, "equal_power")
+    glue = (out_space * fade_out + in_space * fade_in) * bridge * wet
+    return np.clip(glue, -0.35, 0.35).astype(np.float32)
+
+
+def _rhythm_bridge_layer(outgoing_drums: np.ndarray, method: str, vocal_conflict: float) -> np.ndarray:
+    samples = outgoing_drums.shape[1]
+    wet = _rhythm_bridge_wet_for_method(method, vocal_conflict)
+    if samples <= 1 or wet <= 0:
+        return np.zeros_like(outgoing_drums)
+    bridge_samples = min(samples, _seconds_to_samples(_rhythm_bridge_duration(method)))
+    high_percussion = _sos_filter(outgoing_drums[:, :bridge_samples], "highpass", 2200)
+    high_percussion = _sos_filter(high_percussion, "lowpass", 11000)
+    x = np.linspace(0, 1, bridge_samples, dtype=np.float32)
+    tail = np.power(1 - _smoothstep(x), 1.4).reshape(1, -1).astype(np.float32)
+    bridge = np.zeros_like(outgoing_drums)
+    bridge[:, :bridge_samples] = high_percussion * tail * wet
+    return np.clip(bridge, -0.28, 0.28).astype(np.float32)
+
+
+def _rhythm_bridge_duration(method: str) -> float:
+    if method == "quick_cut":
+        return 0.65
+    if method == "echo_out":
+        return 1.15
+    return 1.35
+
+
+def _rhythm_bridge_wet_for_method(method: str, vocal_conflict: float) -> float:
+    if vocal_conflict > 0.78:
+        return 0.045
+    if method == "quick_cut":
+        return 0.055
+    if method == "echo_out":
+        return 0.075
+    return 0.065
+
+
+def _glue_wet_for_method(method: str, vocal_conflict: float) -> float:
+    if method == "quick_cut":
+        return 0.1 if vocal_conflict < 0.75 else 0.07
+    if method == "echo_out":
+        return 0.16
+    return 0.12 if vocal_conflict < 0.55 else 0.09
+
+
+def _apply_short_diffusion(buffer: np.ndarray, feedback: float) -> np.ndarray:
+    out = buffer.astype(np.float32).copy()
+    for delay_ms, gain in ((23, feedback), (47, feedback * 0.65), (71, feedback * 0.42)):
+        delay = max(1, int(SAMPLE_RATE * delay_ms / 1000))
+        if out.shape[1] > delay:
+            out[:, delay:] += buffer[:, :-delay] * gain
+    return np.clip(out, -1, 1).astype(np.float32)
+
+
 def _first_vocal_phrase_fraction(buffer: np.ndarray, default_fraction: float, high_conflict: bool) -> float:
     envelope = _rms_envelope(buffer)
     if envelope.size < 2 or float(np.max(envelope)) < 1e-5:
@@ -550,8 +794,6 @@ def _next_vocal_reentry_fraction(buffer: np.ndarray) -> float | None:
     if len(regions) < 2:
         return None
     first_start, first_end = regions[0]
-    if first_start > 0.18:
-        return None
     for start, end in regions[1:]:
         if start - first_end >= 0.035 and end - start >= 0.035:
             return start
@@ -811,6 +1053,22 @@ def _curve_value(curve: list[dict], time_value: float, key: str) -> float:
     return max(0.0, min(1.0, float(nearest.get(key, 0.35))))
 
 
+def _curve_average(curve: list[dict], start_time: float, duration: float, key: str) -> float:
+    if duration <= 0:
+        return _curve_value(curve, start_time, key)
+    sample_count = max(2, min(16, int(math.ceil(duration)) + 1))
+    values = [_curve_value(curve, start_time + float(offset), key) for offset in np.linspace(0, duration, sample_count)]
+    return float(np.mean(values)) if values else _curve_value(curve, start_time, key)
+
+
+def _curve_peak(curve: list[dict], start_time: float, duration: float, key: str) -> float:
+    if duration <= 0:
+        return _curve_value(curve, start_time, key)
+    sample_count = max(2, min(18, int(math.ceil(duration * 2)) + 1))
+    values = [_curve_value(curve, start_time + float(offset), key) for offset in np.linspace(0, duration, sample_count)]
+    return float(np.max(values)) if values else _curve_value(curve, start_time, key)
+
+
 def _snap_to_phrase(track: dict[str, Any], cue_time: float) -> dict[str, Any]:
     bars = [float(value) for value in track.get("bars") or []]
     if not bars:
@@ -908,10 +1166,13 @@ def _processing_explanation(
     vocal_handoff: dict[str, float] | None = None,
     energy_handoff: dict[str, float] | None = None,
     frequency_handoff: dict[str, float] | None = None,
+    render_method: str | None = None,
     overlap: float = 0,
 ) -> str:
     method = rec.get("method", "beatmix")
     parts = [f"系统先把两首歌的乐句强拍对齐，再按 {method} 方式生成可试听的过渡片段。"]
+    if render_method and render_method != method:
+        parts.append(f"由于人声/能量风险较高，实际渲染已自动改成 {render_method}，避免硬做长时间叠加。")
     if tempo["shouldStretch"]:
         parts.append(f"B 歌速度按 {tempo['tempoChangePercent']}% 做轻微同步，避免鼓点慢慢漂移。")
     if pitch["shouldPitchShift"]:
@@ -934,6 +1195,8 @@ def _processing_explanation(
         ]
         if active_bands:
             parts.append(f"频段接管会先压住 B 歌的{'、'.join(active_bands)}，再分层释放，避免整首歌一起冲进来。")
+    parts.append("系统还会加入很轻的氛围胶水层，用 other/空间感盖住切换边界，让两首歌更像在同一个声场里交接。")
+    parts.append("B 歌刚进来时会短暂保留一点 A 歌高频打击乐 ghost，保留律动空气感，但不会保留低频鼓。")
     if vocal > 0.45:
         parts.append("检测到人声冲突，过渡里会更快收掉 A 歌人声，并延后 B 歌人声进入。")
     parts.append("低频采用 bass swap：前半段保留 A 歌低频，后半段再交给 B 歌，避免两个 bass 同时顶满。")
