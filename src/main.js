@@ -1163,6 +1163,10 @@ function keyDistance(a, b) {
     same: 0,
     relative_major_minor: 0.08,
     adjacent: 0.12,
+    energy_boost: 0.22,
+    diagonal_mix: 0.34,
+    mood_shifter: 0.44,
+    jaws_mix: 0.5,
     clash: 0.85,
     unknown: 0.5,
   }[relation];
@@ -1200,13 +1204,24 @@ function camelotNumDistance(a, b) {
   return Math.min(diff, 12 - diff);
 }
 
+function camelotClockwiseDelta(a, b) {
+  const forward = (b - a + 12) % 12;
+  if (forward === 0) return 0;
+  return forward <= 7 ? forward : forward - 12;
+}
+
 function camelotRelation(codeA, codeB) {
   const a = parseCamelot(codeA);
   const b = parseCamelot(codeB);
   if (!a || !b) return "unknown";
+  const clockwise = camelotClockwiseDelta(a.num, b.num);
   if (a.num === b.num && a.mode === b.mode) return "same";
   if (a.num === b.num && a.mode !== b.mode) return "relative_major_minor";
   if (a.mode === b.mode && camelotNumDistance(a.num, b.num) === 1) return "adjacent";
+  if (a.mode === b.mode && clockwise === 2) return "energy_boost";
+  if (a.mode !== b.mode && ((a.mode === "A" && b.mode === "B" && clockwise === -1) || (a.mode === "B" && b.mode === "A" && clockwise === 1))) return "diagonal_mix";
+  if (a.mode === b.mode && clockwise === 7) return "jaws_mix";
+  if (a.mode !== b.mode && ((a.mode === "A" && b.mode === "B" && clockwise === 3) || (a.mode === "B" && b.mode === "A" && clockwise === -3))) return "mood_shifter";
   return "clash";
 }
 

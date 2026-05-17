@@ -77,6 +77,22 @@ class CamelotMatchingTests(unittest.TestCase):
         self.assertEqual(adjusted, 89.0)
         self.assertEqual(total_rank(adjusted, key_eval, bpm_eval, energy_eval, structure_eval), "recommended")
 
+    def test_special_effect_relations_cannot_be_perfect(self) -> None:
+        bpm_eval = {"score": 100}
+        energy_eval = {"score": 100}
+        structure_eval = {"score": 100}
+
+        boost = adjusted_total_score(91.0, {"score": 80, "relation": "energy_boost"}, bpm_eval, energy_eval, structure_eval)
+        diagonal = adjusted_total_score(88.3, {"score": 74, "relation": "diagonal_mix"}, bpm_eval, energy_eval, structure_eval)
+        jaws = adjusted_total_score(82.9, {"score": 62, "relation": "jaws_mix"}, bpm_eval, energy_eval, structure_eval)
+
+        self.assertEqual(boost, 89.0)
+        self.assertEqual(total_rank(boost, {"score": 80, "relation": "energy_boost"}, bpm_eval, energy_eval, structure_eval), "recommended")
+        self.assertEqual(diagonal, 84.0)
+        self.assertEqual(total_rank(diagonal, {"score": 74, "relation": "diagonal_mix"}, bpm_eval, energy_eval, structure_eval), "usable")
+        self.assertEqual(jaws, 79.0)
+        self.assertEqual(total_rank(jaws, {"score": 62, "relation": "jaws_mix"}, bpm_eval, energy_eval, structure_eval), "usable")
+
 
 if __name__ == "__main__":
     unittest.main()

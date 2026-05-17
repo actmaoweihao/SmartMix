@@ -446,6 +446,12 @@ def adjusted_total_score(
         score = min(score, 79.0)
     if key_eval.get("relation") == "unknown":
         score = min(score, 84.0)
+    if key_eval.get("relation") == "energy_boost":
+        score = min(score, 89.0)
+    if key_eval.get("relation") in {"diagonal_mix", "mood_shifter"}:
+        score = min(score, 84.0)
+    if key_eval.get("relation") == "jaws_mix":
+        score = min(score, 79.0)
     if float(energy_eval.get("score") or 0) < 60:
         score = min(score, 89.0)
     if float(bpm_eval.get("score") or 0) < 70:
@@ -466,6 +472,12 @@ def total_rank(
         return "usable" if score >= 60 else "avoid"
     if key_eval and key_eval.get("relation") == "unknown" and score >= 85:
         return "recommended"
+    if key_eval and key_eval.get("relation") == "energy_boost" and score >= 90:
+        return "recommended"
+    if key_eval and key_eval.get("relation") in {"diagonal_mix", "mood_shifter"}:
+        return "usable" if score >= 60 else "avoid"
+    if key_eval and key_eval.get("relation") == "jaws_mix":
+        return "usable" if score >= 60 else "avoid"
     if energy_eval and float(energy_eval.get("score") or 0) < 60 and score >= 90:
         return "recommended"
     if bpm_eval and float(bpm_eval.get("score") or 0) < 70 and score >= 85:
