@@ -170,7 +170,7 @@ def camelot_key_distance(code1: str | None, code2: str | None) -> dict[str, Any]
             f"{normalized1} -> {normalized2} is Energy Boost (+2 on the Camelot Wheel); use with controlled overlap.",
             warnings,
         )
-    if m1 != m2 and clockwise == -1:
+    if is_diagonal_mix(m1, m2, clockwise):
         return _key_result(
             code1,
             code2,
@@ -194,7 +194,7 @@ def camelot_key_distance(code1: str | None, code2: str | None) -> dict[str, Any]
             f"{normalized1} -> {normalized2} is Jaw's Mix (+7); use short cuts or dramatic sections.",
             warnings,
         )
-    if m1 != m2 and clockwise == 4:
+    if is_mood_shifter(m1, m2, clockwise):
         return _key_result(
             code1,
             code2,
@@ -264,6 +264,18 @@ def camelot_rank(relation: str) -> str:
     if relation == "unknown":
         return "unknown"
     return "clash"
+
+
+def is_diagonal_mix(mode1: str, mode2: str, clockwise: int) -> bool:
+    if mode1 == mode2:
+        return False
+    return (mode1 == "A" and mode2 == "B" and clockwise == -1) or (mode1 == "B" and mode2 == "A" and clockwise == 1)
+
+
+def is_mood_shifter(mode1: str, mode2: str, clockwise: int) -> bool:
+    if mode1 == mode2:
+        return False
+    return (mode1 == "A" and mode2 == "B" and clockwise == 3) or (mode1 == "B" and mode2 == "A" and clockwise == -3)
 
 
 def evaluate_track_match(track_a: dict[str, Any], track_b: dict[str, Any]) -> dict[str, Any]:

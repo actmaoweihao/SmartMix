@@ -12,6 +12,7 @@ from backend.seamless import (
     _automation_curves,
     _energy_handoff_profile,
     _estimate_transient_shift_samples,
+    _frequency_handoff_profile,
     _render_transition_audio,
     _seconds_to_samples,
     _shift_audio,
@@ -282,6 +283,21 @@ class SeamlessTransitionTests(unittest.TestCase):
         self.assertLess(timing["outgoingEndFraction"], 0.35)
         self.assertGreaterEqual(timing["incomingStartFraction"], 0.58)
 
+    def test_vocal_handoff_cuts_outgoing_before_next_lyric_reentry(self) -> None:
+        samples = SAMPLE_RATE * 4
+        outgoing = np.zeros((2, samples), dtype=np.float32)
+        incoming = np.zeros((2, samples), dtype=np.float32)
+        outgoing[:, : int(samples * 0.22)] = 0.24
+        outgoing[:, int(samples * 0.32) : int(samples * 0.54)] = 0.24
+        incoming[:, int(samples * 0.38) :] = 0.3
+
+        timing = _vocal_handoff_timing(outgoing, incoming, vocal_conflict=0.75, method="beatmix")
+        curves = _automation_curves(samples, "beatmix", 0.75, timing)
+
+        self.assertTrue(timing["outgoingGuarded"])
+        self.assertLess(timing["outgoingEndFraction"], 0.32)
+        self.assertLess(float(curves["out_vocals"][0, int(samples * 0.34)]), 0.08)
+
     def test_energy_handoff_ducks_hot_incoming_intro(self) -> None:
         samples = SAMPLE_RATE * 4
         outgoing = np.full((2, samples), 0.12, dtype=np.float32)
@@ -292,6 +308,19 @@ class SeamlessTransitionTests(unittest.TestCase):
 
         self.assertLess(profile["incomingTrimDb"], -3)
         self.assertLess(float(curves["in_drums"][0, SAMPLE_RATE // 2]), float(curves["in_drums"][0, -1]))
+
+    def test_frequency_handoff_can_duck_only_hot_incoming_low_band(self) -> None:
+        samples = SAMPLE_RATE * 4
+        t = np.linspace(0, 4, samples, endpoint=False, dtype=np.float32)
+        outgoing = np.vstack([0.08 * np.sin(2 * np.pi * 90 * t) + 0.08 * np.sin(2 * np.pi * 1200 * t)] * 2).astype(np.float32)
+        incoming = np.vstack([0.45 * np.sin(2 * np.pi * 90 * t) + 0.08 * np.sin(2 * np.pi * 1200 * t)] * 2).astype(np.float32)
+
+        profile = _frequency_handoff_profile(outgoing, incoming, "beatmix")
+        curves = _automation_curves(samples, "beatmix", 0.1, None, None, profile)
+
+        self.assertLess(profile["lowTrimDb"], -4)
+        self.assertGreater(profile["midTrimDb"], -1)
+        self.assertLess(float(curves["in_bass"][0, SAMPLE_RATE // 2]), float(curves["in_bass"][0, -1]))
 
     @patch("backend.seamless._rubberband_command", return_value=None)
     @patch("backend.seamless._demucs_available", return_value=False)
@@ -351,6 +380,8 @@ class SeamlessTransitionTests(unittest.TestCase):
         self.assertIn("transientShiftMs", result["processingReport"])
         self.assertIn("incomingVocalDelayMs", result["processingReport"])
         self.assertIn("incomingEnergyTrimDb", result["processingReport"])
+        self.assertIn("incomingBandTrimDb", result["processingReport"])
+        self.assertIn("outgoingVocalGuarded", result["processingReport"])
 
 
 if __name__ == "__main__":

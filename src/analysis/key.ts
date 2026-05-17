@@ -116,7 +116,7 @@ export function scoreKeyCompatibility(
     });
   }
 
-  if (aParsed.letter !== bParsed.letter && clockwise === -1) {
+  if (isDiagonalMix(aParsed, bParsed, clockwise)) {
     return buildScore({
       keyA,
       keyB,
@@ -138,7 +138,7 @@ export function scoreKeyCompatibility(
     });
   }
 
-  if (aParsed.letter !== bParsed.letter && clockwise === 4) {
+  if (isMoodShifter(aParsed, bParsed, clockwise)) {
     return buildScore({
       keyA,
       keyB,
@@ -278,6 +278,16 @@ function energyRelation(clockwise: number, targetEnergy: TransitionContext["targ
   if (targetEnergy === "up" && clockwise === 1) return "energy_boost";
   if (targetEnergy === "down" && clockwise === -1) return "energy_drop";
   return "adjacent";
+}
+
+function isDiagonalMix(a: ParsedCamelotKey, b: ParsedCamelotKey, clockwise: number): boolean {
+  if (a.letter === b.letter) return false;
+  return (a.letter === "A" && b.letter === "B" && clockwise === -1) || (a.letter === "B" && b.letter === "A" && clockwise === 1);
+}
+
+function isMoodShifter(a: ParsedCamelotKey, b: ParsedCamelotKey, clockwise: number): boolean {
+  if (a.letter === b.letter) return false;
+  return (a.letter === "A" && b.letter === "B" && clockwise === 3) || (a.letter === "B" && b.letter === "A" && clockwise === -3);
 }
 
 function keyInputToTrack(input: unknown, label: string): TrackAnalysis {

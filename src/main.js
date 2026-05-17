@@ -2177,6 +2177,8 @@ function renderTeachingCard(item, index) {
 
 function renderPreviewResult(preview) {
   const report = preview.processingReport || {};
+  const bands = report.incomingBandTrimDb || {};
+  const bandSummary = `L${Math.round(bands.lowTrimDb || 0)}/M${Math.round(bands.midTrimDb || 0)}/H${Math.round(bands.highTrimDb || 0)}dB`;
   return `
     <div class="preview-result">
       <div>
@@ -2188,6 +2190,8 @@ function renderPreviewResult(preview) {
         <span>Drift ${Math.round(report.transientShiftMs || 0)}ms</span>
         <span>Vocal +${Math.round(report.incomingVocalDelayMs || 0)}ms</span>
         <span>Energy ${Math.round(report.incomingEnergyTrimDb || 0)}dB</span>
+        <span>Bands ${bandSummary}</span>
+        ${report.outgoingVocalGuarded ? "<span>A vocal guard</span>" : ""}
         <span>Pitch ${report.pitchShiftSemitones || 0} st</span>
         <span>Vocal ${Math.round((report.vocalConflictAfter || 0) * 100)}%</span>
         <span>Risk ${Math.round((report.riskScore || 0) * 100)}</span>

@@ -19,6 +19,20 @@ class CamelotMatchingTests(unittest.TestCase):
                 self.assertEqual(result["relation"], "adjacent")
                 self.assertGreaterEqual(result["score"], 85)
 
+    def test_dj_studio_table_special_relations(self) -> None:
+        cases = [
+            ("8A", "10A", "energy_boost"),
+            ("8A", "7B", "diagonal_mix"),
+            ("8A", "3A", "jaws_mix"),
+            ("8A", "11B", "mood_shifter"),
+            ("12A", "2A", "energy_boost"),
+            ("12B", "1A", "diagonal_mix"),
+        ]
+        for source, target, relation in cases:
+            with self.subTest(source=source, target=target):
+                result = camelot_key_distance(source, target)
+                self.assertEqual(result["relation"], relation)
+
     def test_relative_major_minor(self) -> None:
         result = camelot_key_distance("8A", "8B")
 

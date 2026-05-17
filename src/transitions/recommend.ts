@@ -75,6 +75,7 @@ function adjustForMethod(
   const isWideWithoutHalfTime = rawBpmDiff > 12 && bpm.bpmDiff > 3;
   const longBlend = ["beatmix", "bass_swap", "wide_bpm_loop", "loop_build", "acapella_mashup"].includes(rec.method);
   const shortOrEffect = ["fade", "end_to_end", "quick_cut", "echo_out"].includes(rec.method);
+  const specialEffectKey = ["diagonal_mix", "jaws_mix", "mood_shifter"].includes(key.relation);
   const incomingCueEnergy = energyAt(incoming, rec.incomingCue.time);
   const outgoingCueEnergy = energyAt(outgoing, rec.outgoingCue.time);
   const reasons = [...(rec.debug?.reasons ?? [])];
@@ -147,6 +148,11 @@ function adjustForMethod(
     reasons.push("未能识别调性，因此更建议使用短切或效果器过渡");
     if (longBlend) score -= 0.18;
     if (shortOrEffect) score += 0.08;
+  }
+  if (specialEffectKey) {
+    reasons.push(`Camelot ${key.relation} 是特殊效果型关系，建议短叠加或段落切换`);
+    if (longBlend) score -= key.relation === "jaws_mix" ? 0.22 : 0.14;
+    if (["quick_cut", "echo_out", "breakdown_switch"].includes(rec.method)) score += 0.1;
   }
   if (rec.method === "breakdown_switch" && (bpm.category === "medium" || bpm.category === "wide" || isWideWithoutHalfTime)) score += 0.2;
   if (rec.method === "breakdown_switch" && rec.outgoingCue.sectionType === "breakdown" && vocal.score < 0.25 && isWideWithoutHalfTime) {

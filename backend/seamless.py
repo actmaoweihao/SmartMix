@@ -109,6 +109,7 @@ def generate_seamless_transition(
         "incomingVocalDelayMs": round(((stem_report.get("vocalHandoff") or {}).get("incomingStartFraction") or 0) * overlap * 1000, 2),
         "incomingEnergyTrimDb": round(float((stem_report.get("energyHandoff") or {}).get("incomingTrimDb") or 0), 2),
         "incomingBandTrimDb": stem_report.get("frequencyHandoff") or {},
+        "outgoingVocalGuarded": bool((stem_report.get("vocalHandoff") or {}).get("outgoingGuarded")),
         "riskScore": _risk_score(tempo, pitch, vocal_conflict_before, stem_report["used"]),
         "explanation": _processing_explanation(
             rec,
@@ -330,12 +331,16 @@ def _automation_curves(
         in_vocal_start = float(vocal_handoff.get("incomingStartFraction", in_vocal_start))
         out_vocal_end = max(0.08, min(0.72, out_vocal_end))
         in_vocal_start = max(0.12, min(0.9, in_vocal_start))
+    out_vocal_start = 0.02
+    if vocal_handoff and vocal_handoff.get("outgoingFadeStartFraction") is not None:
+        out_vocal_start = float(vocal_handoff["outgoingFadeStartFraction"])
+        out_vocal_start = max(0.0, min(out_vocal_end - 0.02, out_vocal_start))
 
     out_bass = 1.0 - 0.96 * _smoothstep(_window(x, bass_start, bass_end))
     in_bass = 0.04 + 0.96 * _smoothstep(_window(x, bass_start, min(1.0, bass_end + 0.08)))
     out_drums = 1.0 - 0.92 * _smoothstep(_window(x, out_drum_start, 1.0))
     in_drums = 0.08 + 0.92 * _smoothstep(_window(x, in_drum_start, in_drum_end))
-    out_vocals = 1.0 - _smoothstep(_window(x, 0.02, out_vocal_end))
+    out_vocals = 1.0 - _smoothstep(_window(x, out_vocal_start, out_vocal_end))
     in_vocals = _smoothstep(_window(x, in_vocal_start, 0.98))
     out_other_equal, in_other_equal = _fade_curves(samples, "equal_power")
     out_other = np.maximum(out_other_equal * 0.88, out_vocals * 0.22)
@@ -387,10 +392,21 @@ def _vocal_handoff_timing(outgoing_vocals: np.ndarray, incoming_vocals: np.ndarr
     default_in = 0.72 if high_conflict else (0.42 if method != "echo_out" else 0.5)
     outgoing_end = _last_vocal_release_fraction(outgoing_vocals, default_out, high_conflict)
     incoming_start = _first_vocal_phrase_fraction(incoming_vocals, default_in, high_conflict)
+    next_outgoing_start = _next_vocal_reentry_fraction(outgoing_vocals)
+    guard_active = False
+    if next_outgoing_start is not None and next_outgoing_start <= min(0.92, incoming_start + 0.16):
+        guarded_end = max(0.08, next_outgoing_start - 0.035)
+        if guarded_end < outgoing_end or high_conflict:
+            outgoing_end = min(outgoing_end, guarded_end)
+            guard_active = True
     if incoming_start <= outgoing_end + 0.16 and high_conflict:
         incoming_start = min(0.9, outgoing_end + 0.22)
+    fade_start = max(0.0, outgoing_end - (0.075 if guard_active else 0.22))
     return {
         "outgoingEndFraction": round(float(outgoing_end), 3),
+        "outgoingFadeStartFraction": round(float(fade_start), 3),
+        "outgoingNextVocalStartFraction": round(float(next_outgoing_start), 3) if next_outgoing_start is not None else None,
+        "outgoingGuarded": bool(guard_active),
         "incomingStartFraction": round(float(incoming_start), 3),
     }
 
@@ -436,6 +452,64 @@ def _incoming_energy_gate(samples: int, energy_handoff: dict[str, float] | None)
     return (trim_gain + (1 - trim_gain) * release_curve).astype(np.float32)
 
 
+def _frequency_handoff_profile(outgoing: np.ndarray, incoming: np.ndarray, method: str) -> dict[str, float]:
+    out_low, out_mid, out_high = _split_bands(outgoing)
+    in_low, in_mid, in_high = _split_bands(incoming)
+    hold, release = _band_release_window(method)
+    low_trim = _band_trim_db(_early_rms(out_low), _early_rms(in_low), threshold_db=0.5)
+    mid_trim = _band_trim_db(_early_rms(out_mid), _early_rms(in_mid), threshold_db=1.25)
+    high_trim = _band_trim_db(_early_rms(out_high), _early_rms(in_high), threshold_db=1.75)
+    return {
+        "lowTrimDb": round(low_trim, 3),
+        "midTrimDb": round(mid_trim, 3),
+        "highTrimDb": round(high_trim, 3),
+        "holdFraction": round(hold, 3),
+        "releaseFraction": round(release, 3),
+    }
+
+
+def _split_bands(buffer: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    low = _sos_filter(buffer, "lowpass", 180)
+    high = _sos_filter(buffer, "highpass", 3800)
+    mid = _sos_filter(buffer, "bandpass", (220, 3400))
+    return low, mid, high
+
+
+def _band_trim_db(outgoing_rms: float, incoming_rms: float, threshold_db: float) -> float:
+    diff_db = 20 * math.log10((incoming_rms + 1e-9) / (outgoing_rms + 1e-9))
+    return -min(6.0, max(0.0, diff_db - threshold_db))
+
+
+def _band_release_window(method: str) -> tuple[float, float]:
+    if method == "quick_cut":
+        return 0.12, 0.36
+    if method == "echo_out":
+        return 0.24, 0.58
+    return 0.32, 0.74
+
+
+def _incoming_band_gates(samples: int, frequency_handoff: dict[str, float] | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not frequency_handoff:
+        ones = np.ones(samples, dtype=np.float32)
+        return ones, ones, ones
+    hold = float(frequency_handoff.get("holdFraction") or 0)
+    release = float(frequency_handoff.get("releaseFraction") or hold)
+    return (
+        _band_gate(samples, float(frequency_handoff.get("lowTrimDb") or 0), hold, release),
+        _band_gate(samples, float(frequency_handoff.get("midTrimDb") or 0), hold, max(hold + 0.01, release - 0.08)),
+        _band_gate(samples, float(frequency_handoff.get("highTrimDb") or 0), max(0.0, hold - 0.08), max(hold + 0.01, release - 0.16)),
+    )
+
+
+def _band_gate(samples: int, trim_db: float, hold: float, release: float) -> np.ndarray:
+    if trim_db >= -0.25:
+        return np.ones(samples, dtype=np.float32)
+    trim_gain = 10 ** (trim_db / 20)
+    x = np.linspace(0, 1, samples, dtype=np.float32)
+    release_curve = _smoothstep(_window(x, hold, max(hold + 0.01, release)))
+    return (trim_gain + (1 - trim_gain) * release_curve).astype(np.float32)
+
+
 def _first_vocal_phrase_fraction(buffer: np.ndarray, default_fraction: float, high_conflict: bool) -> float:
     envelope = _rms_envelope(buffer)
     if envelope.size < 2 or float(np.max(envelope)) < 1e-5:
@@ -469,6 +543,38 @@ def _last_vocal_release_fraction(buffer: np.ndarray, default_fraction: float, hi
     if bool(active[0]) or bool(active[min(search_end, active.size - 1)]):
         return default_fraction
     return min(default_fraction, 0.22)
+
+
+def _next_vocal_reentry_fraction(buffer: np.ndarray) -> float | None:
+    regions = _vocal_active_regions(buffer)
+    if len(regions) < 2:
+        return None
+    first_start, first_end = regions[0]
+    if first_start > 0.18:
+        return None
+    for start, end in regions[1:]:
+        if start - first_end >= 0.035 and end - start >= 0.035:
+            return start
+    return None
+
+
+def _vocal_active_regions(buffer: np.ndarray) -> list[tuple[float, float]]:
+    envelope = _rms_envelope(buffer)
+    if envelope.size < 2 or float(np.max(envelope)) < 1e-5:
+        return []
+    active = envelope >= _activity_threshold(envelope)
+    regions: list[tuple[float, float]] = []
+    start: int | None = None
+    for index, value in enumerate(active):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            if index - start >= 2:
+                regions.append((start / active.size, index / active.size))
+            start = None
+    if start is not None and active.size - start >= 2:
+        regions.append((start / active.size, 1.0))
+    return regions
 
 
 def _rms_envelope(buffer: np.ndarray, frame_ms: float = 40.0) -> np.ndarray:
@@ -801,6 +907,7 @@ def _processing_explanation(
     transient_shift_samples: int = 0,
     vocal_handoff: dict[str, float] | None = None,
     energy_handoff: dict[str, float] | None = None,
+    frequency_handoff: dict[str, float] | None = None,
     overlap: float = 0,
 ) -> str:
     method = rec.get("method", "beatmix")
@@ -815,8 +922,18 @@ def _processing_explanation(
     if vocal_handoff and vocal_handoff.get("incomingStartFraction") is not None and overlap:
         delay_ms = round(float(vocal_handoff["incomingStartFraction"]) * overlap * 1000)
         parts.append(f"B 歌人声会延后约 {delay_ms}ms 再打开，尽量贴近一句新歌词或新乐句进入。")
+        if vocal_handoff.get("outgoingGuarded"):
+            parts.append("系统检测到 A 歌下一句歌词可能会闯入过渡，已在下一句起唱前快速收掉 A 歌人声。")
     if energy_handoff and float(energy_handoff.get("incomingTrimDb") or 0) < -0.25:
         parts.append(f"B 歌前半段能量先压低约 {abs(float(energy_handoff['incomingTrimDb'])):.1f}dB，再在乐句后半段释放。")
+    if frequency_handoff:
+        active_bands = [
+            label
+            for label, key in (("低频", "lowTrimDb"), ("中频", "midTrimDb"), ("高频", "highTrimDb"))
+            if float(frequency_handoff.get(key) or 0) < -0.25
+        ]
+        if active_bands:
+            parts.append(f"频段接管会先压住 B 歌的{'、'.join(active_bands)}，再分层释放，避免整首歌一起冲进来。")
     if vocal > 0.45:
         parts.append("检测到人声冲突，过渡里会更快收掉 A 歌人声，并延后 B 歌人声进入。")
     parts.append("低频采用 bass swap：前半段保留 A 歌低频，后半段再交给 B 歌，避免两个 bass 同时顶满。")
