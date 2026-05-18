@@ -34,6 +34,7 @@ const state = {
     timer: null,
     controls: {},
     isSeparating: false,
+    scanFrame: null,
   },
   teaching: {
     open: false,
@@ -76,10 +77,12 @@ const DEFAULT_TRACK_MIXER = Object.freeze({
 
 const STEMS = Object.freeze([
   { id: "vocals", label: "\u4eba\u58f0", color: "#65d7f2", filter: "vocal" },
-  { id: "drums", label: "\u9f13", color: "#6f7274", filter: "drums" },
+  { id: "drums", label: "\u9f13", color: "#65d7f2", filter: "drums" },
   { id: "bass", label: "\u8d1d\u65af", color: "#72e5ed", filter: "bass" },
   { id: "other", label: "\u5176\u4ed6", color: "#87eef0", filter: "other" },
 ]);
+
+let stemSeparationChain = Promise.resolve();
 
 const app = document.querySelector("#app");
 app.innerHTML = `
@@ -894,6 +897,7 @@ async function uploadAndAnalyze(track) {
     track.introPoint = clamp(track.transition_candidates?.intro ?? track.intro_low ?? track.introPoint, 0.5, Math.max(0.5, track.duration * 0.35));
     track.outroPoint = clamp(track.transition_candidates?.outro ?? (track.duration - (track.outro_low || state.settings.crossfade)), track.duration * 0.55, Math.max(track.duration - 0.5, 0.5));
     ensureTrackMixer(track);
+    queueTrackStemSeparation(track);
     setStatus(`完成分析 ${track.name}`);
   } catch (error) {
     applyLocalFallbackAnalysis(track, error);
@@ -1849,6 +1853,7 @@ async function loadSelectedProject() {
     state.originalOrder = state.tracks.map((track) => track.localId);
     state.selectedId = state.tracks[0]?.localId || null;
     applySettingsToControls();
+    state.tracks.forEach((track) => queueTrackStemSeparation(track));
     setStatus("项目已加载");
     render();
   } catch (error) {
@@ -2071,6 +2076,7 @@ function activeStemTrack() {
 function openStemDebugger() {
   const track = selectedTrack()?.buffer ? selectedTrack() : playableTracks().find((item) => item.buffer) || state.tracks.find((item) => item.buffer);
   if (track) state.stemDebugger.trackId = track.localId;
+  if (track?.status === "ready") queueTrackStemSeparation(track);
   state.view = "stems";
   stopPreview({ keepStatus: true });
   render();
@@ -2085,6 +2091,8 @@ function closeStemDebugger() {
 function selectStemDebugTrack() {
   state.stemDebugger.trackId = els.stemTrackSelect.value || null;
   state.stemDebugger.playbackOffset = 0;
+  const track = activeStemTrack();
+  if (track?.status === "ready") queueTrackStemSeparation(track);
   if (state.stemDebugger.isPlaying) playStemDebugger(0);
   renderStemDebugger();
 }
@@ -2154,16 +2162,34 @@ function stemBufferFor(track, stemId) {
   return track?.stems?.[stemId]?.buffer || track?.buffer || null;
 }
 
+function isStemPending(track) {
+  return track?.stemStatus === "queued" || track?.stemStatus === "loading";
+}
+
+function queueTrackStemSeparation(track, options = {}) {
+  if (!track?.id || track.status !== "ready") return;
+  if (!options.force && (trackHasRealStems(track) || isStemPending(track))) return;
+  track.stemStatus = "queued";
+  track.stemError = "";
+  renderStemDebugger();
+  stemSeparationChain = stemSeparationChain
+    .catch(() => {})
+    .then(() => runTrackStemSeparation(track, options));
+}
+
 async function separateActiveStemTrack() {
   const track = activeStemTrack();
   if (!track?.id || track.status !== "ready") {
     setStatus("\u8bf7\u5148\u7b49\u5f85\u66f2\u76ee\u4e0a\u4f20\u5e76\u5206\u6790\u5b8c\u6210");
     return;
   }
-  state.stemDebugger.isSeparating = true;
+  queueTrackStemSeparation(track, { force: true });
+}
+
+async function runTrackStemSeparation(track, options = {}) {
+  if (!track?.id || track.status !== "ready") return;
   track.stemStatus = "loading";
   track.stemError = "";
-  stopStemDebugger({ keepStatus: true });
   renderStemDebugger();
   try {
     setStatus(`Demucs \u6b63\u5728\u5206\u79bb ${track.name}`);
@@ -2171,18 +2197,20 @@ async function separateActiveStemTrack() {
     const result = await fetchJson(`${API}/api/tracks/${track.id}/stems`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ device: "auto", force: false }),
+      body: JSON.stringify({ device: "auto", force: Boolean(options.force) }),
     });
     await hydrateTrackStems(track, result);
     track.stemStatus = "ready";
     track.stemEngine = result.engine || "demucs";
+    if (state.view === "stems" && state.stemDebugger.isPlaying && activeStemTrack()?.localId === track.localId) {
+      playStemDebugger(state.stemDebugger.playbackOffset);
+    }
     setStatus(result.cached ? `\u5df2\u8f7d\u5165\u7f13\u5b58\u5206\u8f68 ${track.name}` : `Demucs \u5206\u8f68\u5b8c\u6210 ${track.name}`);
   } catch (error) {
     track.stemStatus = "error";
     track.stemError = error.message || "Demucs \u5206\u8f68\u5931\u8d25";
     setStatus(track.stemError);
   } finally {
-    state.stemDebugger.isSeparating = false;
     renderStemDebugger();
   }
 }
@@ -2635,10 +2663,10 @@ function renderStemDebugger() {
   const hasTrack = Boolean(active?.buffer);
   els.stemPlayButton.disabled = !hasTrack;
   els.stemRestartButton.disabled = !hasTrack;
-  els.stemSeparateButton.disabled = !hasTrack || state.stemDebugger.isSeparating || active?.stemStatus === "loading" || active?.status !== "ready";
+  els.stemSeparateButton.disabled = !hasTrack || isStemPending(active) || active?.status !== "ready";
   els.stemStopButton.disabled = !state.stemDebugger.isPlaying;
   els.stemTransportPlay.disabled = !hasTrack;
-  els.stemSeparateButton.textContent = active?.stemStatus === "loading" || state.stemDebugger.isSeparating ? "Demucs ..." : trackHasRealStems(active) ? "\u91cd\u8f7d\u771f\u5206\u8f68" : "Demucs \u5206\u8f68";
+  els.stemSeparateButton.textContent = isStemPending(active) ? "Demucs ..." : trackHasRealStems(active) ? "\u91cd\u65b0\u5206\u8f68" : "Demucs \u5206\u8f68";
   els.stemPlayButton.textContent = state.stemDebugger.isPlaying ? "\u6682\u505c" : "\u64ad\u653e";
   els.stemTransportPlay.textContent = state.stemDebugger.isPlaying ? "Ⅱ" : "▶";
 
@@ -2660,12 +2688,12 @@ function renderStemDebugger() {
 function renderStemDebuggerStatus(track) {
   if (!track) return "";
   const ready = trackHasRealStems(track);
-  const loading = track.stemStatus === "loading" || state.stemDebugger.isSeparating;
+  const loading = isStemPending(track);
   const error = track.stemStatus === "error" ? track.stemError : "";
   const label = ready
     ? "Demucs \u771f\u5206\u8f68"
     : loading
-      ? "Demucs \u5206\u8f68\u4e2d"
+      ? track.stemStatus === "queued" ? "Demucs \u7b49\u5f85\u5206\u8f68" : "Demucs \u5206\u8f68\u4e2d"
       : "\u6a21\u62df\u5206\u8f68";
   const note = ready
     ? "\u5f53\u524d\u76d1\u542c vocals / drums / bass / other \u56db\u4e2a\u771f\u5b9e\u97f3\u9891\u6587\u4ef6"
@@ -2682,10 +2710,12 @@ function renderStemDebuggerStatus(track) {
 
 function renderStemLane(stem, track) {
   const control = ensureStemControl(stem.id);
-  const activeClass = control.mute ? " muted" : control.solo ? " solo" : "";
   const isReal = Boolean(track?.stems?.[stem.id]?.buffer);
+  const pending = !isReal && isStemPending(track);
+  const simulated = !isReal && !pending;
+  const activeClass = `${control.mute ? " muted" : control.solo ? " solo" : ""}${isReal ? " real" : ""}${pending ? " pending" : ""}${simulated ? " simulated" : ""}`;
   return `
-    <section class="stem-lane${activeClass}" style="--stem-color:${stem.color}">
+    <section class="stem-lane${activeClass}" style="--stem-color:${isReal ? stem.color : "#737b80"}">
       <div class="stem-control-strip">
         <div class="stem-buttons">
           <button type="button" class="${control.mute ? "active" : ""}" data-stem-action="mute" data-stem="${stem.id}" aria-label="${stem.label} mute">M</button>
@@ -3139,6 +3169,12 @@ function drawStemWaveforms() {
   const track = activeStemTrack();
   const canvases = els.stemDeck.querySelectorAll("canvas[data-stem-wave]");
   canvases.forEach((canvas) => drawStemWaveform(canvas, track, canvas.dataset.stemWave));
+  if (isStemPending(track) && !state.stemDebugger.scanFrame) {
+    state.stemDebugger.scanFrame = window.requestAnimationFrame(() => {
+      state.stemDebugger.scanFrame = null;
+      drawStemWaveforms();
+    });
+  }
 }
 
 function drawStemWaveform(canvas, track, stemId) {
@@ -3166,6 +3202,8 @@ function drawStemWaveform(canvas, track, stemId) {
   const stem = STEMS.find((item) => item.id === stemId) || STEMS[0];
   const realStem = track?.stems?.[stemId];
   const peaks = realStem?.peaks?.length ? realStem.peaks : track?.peaks || [];
+  const pending = !realStem && isStemPending(track);
+  const waveColor = realStem ? stem.color : "#737b80";
   if (!track || !peaks.length) {
     ctx.fillStyle = "rgba(255,255,255,0.34)";
     ctx.font = "13px Bahnschrift, Segoe UI, sans-serif";
@@ -3176,14 +3214,24 @@ function drawStemWaveform(canvas, track, stemId) {
   const center = height / 2;
   const barWidth = Math.max(1, width / peaks.length);
   const control = ensureStemControl(stem.id);
-  ctx.fillStyle = control.mute ? "rgba(120,120,120,0.36)" : stem.color;
+  ctx.fillStyle = control.mute ? "rgba(120,120,120,0.36)" : waveColor;
   peaks.forEach((value, index) => {
     const shaped = realStem ? Number(value) || 0 : shapeStemPeak(Number(value) || 0, index, stem.id);
     const barHeight = Math.max(1, shaped * height * 0.42);
-    ctx.globalAlpha = control.mute ? 0.38 : 0.72 + Math.min(0.24, shaped * 0.24);
+    ctx.globalAlpha = control.mute ? 0.38 : pending ? 0.24 : 0.72 + Math.min(0.24, shaped * 0.24);
     ctx.fillRect(index * barWidth, center - barHeight, Math.max(1, barWidth * 0.72), barHeight * 2);
   });
   ctx.globalAlpha = 1;
+  if (pending) {
+    const scanWidth = Math.max(80, width * 0.12);
+    const scanX = ((Date.now() / 14) % (width + scanWidth * 2)) - scanWidth;
+    const gradient = ctx.createLinearGradient(scanX, 0, scanX + scanWidth, 0);
+    gradient.addColorStop(0, "rgba(255,255,255,0)");
+    gradient.addColorStop(0.5, "rgba(255,255,255,0.22)");
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(scanX, 0, scanWidth, height);
+  }
   ctx.strokeStyle = "rgba(255,255,255,0.28)";
   ctx.beginPath();
   ctx.moveTo(0, center);

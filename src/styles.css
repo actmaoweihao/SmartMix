@@ -504,6 +504,20 @@ input[type="range"] {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
+.stem-lane.pending .stem-wave,
+.stem-lane.simulated .stem-wave {
+  background: #151819;
+  filter: grayscale(1) brightness(0.78);
+}
+
+.stem-lane.pending .stem-wave {
+  animation: stemPendingPulse 1.4s ease-in-out infinite;
+}
+
+.stem-lane.real .stem-wave {
+  background: color-mix(in srgb, var(--stem-color) 80%, #081315);
+}
+
 .stem-lane.muted .stem-wave {
   filter: grayscale(1) brightness(0.72);
   opacity: 0.72;
@@ -527,6 +541,17 @@ input[type="range"] {
 
 .stem-empty strong {
   color: var(--text);
+}
+
+@keyframes stemPendingPulse {
+  0%,
+  100% {
+    opacity: 0.58;
+  }
+
+  50% {
+    opacity: 0.9;
+  }
 }
 
 .stem-transport {
