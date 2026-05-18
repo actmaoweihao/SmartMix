@@ -1,6 +1,6 @@
 # SmartMix 技术方案文档
 
-本文档面向开发者，说明 SmartMix 的整体架构、核心模块、主要 API、数据结构，以及音频分析、排序、两歌匹配、过渡规划、实时预览、后端导出和 Camelot 调音的实现原理。
+本文档面向开发者，说明 SmartMix 的整体架构、核心模块、主要 API、数据结构，以及音频分析、排序、两歌匹配与修复、DJ 教学、自动 Demucs 分轨调试、过渡规划、实时预览、后端导出和 Camelot 调音的实现原理。
 
 ## 1. 技术栈
 
@@ -8,19 +8,20 @@
 
 - Vite：本地开发服务器与前端构建工具。
 - 原生 JavaScript：项目没有引入 React/Vue，主要逻辑集中在 `src/main.js`。
-- Web Audio API：负责浏览器端音频解码、实时预览、GainNode 淡入淡出、BiquadFilter EQ 和滤波扫频。
-- Canvas：负责选中曲目的波形绘制和 IN/OUT 手柄编辑。
-- CSS：工作台布局、控制面板、时间线、Deck Mixer 和表格样式。
+- Web Audio API：负责浏览器端音频解码、实时预览、分轨调试播放、GainNode 淡入淡出、BiquadFilter EQ 和滤波扫频。
+- Canvas：负责选中曲目的波形绘制、IN/OUT 手柄编辑，以及分轨调试的模拟/真实 stem 波形。
+- TypeScript 业务模块：负责推荐算法、分析评分、无缝过渡计划类型和教学步骤生成。
+- CSS：工作台布局、控制面板、时间线、Deck Mixer、教学卡片、分轨调试和表格样式。
 
 ### 后端
 
-- FastAPI：提供上传、分析、匹配、导出、项目保存和调音 API。
+- FastAPI：提供上传、分析、匹配、匹配修复、真实 stem 缓存、无缝过渡试听、导出、项目保存和调音 API。
 - librosa：音频解码、BPM、beat tracking、chroma、time stretch、pitch shift fallback。
 - NumPy / SciPy：音频数组处理、滤波、包络和动态 EQ。
 - soundfile：写 WAV。
 - imageio-ffmpeg：提供 ffmpeg 二进制，用于格式 fallback 解码和 MP3 转码。
 - pyloudnorm：可用时用于 LUFS 测量和响度归一化。
-- Demucs：可选，用于高质量调音的 stem separation。
+- Demucs：可选，用于高质量调音、分轨调试和过渡试听的 stem separation。
 - Rubber Band：可选，用于高质量 pitch shifting。
 
 ## 2. 运行架构
@@ -38,16 +39,17 @@ backend/data/
   uploads/   uploaded audio + analysis json
   exports/   rendered mix files
   projects/  saved project json
+  stems/     cached Demucs vocals/drums/bass/other
 ```
 
-前端默认访问 `http://当前主机:8001`，后端 CORS 允许本地开发端口，包括 `3000` 和 `5173`。
+前端通过 `src/main.js` 中的 `API = http(s)://当前主机:8002` 访问后端。后端 CORS 允许本地开发端口，包括 `3000`、`5173` 和 localhost/127.0.0.1 的其他端口。
 
 启动命令来自 `package.json`：
 
 ```text
 pnpm dev      -> concurrently 启动 backend 和 frontend
 pnpm frontend -> vite --host 127.0.0.1 --port 3000
-pnpm backend  -> uvicorn backend.main:app --host 127.0.0.1 --port 8001 --reload
+pnpm backend  -> uvicorn backend.main:app --host 127.0.0.1 --port 8002 --reload
 ```
 
 ## 3. 目录与模块职责
