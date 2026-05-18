@@ -14,6 +14,7 @@ const state = {
   audioContext: null,
   activeSources: [],
   activeNodes: [],
+  liveRefreshTimer: null,
   playStartContextTime: 0,
   playStartOffset: 0,
   playbackOffset: 0,
@@ -413,6 +414,7 @@ function bindEvents() {
   els.mixProgress.addEventListener("input", () => {
     state.playbackOffset = Number(els.mixProgress.value);
     renderTransport();
+    syncMixTimelinePlayback();
   });
   els.mixProgress.addEventListener("change", () => {
     if (state.isPlaying) previewMix(Number(els.mixProgress.value));
@@ -447,6 +449,14 @@ function bindEvents() {
 }
 
 function syncSettings() {
+  const previousScheduleSettings = {
+    crossfade: state.settings.crossfade,
+    autoTransition: state.settings.autoTransition,
+    aiPrecision: state.settings.aiPrecision,
+    phraseBars: state.settings.phraseBars,
+    mixStrategy: state.settings.mixStrategy,
+    filterMode: state.settings.filterMode,
+  };
   state.settings.sortMode = els.sortMode.value;
   state.settings.crossfade = Number(els.crossfade.value);
   state.settings.autoTransition = els.autoTransition.checked;
@@ -462,7 +472,11 @@ function syncSettings() {
   state.settings.eq.low = Number(els.eqLow.value);
   state.settings.eq.mid = Number(els.eqMid.value);
   state.settings.eq.high = Number(els.eqHigh.value);
+  applyLiveMixerChanges();
   render();
+  if (state.isPlaying && scheduleSettingsChanged(previousScheduleSettings)) {
+    scheduleLivePreviewRefresh();
+  }
 }
 
 async function pingBackend() {
@@ -1306,6 +1320,7 @@ async function previewMix(offset = 0) {
 
 function scheduleMix(context, tracks, timeline, offset) {
   const startAt = context.currentTime + 0.08;
+  const renderedRegions = renderedTransitionRegions(timeline);
   let started = 0;
   timeline.items.forEach((item) => {
     if (item.end <= offset) return;
@@ -1315,24 +1330,58 @@ function scheduleMix(context, tracks, timeline, offset) {
 
     const source = context.createBufferSource();
     source.buffer = track.buffer;
-    const gain = context.createGain();
+    const envelopeGain = context.createGain();
+    const renderedDuckGain = context.createGain();
+    const mixerGain = context.createGain();
     const low = context.createBiquadFilter();
     const mid = context.createBiquadFilter();
     const high = context.createBiquadFilter();
+    const dynamicLow = context.createBiquadFilter();
+    const dynamicMid = context.createBiquadFilter();
+    const dynamicHigh = context.createBiquadFilter();
     const transitionFilter = context.createBiquadFilter();
     configureEq(track, low, mid, high, transitionFilter, context.currentTime);
-    source.connect(low).connect(mid).connect(high).connect(transitionFilter).connect(gain).connect(context.destination);
+    configureDynamicEq(dynamicLow, dynamicMid, dynamicHigh);
+    source
+      .connect(low)
+      .connect(mid)
+      .connect(high)
+      .connect(dynamicLow)
+      .connect(dynamicMid)
+      .connect(dynamicHigh)
+      .connect(transitionFilter)
+      .connect(envelopeGain)
+      .connect(renderedDuckGain)
+      .connect(mixerGain)
+      .connect(context.destination);
 
     const localStart = startAt + Math.max(0, item.start - offset);
-    applyPreviewEnvelope(item, gain.gain, transitionFilter, low, mid, high, localStart, offset, sourceOffset);
+    mixerGain.gain.setValueAtTime(ensureTrackMixer(track).gain, localStart);
+    applyPreviewEnvelope(item, envelopeGain.gain, transitionFilter, dynamicLow, dynamicMid, dynamicHigh, localStart, offset, sourceOffset);
+    applyRenderedPreviewDuck(item, renderedDuckGain.gain, renderedRegions, startAt, offset);
     source.start(localStart, sourceOffset);
     source.onended = () => {
       state.activeSources = state.activeSources.filter((itemSource) => itemSource !== source);
+      state.activeNodes = state.activeNodes.filter((node) => node.source !== source);
     };
     state.activeSources.push(source);
-    state.activeNodes.push({ gain, low, mid, high, transitionFilter });
+    state.activeNodes.push({
+      source,
+      trackId: track.localId,
+      mixerGain,
+      envelopeGain,
+      renderedDuckGain,
+      low,
+      mid,
+      high,
+      dynamicLow,
+      dynamicMid,
+      dynamicHigh,
+      transitionFilter,
+    });
     started += 1;
   });
+  started += scheduleRenderedTransitionPreviews(context, timeline, renderedRegions, startAt, offset);
   return started > 0;
 }
 
@@ -1340,21 +1389,142 @@ function configureEq(track, low, mid, high, transitionFilter, now) {
   const mixer = ensureTrackMixer(track);
   low.type = "lowshelf";
   low.frequency.value = 220;
-  low.gain.value = mixer.eq.low * 12 + state.settings.eq.low * 6;
+  low.gain.value = mixerEqDb(mixer.eq.low, "low");
   mid.type = "peaking";
   mid.frequency.value = 1200;
   mid.Q.value = 0.9;
-  mid.gain.value = mixer.eq.mid * 12 + state.settings.eq.mid * 5;
+  mid.gain.value = mixerEqDb(mixer.eq.mid, "mid");
   high.type = "highshelf";
   high.frequency.value = 3400;
-  high.gain.value = mixer.eq.high * 12 + state.settings.eq.high * 6;
+  high.gain.value = mixerEqDb(mixer.eq.high, "high");
   transitionFilter.type = state.settings.filterMode === "highpassLift" ? "highpass" : "lowpass";
   transitionFilter.frequency.setValueAtTime(state.settings.filterMode === "none" ? 20000 : 16000, now);
 }
 
+function renderedTransitionRegions(timeline) {
+  return timeline.items
+    .filter((item) => item.transitionIn?.renderedPreview?.buffer)
+    .map((item) => {
+      const preview = item.transitionIn.renderedPreview;
+      const previousItem = timeline.items[item.index - 1];
+      const rawStart = previousItem.start + (Number(preview.previewStartTime) - previousItem.sourceStart);
+      const start = Math.max(previousItem.start, rawStart);
+      const previewOffset = Math.max(0, start - rawStart);
+      const duration = Math.max(0, Math.min(preview.buffer.duration - previewOffset, item.end - start));
+      return {
+        start,
+        end: start + duration,
+        preview,
+        previewOffset,
+        trackIds: new Set([previousItem.track.localId, item.track.localId]),
+      };
+    })
+    .filter((region) => region.end > region.start + 0.05);
+}
+
+function applyRenderedPreviewDuck(item, param, regions, startAt, mixOffset) {
+  param.setValueAtTime(1, startAt);
+  regions
+    .filter((region) => region.trackIds.has(item.track.localId) && region.end > item.start && region.start < item.end)
+    .forEach((region) => {
+      const duckStart = startAt + Math.max(0, region.start - mixOffset);
+      const duckEnd = startAt + Math.max(0, region.end - mixOffset);
+      if (duckEnd <= startAt) return;
+      const fade = 0.025;
+      param.setValueAtTime(1, Math.max(startAt, duckStart - fade));
+      param.linearRampToValueAtTime(0.0001, Math.max(startAt + 0.001, duckStart + fade));
+      param.setValueAtTime(0.0001, Math.max(startAt + 0.002, duckEnd - fade));
+      param.linearRampToValueAtTime(1, Math.max(startAt + 0.003, duckEnd + fade));
+    });
+}
+
+function scheduleRenderedTransitionPreviews(context, timeline, regions, startAt, offset) {
+  let started = 0;
+  regions.forEach((region) => {
+    if (region.end <= offset) return;
+    const sourceOffset = region.previewOffset + Math.max(0, offset - region.start);
+    if (sourceOffset >= region.preview.buffer.duration) return;
+    const source = context.createBufferSource();
+    const gain = context.createGain();
+    source.buffer = region.preview.buffer;
+    source.connect(gain).connect(context.destination);
+    const localStart = startAt + Math.max(0, region.start - offset);
+    const playDuration = Math.min(region.end - Math.max(offset, region.start), region.preview.buffer.duration - sourceOffset);
+    if (playDuration <= 0.05) return;
+    gain.gain.setValueAtTime(1, localStart);
+    source.start(localStart, sourceOffset, playDuration);
+    source.onended = () => {
+      state.activeSources = state.activeSources.filter((itemSource) => itemSource !== source);
+    };
+    state.activeSources.push(source);
+    started += 1;
+  });
+  return started;
+}
+
+function configureDynamicEq(low, mid, high) {
+  low.type = "lowshelf";
+  low.frequency.value = 220;
+  low.gain.value = 0;
+  mid.type = "peaking";
+  mid.frequency.value = 1200;
+  mid.Q.value = 0.9;
+  mid.gain.value = 0;
+  high.type = "highshelf";
+  high.frequency.value = 3400;
+  high.gain.value = 0;
+}
+
+function mixerEqDb(value, band) {
+  return (Number(value) || 0) * 12 + globalEqDb(band);
+}
+
+function globalEqDb(band) {
+  const value = Number(state.settings.eq[band]) || 0;
+  return value * (band === "mid" ? 5 : 6);
+}
+
+function applyLiveMixerChanges(trackId = null) {
+  if (!state.audioContext || !state.activeNodes.length) return;
+  const now = state.audioContext.currentTime;
+  state.activeNodes.forEach((node) => {
+    if (trackId && node.trackId !== trackId) return;
+    const track = state.tracks.find((item) => item.localId === node.trackId);
+    if (!track) return;
+    const mixer = ensureTrackMixer(track);
+    smoothSetAudioParam(node.mixerGain.gain, mixer.gain, now);
+    smoothSetAudioParam(node.low.gain, mixerEqDb(mixer.eq.low, "low"), now);
+    smoothSetAudioParam(node.mid.gain, mixerEqDb(mixer.eq.mid, "mid"), now);
+    smoothSetAudioParam(node.high.gain, mixerEqDb(mixer.eq.high, "high"), now);
+  });
+}
+
+function smoothSetAudioParam(param, value, now) {
+  param.cancelScheduledValues(now);
+  param.setTargetAtTime(value, now, 0.015);
+}
+
+function scheduleSettingsChanged(previous) {
+  return (
+    previous.crossfade !== state.settings.crossfade ||
+    previous.autoTransition !== state.settings.autoTransition ||
+    previous.aiPrecision !== state.settings.aiPrecision ||
+    previous.phraseBars !== state.settings.phraseBars ||
+    previous.mixStrategy !== state.settings.mixStrategy ||
+    previous.filterMode !== state.settings.filterMode
+  );
+}
+
+function scheduleLivePreviewRefresh() {
+  if (state.liveRefreshTimer) window.clearTimeout(state.liveRefreshTimer);
+  state.liveRefreshTimer = window.setTimeout(() => {
+    state.liveRefreshTimer = null;
+    if (state.isPlaying) previewMix(state.playbackOffset);
+  }, 120);
+}
+
 function applyPreviewEnvelope(item, param, filterNode, low, mid, high, startsAt, mixOffset, sourceOffset) {
   const track = item.track;
-  const mixer = ensureTrackMixer(track);
   const endAt = startsAt + Math.max(0, track.buffer.duration - sourceOffset);
   const elapsed = Math.max(0, mixOffset - item.start);
   const strategy = transitionStrategyForItem(item);
@@ -1363,19 +1533,19 @@ function applyPreviewEnvelope(item, param, filterNode, low, mid, high, startsAt,
   param.cancelScheduledValues(startsAt);
   const entrySeconds = vocalHandoffIn ? Math.min(0.45, item.fadeIn * 0.16) : item.fadeIn;
   const inProgressFadeIn = entrySeconds > 0 && elapsed < entrySeconds;
-  param.setValueAtTime((inProgressFadeIn ? elapsed / entrySeconds : 1) * mixer.gain, startsAt);
-  if (inProgressFadeIn) param.linearRampToValueAtTime(mixer.gain, startsAt + (entrySeconds - elapsed));
+  param.setValueAtTime(inProgressFadeIn ? elapsed / entrySeconds : 1, startsAt);
+  if (inProgressFadeIn) param.linearRampToValueAtTime(1, startsAt + (entrySeconds - elapsed));
 
   const fadeOutStart = item.fadeOutStart == null ? null : startsAt + Math.max(0, item.fadeOutStart - mixOffset);
   const fadeOutEnd = fadeOutStart == null ? null : fadeOutStart + item.fadeOut;
   if (item.fadeOut > 0 && fadeOutStart != null && fadeOutEnd != null && endAt > fadeOutStart) {
     if (vocalHandoffOut) {
       const releaseStart = fadeOutStart + item.fadeOut * 0.76;
-      param.setValueAtTime(mixer.gain, fadeOutStart);
-      param.setValueAtTime(mixer.gain * 0.92, releaseStart);
+      param.setValueAtTime(1, fadeOutStart);
+      param.setValueAtTime(0.92, releaseStart);
       param.linearRampToValueAtTime(0, fadeOutEnd);
     } else {
-      param.setValueAtTime(mixer.gain, fadeOutStart);
+      param.setValueAtTime(1, fadeOutStart);
       param.linearRampToValueAtTime(0, fadeOutEnd);
     }
     if (state.settings.filterMode === "lowpassSweep") {
@@ -1397,10 +1567,9 @@ function applyPreviewEnvelope(item, param, filterNode, low, mid, high, startsAt,
 }
 
 function automateDynamicEq(track, item, low, mid, high, startsAt, mixOffset, endAt) {
-  const mixer = ensureTrackMixer(track);
-  const baseLow = mixer.eq.low * 12 + state.settings.eq.low * 6;
-  const baseMid = mixer.eq.mid * 12 + state.settings.eq.mid * 5;
-  const baseHigh = mixer.eq.high * 12 + state.settings.eq.high * 6;
+  const baseLow = 0;
+  const baseMid = 0;
+  const baseHigh = 0;
   const strategy = item.transitionIn
     ? resolveMixStrategy(item.transitionIn.prevTrack, item.track)
     : resolveMixStrategy(item.track, item.transitionOut?.nextTrack);
@@ -1505,6 +1674,8 @@ function stopPreview(options = {}) {
   state.activeSources = [];
   state.activeNodes = [];
   state.isPlaying = false;
+  if (state.liveRefreshTimer) window.clearTimeout(state.liveRefreshTimer);
+  state.liveRefreshTimer = null;
   if (state.timer) window.clearInterval(state.timer);
   state.timer = null;
   if (!options.keepStatus) setStatus(playableTracks().length ? "已停止" : "等待上传");
@@ -1520,6 +1691,7 @@ function tickPlayback() {
     setStatus("预览结束");
   }
   renderTransport();
+  syncMixTimelinePlayback();
   drawWaveform();
 }
 
@@ -1762,6 +1934,7 @@ function planClientTransition(prev, next) {
     actual = Math.max(2, Math.min(actual, (prev.outro_low || 0) + (next.intro_low || 0) + 2));
   }
   actual = Math.min(actual, maxByLength);
+  const renderedPreview = renderedPreviewForTransition(prev, next);
   return {
     seconds: actual,
     strategy: resolveMixStrategy(prev, next),
@@ -1769,7 +1942,19 @@ function planClientTransition(prev, next) {
     nextIntro: nextIn,
     nextOverlapStart: resolveMixStrategy(prev, next) === "vocalHandoff" ? nextIn : Math.max(0, nextIn - actual),
     confidence: Math.min(0.95, (prev.transition_candidates?.confidence || 0.35) * 0.5 + (next.transition_candidates?.confidence || 0.35) * 0.5),
+    renderedPreview,
   };
+}
+
+function renderedPreviewForTransition(prev, next) {
+  const preview = teachingPreviewFor(next.localId, prev.localId);
+  if (!preview?.buffer || !preview.timelineApplied) return null;
+  const outgoingTime = Number(preview.outgoingCue?.time ?? preview.alignment?.outgoingExitTime);
+  const incomingTime = Number(preview.incomingCue?.time ?? preview.alignment?.incomingEntryTime);
+  if (!Number.isFinite(outgoingTime) || !Number.isFinite(incomingTime)) return null;
+  if (Math.abs((prev.outroPoint || 0) - outgoingTime) > 0.35) return null;
+  if (Math.abs((next.introPoint || 0) - incomingTime) > 0.35) return null;
+  return preview;
 }
 
 function phraseTransitionSeconds(prev, next) {
@@ -1816,7 +2001,19 @@ function updateDeckMixer(event) {
   const value = Number(input.value);
   if (input.dataset.mixer === "gain") mixer.gain = value;
   if (input.dataset.mixer in mixer.eq) mixer.eq[input.dataset.mixer] = value;
-  render();
+  updateMixerReadout(input, mixer);
+  applyLiveMixerChanges(track.localId);
+}
+
+function updateMixerReadout(input, mixer) {
+  const readout = input.closest(".deck-slider")?.querySelector("[data-mixer-readout]");
+  if (!readout) return;
+  const param = input.dataset.mixer;
+  if (param === "gain") {
+    readout.textContent = `${Math.round(mixer.gain * 100)}%`;
+  } else if (param in mixer.eq) {
+    readout.textContent = `${Math.round(mixer.eq[param] * 12)} dB`;
+  }
 }
 
 function deckMixerClick(event) {
@@ -1920,11 +2117,13 @@ async function generateTeachingPreview(nextId) {
         },
       }),
     });
-    state.teaching.previews[nextId] = {
+    const preview = {
       ...result,
       outgoingLocalId: current.localId,
       incomingLocalId: next.localId,
     };
+    state.teaching.previews[nextId] = preview;
+    await hydrateTeachingPreviewAudio(preview);
     setStatus("已生成无缝过渡试听");
   } catch (error) {
     setStatus(error.message || "过渡试听生成失败");
@@ -1945,6 +2144,7 @@ function applyTeachingRecommendation(nextId) {
   })[0];
   const preview = teachingPreviewFor(nextId, current.localId);
   const effective = effectiveTeachingCue(rec, preview);
+  if (preview) preview.timelineApplied = true;
 
   current.outroPoint = clamp(effective.outgoingTime, 0.5, Math.max(0.5, current.duration - 0.25));
   next.introPoint = clamp(effective.incomingTime, 0, Math.max(0, next.duration - 0.25));
@@ -2120,6 +2320,17 @@ function renderMixTimeline() {
   `;
 }
 
+function syncMixTimelinePlayback(timeline = buildTimeline()) {
+  const playhead = els.mixTimeline.querySelector(".timeline-playhead");
+  if (!playhead) return;
+  const total = Math.max(timeline.total, 1);
+  const left = clamp((state.playbackOffset / total) * 100, 0, 100);
+  playhead.style.left = `${left}%`;
+  if (timeline.items.length > 1) {
+    els.transitionReadout.textContent = `${timeline.items.length - 1} 个重叠过渡 · 当前 ${formatActiveTransitionLabel(timeline)}`;
+  }
+}
+
 function formatActiveTransitionLabel(timeline) {
   const transition = activeTransition(timeline);
   if (!transition) return "--";
@@ -2283,6 +2494,16 @@ function renderPreviewResult(preview) {
         <strong>试听已生成</strong>
         <a href="${API}${preview.url}" target="_blank" rel="noreferrer">打开 WAV</a>
       </div>
+      ${preview.url ? `
+        <audio
+          class="preview-audio"
+          controls
+          controlsList="nodownload"
+          preload="metadata"
+          src="${escapeHtml(`${API}${preview.url}`)}"
+        ></audio>
+      ` : ""}
+      ${preview.bufferError ? `<small>前端解码失败，但仍可用播放器直接试听：${escapeHtml(preview.bufferError)}</small>` : ""}
       <div class="preview-report">
         <span>${escapeHtml(methodLabel || "")}</span>
         <span>${escapeHtml(cueLabel)}</span>
@@ -2310,6 +2531,20 @@ function teachingPreviewFor(nextId, currentId = selectedTrack()?.localId) {
   if (!preview) return null;
   if (currentId && preview.outgoingLocalId && preview.outgoingLocalId !== currentId) return null;
   return preview;
+}
+
+async function hydrateTeachingPreviewAudio(preview) {
+  if (!preview?.url || preview.buffer) return;
+  try {
+    const context = await getAudioContext();
+    const response = await fetch(`${API}${preview.url}`);
+    if (!response.ok) throw new Error("preview audio fetch failed");
+    const arrayBuffer = await response.arrayBuffer();
+    preview.buffer = await context.decodeAudioData(arrayBuffer.slice(0));
+    preview.bufferDuration = preview.buffer.duration;
+  } catch (error) {
+    preview.bufferError = error.message || "preview audio decode failed";
+  }
 }
 
 function effectiveTeachingCue(rec, preview) {
@@ -2403,7 +2638,7 @@ function renderTeachingStep(step) {
 function renderMixerSlider(trackId, param, label, value, min, max, step, readout) {
   return `
     <label class="deck-slider">
-      <span>${label}<b>${readout}</b></span>
+      <span>${label}<b data-mixer-readout>${readout}</b></span>
       <input type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-mixer="${param}" data-id="${trackId}" />
     </label>
   `;
