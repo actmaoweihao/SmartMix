@@ -114,8 +114,13 @@ def _crossfade(buffers: list[np.ndarray], tracks: list[dict], settings: dict) ->
         incoming = buffers[index]
         strategy = _resolve_mix_strategy(settings, prev_track, next_track) if ai_precision or filter_mode == "dynamicEq" else None
         plan = plan_transition(prev_track, next_track, {**settings, "crossfade": requested, "autoTransition": auto})
+        preview = _transition_preview_for_pair(prev_track, next_track)
         prev_duration_samples = min(_seconds_to_samples(float(prev_track.get("duration") or 0)), rendered.shape[1])
         current_track_start = max(0, rendered.shape[1] - prev_duration_samples)
+        if preview:
+            rendered = _splice_transition_preview(rendered, incoming, current_track_start, preview)
+            continue
+
         prev_overlap_start = current_track_start + _seconds_to_samples(plan.prev_overlap_start)
         next_overlap_start = _seconds_to_samples(plan.next_intro if strategy == "vocalHandoff" else plan.next_overlap_start)
         if prev_overlap_start >= rendered.shape[1]:
@@ -148,6 +153,77 @@ def _crossfade(buffers: list[np.ndarray], tracks: list[dict], settings: dict) ->
         rendered = np.concatenate([head, overlap, tail], axis=1)
 
     return np.clip(rendered, -1, 1)
+
+
+def _transition_preview_for_pair(prev_track: dict, next_track: dict) -> dict | None:
+    preview = next_track.get("appliedTransitionPreview") or {}
+    if not preview.get("url") and not preview.get("audioPath"):
+        return None
+    if preview.get("outgoingTrackId") and preview.get("outgoingTrackId") != prev_track.get("id"):
+        return None
+    if preview.get("incomingTrackId") and preview.get("incomingTrackId") != next_track.get("id"):
+        return None
+    outgoing_time = _preview_cue_time(preview, "outgoingCue", "outgoingExitTime")
+    incoming_time = _preview_cue_time(preview, "incomingCue", "incomingEntryTime")
+    if outgoing_time is None or incoming_time is None:
+        return None
+    return preview
+
+
+def _splice_transition_preview(rendered: np.ndarray, incoming: np.ndarray, current_track_start: int, preview: dict) -> np.ndarray:
+    preview_audio = _load_transition_preview_audio(preview)
+    outgoing_time = _preview_cue_time(preview, "outgoingCue", "outgoingExitTime")
+    incoming_time = _preview_cue_time(preview, "incomingCue", "incomingEntryTime")
+    preview_start_time = float(preview.get("previewStartTime") or max(0.0, float(outgoing_time or 0) - 8.0))
+    before_seconds = max(0.0, float(outgoing_time or preview_start_time) - preview_start_time)
+    preview_start = max(0, min(rendered.shape[1], current_track_start + _seconds_to_samples(preview_start_time)))
+    before_samples = min(_seconds_to_samples(before_seconds), preview_audio.shape[1])
+    preview_audio = _match_preview_level(rendered, preview_audio, preview_start, before_samples)
+    incoming_resume = _seconds_to_samples(float(incoming_time or 0) + preview_audio.shape[1] / SAMPLE_RATE - before_samples / SAMPLE_RATE)
+    incoming_resume = max(0, min(incoming.shape[1], incoming_resume))
+    head = rendered[:, :preview_start]
+    tail = incoming[:, incoming_resume:]
+    return np.concatenate([head, preview_audio, tail], axis=1)
+
+
+def _load_transition_preview_audio(preview: dict) -> np.ndarray:
+    path_value = preview.get("audioPath")
+    if path_value:
+        path = Path(path_value)
+    else:
+        path = EXPORT_DIR / Path(str(preview.get("url", "")).split("?")[0]).name
+    resolved = path.resolve()
+    export_root = EXPORT_DIR.resolve()
+    if export_root not in resolved.parents and resolved != export_root:
+        raise ValueError("Transition preview audio must be in the export directory")
+    if not resolved.exists():
+        raise ValueError("Transition preview audio is missing; regenerate the seamless preview before export")
+    return _load_stereo(resolved)
+
+
+def _match_preview_level(rendered: np.ndarray, preview_audio: np.ndarray, preview_start: int, before_samples: int) -> np.ndarray:
+    reference_samples = min(before_samples, rendered.shape[1] - preview_start, preview_audio.shape[1], SAMPLE_RATE * 2)
+    if reference_samples < SAMPLE_RATE // 4:
+        return preview_audio
+    reference = rendered[:, preview_start : preview_start + reference_samples]
+    preview_reference = preview_audio[:, :reference_samples]
+    reference_rms = float(np.sqrt(np.mean(reference * reference)) + 1e-9)
+    preview_rms = float(np.sqrt(np.mean(preview_reference * preview_reference)) + 1e-9)
+    gain_db = max(-6.0, min(6.0, 20 * np.log10(reference_rms / preview_rms)))
+    if abs(gain_db) < 0.15:
+        return preview_audio
+    return np.clip(preview_audio * (10 ** (gain_db / 20)), -1, 1).astype(np.float32)
+
+
+def _preview_cue_time(preview: dict, cue_key: str, alignment_key: str) -> float | None:
+    cue = preview.get(cue_key) or {}
+    value = cue.get("time")
+    if value is None:
+        value = (preview.get("alignment") or {}).get(alignment_key)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _seconds_to_samples(seconds: float) -> int:

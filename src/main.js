@@ -21,7 +21,20 @@ const state = {
   timer: null,
   isPlaying: false,
   isExporting: false,
+  view: "studio",
   projects: [],
+  stemDebugger: {
+    trackId: null,
+    isPlaying: false,
+    activeSources: [],
+    activeNodes: [],
+    playStartContextTime: 0,
+    playStartOffset: 0,
+    playbackOffset: 0,
+    timer: null,
+    controls: {},
+    isSeparating: false,
+  },
   teaching: {
     open: false,
     targetEnergy: "keep",
@@ -61,6 +74,13 @@ const DEFAULT_TRACK_MIXER = Object.freeze({
   eq: { low: 0, mid: 0, high: 0 },
 });
 
+const STEMS = Object.freeze([
+  { id: "vocals", label: "\u4eba\u58f0", color: "#65d7f2", filter: "vocal" },
+  { id: "drums", label: "\u9f13", color: "#6f7274", filter: "drums" },
+  { id: "bass", label: "\u8d1d\u65af", color: "#72e5ed", filter: "bass" },
+  { id: "other", label: "\u5176\u4ed6", color: "#87eef0", filter: "other" },
+]);
+
 const app = document.querySelector("#app");
 app.innerHTML = `
   <main class="app-shell">
@@ -74,12 +94,13 @@ app.innerHTML = `
           <span>选择音频</span>
           <input id="fileInput" type="file" accept="audio/*" multiple />
         </label>
+        <button id="stemDebuggerToggle" class="ghost" type="button">\u5206\u8f68\u8c03\u8bd5</button>
         <button id="refreshProjects" class="ghost" type="button">刷新项目</button>
         <button id="teachingToggle" class="ghost" type="button">教学入口</button>
       </div>
     </header>
 
-    <section class="studio-grid">
+    <section id="studioView" class="studio-grid">
       <aside class="control-panel" aria-label="混音控制">
         <div class="meter-block"><span>Tracks</span><strong id="trackCount">0</strong></div>
         <div class="meter-block"><span>Mix Time</span><strong id="mixDuration">00:00</strong></div>
@@ -286,11 +307,55 @@ app.innerHTML = `
         </div>
       </section>
     </section>
+
+    <section id="stemDebuggerView" class="stem-debugger-view" hidden>
+      <header class="stem-topbar">
+        <div class="stem-titlebar">
+          <button id="stemBackButton" class="stem-back" type="button" aria-label="\u8fd4\u56de\u4e3b\u5de5\u4f5c\u53f0">←</button>
+          <div>
+            <span class="tiny-label">Stem Debugger</span>
+            <strong>\u5206\u8f68\u8c03\u8bd5</strong>
+          </div>
+        </div>
+        <div class="stem-tools">
+          <label class="stem-picker">
+            <span>\u97f3\u9891</span>
+            <select id="stemTrackSelect"></select>
+          </label>
+          <button id="stemRestartButton" type="button" class="secondary">\u4ece\u5934</button>
+          <button id="stemSeparateButton" type="button" class="secondary">Demucs \u5206\u8f68</button>
+          <button id="stemPlayButton" type="button">\u64ad\u653e</button>
+          <button id="stemStopButton" type="button" class="secondary">\u505c\u6b62</button>
+        </div>
+      </header>
+
+      <div class="stem-ruler" aria-hidden="true"></div>
+      <div id="stemDeck" class="stem-deck"></div>
+
+      <footer class="stem-transport">
+        <button id="stemTransportPlay" type="button" aria-label="\u64ad\u653e\u6216\u6682\u505c">▶</button>
+        <input id="stemProgress" type="range" min="0" max="0" value="0" step="0.01" />
+        <time id="stemTime">00:00 / 00:00</time>
+      </footer>
+    </section>
   </main>
 `;
 
 const els = {
+  studioView: document.querySelector("#studioView"),
+  stemDebuggerView: document.querySelector("#stemDebuggerView"),
   fileInput: document.querySelector("#fileInput"),
+  stemDebuggerToggle: document.querySelector("#stemDebuggerToggle"),
+  stemBackButton: document.querySelector("#stemBackButton"),
+  stemTrackSelect: document.querySelector("#stemTrackSelect"),
+  stemRestartButton: document.querySelector("#stemRestartButton"),
+  stemSeparateButton: document.querySelector("#stemSeparateButton"),
+  stemPlayButton: document.querySelector("#stemPlayButton"),
+  stemStopButton: document.querySelector("#stemStopButton"),
+  stemTransportPlay: document.querySelector("#stemTransportPlay"),
+  stemProgress: document.querySelector("#stemProgress"),
+  stemTime: document.querySelector("#stemTime"),
+  stemDeck: document.querySelector("#stemDeck"),
   dropZone: document.querySelector("#dropZone"),
   trackTable: document.querySelector("#trackTable"),
   trackCount: document.querySelector("#trackCount"),
@@ -371,6 +436,24 @@ function ensureRepairMatchButton() {
 function bindEvents() {
   ensureRepairMatchButton();
   els.fileInput.addEventListener("change", (event) => addFiles([...event.target.files]));
+  els.stemDebuggerToggle.addEventListener("click", openStemDebugger);
+  els.stemBackButton.addEventListener("click", closeStemDebugger);
+  els.stemTrackSelect.addEventListener("change", selectStemDebugTrack);
+  els.stemRestartButton.addEventListener("click", () => playStemDebugger(0));
+  els.stemSeparateButton.addEventListener("click", separateActiveStemTrack);
+  els.stemPlayButton.addEventListener("click", toggleStemDebuggerPlayback);
+  els.stemStopButton.addEventListener("click", stopStemDebuggerAndReset);
+  els.stemTransportPlay.addEventListener("click", toggleStemDebuggerPlayback);
+  els.stemDeck.addEventListener("input", updateStemControl);
+  els.stemDeck.addEventListener("click", stemDeckClick);
+  els.stemProgress.addEventListener("input", () => {
+    state.stemDebugger.playbackOffset = Number(els.stemProgress.value);
+    renderStemTransport();
+    drawStemWaveforms();
+  });
+  els.stemProgress.addEventListener("change", () => {
+    if (state.stemDebugger.isPlaying) playStemDebugger(Number(els.stemProgress.value));
+  });
   els.sortButton.addEventListener("click", applySort);
   els.playButton.addEventListener("click", () => previewMix(state.playbackOffset));
   els.restartButton.addEventListener("click", () => previewMix(0));
@@ -1304,6 +1387,7 @@ function camelotRelation(codeA, codeB) {
 async function previewMix(offset = 0) {
   const tracks = playableTracks().filter((track) => track.buffer);
   if (!tracks.length) return;
+  stopStemDebugger({ keepStatus: true });
   stopPreview({ keepStatus: true });
   const context = await getAudioContext();
   const timeline = buildTimeline(tracks);
@@ -1834,6 +1918,7 @@ function exportableTrack(track) {
     introPoint: track.introPoint,
     outroPoint: track.outroPoint,
     mixer: ensureTrackMixer(track),
+    appliedTransitionPreview: track.appliedTransitionPreview || null,
     peaks: track.peaks,
     status: track.status,
   };
@@ -1976,6 +2061,281 @@ function selectedTrack() {
   return state.tracks.find((track) => track.localId === state.selectedId) || null;
 }
 
+function activeStemTrack() {
+  const playable = playableTracks().filter((track) => track.buffer);
+  if (!playable.length) return state.tracks.find((track) => track.buffer) || null;
+  const chosen = playable.find((track) => track.localId === state.stemDebugger.trackId);
+  return chosen || playable.find((track) => track.localId === state.selectedId) || playable[0] || null;
+}
+
+function openStemDebugger() {
+  const track = selectedTrack()?.buffer ? selectedTrack() : playableTracks().find((item) => item.buffer) || state.tracks.find((item) => item.buffer);
+  if (track) state.stemDebugger.trackId = track.localId;
+  state.view = "stems";
+  stopPreview({ keepStatus: true });
+  render();
+}
+
+function closeStemDebugger() {
+  state.view = "studio";
+  stopStemDebugger({ keepStatus: true });
+  render();
+}
+
+function selectStemDebugTrack() {
+  state.stemDebugger.trackId = els.stemTrackSelect.value || null;
+  state.stemDebugger.playbackOffset = 0;
+  if (state.stemDebugger.isPlaying) playStemDebugger(0);
+  renderStemDebugger();
+}
+
+function ensureStemControl(stemId) {
+  if (!state.stemDebugger.controls[stemId]) {
+    state.stemDebugger.controls[stemId] = { gain: 1, mute: false, solo: false };
+  }
+  return state.stemDebugger.controls[stemId];
+}
+
+function anyStemSolo() {
+  return STEMS.some((stem) => ensureStemControl(stem.id).solo);
+}
+
+function effectiveStemGain(stemId) {
+  const control = ensureStemControl(stemId);
+  if (control.mute) return 0;
+  if (anyStemSolo() && !control.solo) return 0;
+  return clamp(Number(control.gain) || 0, 0, 1.5);
+}
+
+function updateStemControl(event) {
+  const input = event.target.closest("input[data-stem-volume]");
+  if (!input) return;
+  const control = ensureStemControl(input.dataset.stemVolume);
+  control.gain = Number(input.value);
+  updateStemControlReadout(input, control);
+  applyLiveStemControls(input.dataset.stemVolume);
+}
+
+function stemDeckClick(event) {
+  const button = event.target.closest("button[data-stem-action]");
+  if (!button) return;
+  const control = ensureStemControl(button.dataset.stem);
+  if (button.dataset.stemAction === "mute") control.mute = !control.mute;
+  if (button.dataset.stemAction === "solo") control.solo = !control.solo;
+  applyLiveStemControls();
+  renderStemDebugger();
+}
+
+function updateStemControlReadout(input, control) {
+  const readout = input.closest(".stem-control-strip")?.querySelector("[data-stem-volume-readout]");
+  if (readout) readout.textContent = `${Math.round(control.gain * 100)}%`;
+}
+
+function toggleStemDebuggerPlayback() {
+  if (state.stemDebugger.isPlaying) {
+    stopStemDebugger({ keepStatus: true });
+    renderStemDebugger();
+  } else {
+    playStemDebugger(state.stemDebugger.playbackOffset);
+  }
+}
+
+function stopStemDebuggerAndReset() {
+  stopStemDebugger();
+  state.stemDebugger.playbackOffset = 0;
+  renderStemDebugger();
+}
+
+function trackHasRealStems(track) {
+  return Boolean(track?.stems && STEMS.every((stem) => track.stems[stem.id]?.buffer));
+}
+
+function stemBufferFor(track, stemId) {
+  return track?.stems?.[stemId]?.buffer || track?.buffer || null;
+}
+
+async function separateActiveStemTrack() {
+  const track = activeStemTrack();
+  if (!track?.id || track.status !== "ready") {
+    setStatus("\u8bf7\u5148\u7b49\u5f85\u66f2\u76ee\u4e0a\u4f20\u5e76\u5206\u6790\u5b8c\u6210");
+    return;
+  }
+  state.stemDebugger.isSeparating = true;
+  track.stemStatus = "loading";
+  track.stemError = "";
+  stopStemDebugger({ keepStatus: true });
+  renderStemDebugger();
+  try {
+    setStatus(`Demucs \u6b63\u5728\u5206\u79bb ${track.name}`);
+    await assertBackendReachable();
+    const result = await fetchJson(`${API}/api/tracks/${track.id}/stems`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device: "auto", force: false }),
+    });
+    await hydrateTrackStems(track, result);
+    track.stemStatus = "ready";
+    track.stemEngine = result.engine || "demucs";
+    setStatus(result.cached ? `\u5df2\u8f7d\u5165\u7f13\u5b58\u5206\u8f68 ${track.name}` : `Demucs \u5206\u8f68\u5b8c\u6210 ${track.name}`);
+  } catch (error) {
+    track.stemStatus = "error";
+    track.stemError = error.message || "Demucs \u5206\u8f68\u5931\u8d25";
+    setStatus(track.stemError);
+  } finally {
+    state.stemDebugger.isSeparating = false;
+    renderStemDebugger();
+  }
+}
+
+async function hydrateTrackStems(track, result) {
+  const context = await getAudioContext();
+  const stems = result?.stems || {};
+  track.stems = track.stems || {};
+  await Promise.all(
+    STEMS.map(async (stem) => {
+      const item = stems[stem.id];
+      if (!item?.url) throw new Error(`Missing ${stem.id} stem`);
+      const response = await fetch(`${API}${item.url}`);
+      if (!response.ok) throw new Error(`${stem.label} stem download failed`);
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = await context.decodeAudioData(arrayBuffer.slice(0));
+      track.stems[stem.id] = {
+        ...item,
+        buffer,
+        peaks: peaksFromBuffer(buffer, 900),
+      };
+    }),
+  );
+}
+
+async function playStemDebugger(offset = 0) {
+  const track = activeStemTrack();
+  if (!track?.buffer) return;
+  stopPreview({ keepStatus: true });
+  stopStemDebugger({ keepStatus: true });
+  const context = await getAudioContext();
+  const safeOffset = clamp(Number(offset) || 0, 0, Math.max(0, track.buffer.duration - 0.05));
+  const startAt = context.currentTime + 0.08;
+
+  STEMS.forEach((stem) => {
+    const stemBuffer = stemBufferFor(track, stem.id);
+    if (!stemBuffer) return;
+    const source = context.createBufferSource();
+    const outputGain = context.createGain();
+    source.buffer = stemBuffer;
+    if (trackHasRealStems(track)) {
+      source.connect(outputGain);
+    } else {
+      connectStemChain(context, source, outputGain, stem.filter);
+    }
+    outputGain.gain.setValueAtTime(effectiveStemGain(stem.id), startAt);
+    outputGain.connect(context.destination);
+    source.start(startAt, safeOffset);
+    source.onended = () => {
+      state.stemDebugger.activeSources = state.stemDebugger.activeSources.filter((itemSource) => itemSource !== source);
+      state.stemDebugger.activeNodes = state.stemDebugger.activeNodes.filter((node) => node.source !== source);
+    };
+    state.stemDebugger.activeSources.push(source);
+    state.stemDebugger.activeNodes.push({ source, stemId: stem.id, outputGain });
+  });
+
+  state.stemDebugger.isPlaying = true;
+  state.stemDebugger.playStartContextTime = context.currentTime;
+  state.stemDebugger.playStartOffset = safeOffset;
+  state.stemDebugger.playbackOffset = safeOffset;
+  state.stemDebugger.timer = window.setInterval(tickStemPlayback, 80);
+  setStatus("\u6b63\u5728\u5206\u8f68\u8c03\u8bd5");
+  renderStemDebugger();
+}
+
+function connectStemChain(context, source, outputGain, filter) {
+  const input = context.createGain();
+  source.connect(input);
+  if (filter === "bass") {
+    const lowpass = context.createBiquadFilter();
+    lowpass.type = "lowpass";
+    lowpass.frequency.value = 185;
+    lowpass.Q.value = 0.9;
+    input.connect(lowpass).connect(outputGain);
+    return;
+  }
+  if (filter === "vocal") {
+    const highpass = context.createBiquadFilter();
+    const lowpass = context.createBiquadFilter();
+    const presence = context.createBiquadFilter();
+    highpass.type = "highpass";
+    highpass.frequency.value = 220;
+    lowpass.type = "lowpass";
+    lowpass.frequency.value = 3600;
+    presence.type = "peaking";
+    presence.frequency.value = 1300;
+    presence.Q.value = 0.85;
+    presence.gain.value = 3.5;
+    input.connect(highpass).connect(lowpass).connect(presence).connect(outputGain);
+    return;
+  }
+  if (filter === "drums") {
+    const highpass = context.createBiquadFilter();
+    const snap = context.createBiquadFilter();
+    highpass.type = "highpass";
+    highpass.frequency.value = 90;
+    snap.type = "peaking";
+    snap.frequency.value = 5200;
+    snap.Q.value = 1.2;
+    snap.gain.value = 4;
+    input.connect(highpass).connect(snap).connect(outputGain);
+    return;
+  }
+  const highpass = context.createBiquadFilter();
+  const notch = context.createBiquadFilter();
+  highpass.type = "highpass";
+  highpass.frequency.value = 650;
+  notch.type = "notch";
+  notch.frequency.value = 1400;
+  notch.Q.value = 0.7;
+  input.connect(highpass).connect(notch).connect(outputGain);
+}
+
+function applyLiveStemControls(stemId = null) {
+  if (!state.audioContext) return;
+  const now = state.audioContext.currentTime;
+  state.stemDebugger.activeNodes.forEach((node) => {
+    if (stemId && node.stemId !== stemId) return;
+    smoothSetAudioParam(node.outputGain.gain, effectiveStemGain(node.stemId), now);
+  });
+}
+
+function stopStemDebugger(options = {}) {
+  state.stemDebugger.activeSources.forEach((source) => {
+    try {
+      source.stop();
+    } catch {
+      // Source may already have ended.
+    }
+  });
+  state.stemDebugger.activeSources = [];
+  state.stemDebugger.activeNodes = [];
+  state.stemDebugger.isPlaying = false;
+  if (state.stemDebugger.timer) window.clearInterval(state.stemDebugger.timer);
+  state.stemDebugger.timer = null;
+  if (!options.keepStatus && state.view === "stems") setStatus("\u5206\u8f68\u8c03\u8bd5\u5df2\u505c\u6b62");
+}
+
+function tickStemPlayback() {
+  const track = activeStemTrack();
+  if (!state.audioContext || !state.stemDebugger.isPlaying || !track?.duration) return;
+  state.stemDebugger.playbackOffset = Math.min(
+    track.duration,
+    state.stemDebugger.playStartOffset + (state.audioContext.currentTime - state.stemDebugger.playStartContextTime),
+  );
+  if (state.stemDebugger.playbackOffset >= track.duration) {
+    stopStemDebugger({ keepStatus: true });
+    state.stemDebugger.playbackOffset = 0;
+  }
+  renderStemTransport();
+  drawStemWaveforms();
+}
+
 function activeTransition(timeline = buildTimeline()) {
   if (timeline.items.length < 2) return null;
   const active = timeline.items.slice(1).find((item) => {
@@ -2050,6 +2410,10 @@ function removeTrack(localId) {
   state.tracks = state.tracks.filter((track) => track.localId !== localId);
   state.originalOrder = state.originalOrder.filter((item) => item !== localId);
   if (state.selectedId === localId) state.selectedId = state.tracks[0]?.localId || null;
+  if (state.stemDebugger.trackId === localId) {
+    stopStemDebugger({ keepStatus: true });
+    state.stemDebugger.trackId = playableTracks()[0]?.localId || state.tracks.find((track) => track.buffer)?.localId || null;
+  }
   render();
 }
 
@@ -2071,15 +2435,15 @@ function syncTeachingSettings() {
   renderTeachingPanel();
 }
 
-function teachingPanelClick(event) {
+async function teachingPanelClick(event) {
   const previewButton = event.target.closest("[data-teaching-preview]");
   if (previewButton) {
-    generateTeachingPreview(previewButton.dataset.teachingPreview);
+    await generateTeachingPreview(previewButton.dataset.teachingPreview);
     return;
   }
   const button = event.target.closest("[data-teaching-apply]");
   if (!button) return;
-  applyTeachingRecommendation(button.dataset.teachingApply);
+  await applyTeachingRecommendation(button.dataset.teachingApply);
 }
 
 async function generateTeachingPreview(nextId) {
@@ -2121,19 +2485,23 @@ async function generateTeachingPreview(nextId) {
       ...result,
       outgoingLocalId: current.localId,
       incomingLocalId: next.localId,
+      outgoingTrackId: current.id,
+      incomingTrackId: next.id,
     };
     state.teaching.previews[nextId] = preview;
     await hydrateTeachingPreviewAudio(preview);
     setStatus("已生成无缝过渡试听");
+    return preview;
   } catch (error) {
     setStatus(error.message || "过渡试听生成失败");
+    return null;
   } finally {
     state.teaching.loadingPreviewId = null;
     renderTeachingPanel();
   }
 }
 
-function applyTeachingRecommendation(nextId) {
+async function applyTeachingRecommendation(nextId) {
   const current = selectedTrack()?.status === "ready" ? selectedTrack() : playableTracks()[0];
   const next = state.tracks.find((track) => track.localId === nextId);
   if (!current || !next || current.localId === next.localId) return;
@@ -2142,12 +2510,18 @@ function applyTeachingRecommendation(nextId) {
     beginnerMode: state.teaching.beginnerMode,
     maxComplexity: state.teaching.maxComplexity,
   })[0];
-  const preview = teachingPreviewFor(nextId, current.localId);
+  let preview = teachingPreviewFor(nextId, current.localId);
+  if (!preview) {
+    setStatus("先生成无缝试听，确保使用和导出走同一份过渡音频");
+    preview = await generateTeachingPreview(nextId);
+    if (!preview) return;
+  }
   const effective = effectiveTeachingCue(rec, preview);
-  if (preview) preview.timelineApplied = true;
+  preview.timelineApplied = true;
 
   current.outroPoint = clamp(effective.outgoingTime, 0.5, Math.max(0.5, current.duration - 0.25));
   next.introPoint = clamp(effective.incomingTime, 0, Math.max(0, next.duration - 0.25));
+  next.appliedTransitionPreview = serializableTransitionPreview(preview, current, next);
   applyRecommendedMixSettings({ ...rec, method: effective.method, overlapDuration: effective.overlapDuration });
 
   const currentIndex = state.tracks.findIndex((track) => track.localId === current.localId);
@@ -2214,6 +2588,7 @@ function wavePointerMove(event) {
 }
 
 function render() {
+  renderShellView();
   renderMetrics();
   renderTable();
   renderTransport();
@@ -2221,7 +2596,15 @@ function render() {
   renderDeckMixer();
   renderMatchResult();
   renderTeachingPanel();
-  drawWaveform();
+  if (state.view === "studio") drawWaveform();
+  renderStemDebugger();
+}
+
+function renderShellView() {
+  const stemsOpen = state.view === "stems";
+  els.studioView.hidden = stemsOpen;
+  els.stemDebuggerView.hidden = !stemsOpen;
+  els.stemDebuggerToggle.classList.toggle("active", stemsOpen);
 }
 
 function renderMetrics() {
@@ -2236,6 +2619,97 @@ function renderMetrics() {
   els.restartButton.disabled = playable.length < 1;
   els.stopButton.disabled = !state.isPlaying;
   els.exportButton.disabled = playable.length < 1 || state.isExporting;
+}
+
+function renderStemDebugger() {
+  if (!els.stemDebuggerView || state.view !== "stems") return;
+  const tracks = playableTracks().filter((track) => track.buffer);
+  const fallbackTracks = tracks.length ? tracks : state.tracks.filter((track) => track.buffer);
+  const active = activeStemTrack();
+  if (active && state.stemDebugger.trackId !== active.localId) state.stemDebugger.trackId = active.localId;
+
+  els.stemTrackSelect.innerHTML = fallbackTracks.length
+    ? fallbackTracks.map((track) => `<option value="${track.localId}" ${track.localId === state.stemDebugger.trackId ? "selected" : ""}>${escapeHtml(track.name)}</option>`).join("")
+    : `<option value="">\u672a\u9009\u62e9\u97f3\u9891</option>`;
+
+  const hasTrack = Boolean(active?.buffer);
+  els.stemPlayButton.disabled = !hasTrack;
+  els.stemRestartButton.disabled = !hasTrack;
+  els.stemSeparateButton.disabled = !hasTrack || state.stemDebugger.isSeparating || active?.stemStatus === "loading" || active?.status !== "ready";
+  els.stemStopButton.disabled = !state.stemDebugger.isPlaying;
+  els.stemTransportPlay.disabled = !hasTrack;
+  els.stemSeparateButton.textContent = active?.stemStatus === "loading" || state.stemDebugger.isSeparating ? "Demucs ..." : trackHasRealStems(active) ? "\u91cd\u8f7d\u771f\u5206\u8f68" : "Demucs \u5206\u8f68";
+  els.stemPlayButton.textContent = state.stemDebugger.isPlaying ? "\u6682\u505c" : "\u64ad\u653e";
+  els.stemTransportPlay.textContent = state.stemDebugger.isPlaying ? "Ⅱ" : "▶";
+
+  if (!hasTrack) {
+    els.stemDeck.innerHTML = `
+      <div class="stem-empty">
+        <strong>\u672a\u9009\u62e9\u97f3\u9891</strong>
+      </div>
+    `;
+    renderStemTransport();
+    return;
+  }
+
+  els.stemDeck.innerHTML = renderStemDebuggerStatus(active) + STEMS.map((stem) => renderStemLane(stem, active)).join("");
+  renderStemTransport();
+  drawStemWaveforms();
+}
+
+function renderStemDebuggerStatus(track) {
+  if (!track) return "";
+  const ready = trackHasRealStems(track);
+  const loading = track.stemStatus === "loading" || state.stemDebugger.isSeparating;
+  const error = track.stemStatus === "error" ? track.stemError : "";
+  const label = ready
+    ? "Demucs \u771f\u5206\u8f68"
+    : loading
+      ? "Demucs \u5206\u8f68\u4e2d"
+      : "\u6a21\u62df\u5206\u8f68";
+  const note = ready
+    ? "\u5f53\u524d\u76d1\u542c vocals / drums / bass / other \u56db\u4e2a\u771f\u5b9e\u97f3\u9891\u6587\u4ef6"
+    : loading
+      ? "\u9996\u6b21\u751f\u6210\u4f1a\u8f83\u6162\uff0c\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u5207\u6362\u5230\u771f\u5206\u8f68"
+      : "\u5f53\u524d\u7528\u5168\u66f2\u6ee4\u6ce2\u6a21\u62df\uff0c\u70b9\u51fb Demucs \u5206\u8f68\u540e\u624d\u80fd\u771f\u6b63\u5206\u8f68\u8c03\u8bd5";
+  return `
+    <div class="stem-mode ${ready ? "ready" : loading ? "loading" : "simulated"}">
+      <strong>${label}</strong>
+      <span>${escapeHtml(error || note)}</span>
+    </div>
+  `;
+}
+
+function renderStemLane(stem, track) {
+  const control = ensureStemControl(stem.id);
+  const activeClass = control.mute ? " muted" : control.solo ? " solo" : "";
+  const isReal = Boolean(track?.stems?.[stem.id]?.buffer);
+  return `
+    <section class="stem-lane${activeClass}" style="--stem-color:${stem.color}">
+      <div class="stem-control-strip">
+        <div class="stem-buttons">
+          <button type="button" class="${control.mute ? "active" : ""}" data-stem-action="mute" data-stem="${stem.id}" aria-label="${stem.label} mute">M</button>
+          <button type="button" class="${control.solo ? "active" : ""}" data-stem-action="solo" data-stem="${stem.id}" aria-label="${stem.label} solo">S</button>
+          <strong>${stem.label}</strong>
+          <small>${isReal ? "Demucs" : "\u6a21\u62df"}</small>
+        </div>
+        <label class="stem-volume">
+          <input type="range" min="0" max="1.5" value="${control.gain}" step="0.01" data-stem-volume="${stem.id}" />
+          <span data-stem-volume-readout>${Math.round(control.gain * 100)}%</span>
+        </label>
+      </div>
+      <canvas class="stem-wave" width="1400" height="82" data-stem-wave="${stem.id}"></canvas>
+    </section>
+  `;
+}
+
+function renderStemTransport() {
+  const track = activeStemTrack();
+  const duration = track?.duration || 0;
+  const offset = clamp(state.stemDebugger.playbackOffset, 0, duration);
+  els.stemProgress.max = duration;
+  els.stemProgress.value = offset;
+  els.stemTime.textContent = `${formatTime(offset)} / ${formatTime(duration)}`;
 }
 
 function renderTable() {
@@ -2533,6 +3007,22 @@ function teachingPreviewFor(nextId, currentId = selectedTrack()?.localId) {
   return preview;
 }
 
+function serializableTransitionPreview(preview, current, next) {
+  return {
+    url: preview.url,
+    audioPath: preview.audioPath,
+    previewStartTime: preview.previewStartTime,
+    previewEndTime: preview.previewEndTime,
+    outgoingCue: preview.outgoingCue,
+    incomingCue: preview.incomingCue,
+    alignment: preview.alignment,
+    method: preview.method,
+    processingReport: preview.processingReport,
+    outgoingTrackId: current.id,
+    incomingTrackId: next.id,
+  };
+}
+
 async function hydrateTeachingPreviewAudio(preview) {
   if (!preview?.url || preview.buffer) return;
   try {
@@ -2642,6 +3132,74 @@ function renderMixerSlider(trackId, param, label, value, min, max, step, readout
       <input type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-mixer="${param}" data-id="${trackId}" />
     </label>
   `;
+}
+
+function drawStemWaveforms() {
+  if (state.view !== "stems" || !els.stemDeck) return;
+  const track = activeStemTrack();
+  const canvases = els.stemDeck.querySelectorAll("canvas[data-stem-wave]");
+  canvases.forEach((canvas) => drawStemWaveform(canvas, track, canvas.dataset.stemWave));
+}
+
+function drawStemWaveform(canvas, track, stemId) {
+  const ctx = canvas.getContext("2d");
+  const ratio = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  if (canvas.width !== Math.floor(rect.width * ratio) || canvas.height !== Math.floor(rect.height * ratio)) {
+    canvas.width = Math.floor(rect.width * ratio);
+    canvas.height = Math.floor(rect.height * ratio);
+  }
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const width = rect.width;
+  const height = rect.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#050606";
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  for (let x = 0; x < width; x += 28) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+  const stem = STEMS.find((item) => item.id === stemId) || STEMS[0];
+  const realStem = track?.stems?.[stemId];
+  const peaks = realStem?.peaks?.length ? realStem.peaks : track?.peaks || [];
+  if (!track || !peaks.length) {
+    ctx.fillStyle = "rgba(255,255,255,0.34)";
+    ctx.font = "13px Bahnschrift, Segoe UI, sans-serif";
+    ctx.fillText("Waiting for audio", 18, height / 2);
+    return;
+  }
+
+  const center = height / 2;
+  const barWidth = Math.max(1, width / peaks.length);
+  const control = ensureStemControl(stem.id);
+  ctx.fillStyle = control.mute ? "rgba(120,120,120,0.36)" : stem.color;
+  peaks.forEach((value, index) => {
+    const shaped = realStem ? Number(value) || 0 : shapeStemPeak(Number(value) || 0, index, stem.id);
+    const barHeight = Math.max(1, shaped * height * 0.42);
+    ctx.globalAlpha = control.mute ? 0.38 : 0.72 + Math.min(0.24, shaped * 0.24);
+    ctx.fillRect(index * barWidth, center - barHeight, Math.max(1, barWidth * 0.72), barHeight * 2);
+  });
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.28)";
+  ctx.beginPath();
+  ctx.moveTo(0, center);
+  ctx.lineTo(width, center);
+  ctx.stroke();
+
+  const x = track.duration ? (state.stemDebugger.playbackOffset / track.duration) * width : 0;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x - 1, 0, 2, height);
+}
+
+function shapeStemPeak(value, index, stemId) {
+  if (stemId === "bass") return Math.pow(value, 0.82) * (0.78 + Math.sin(index * 0.08) * 0.08);
+  if (stemId === "drums") return Math.min(1, Math.pow(value, 1.45) * (1.18 + (index % 11 === 0 ? 0.42 : 0)));
+  if (stemId === "vocals") return Math.pow(value, 1.08) * (0.72 + Math.sin(index * 0.045) * 0.18);
+  return Math.pow(value, 1.2) * (0.64 + Math.cos(index * 0.035) * 0.12);
 }
 
 function drawWaveform() {
@@ -2986,3 +3544,4 @@ function escapeHtml(value) {
 }
 
 window.addEventListener("resize", drawWaveform);
+window.addEventListener("resize", drawStemWaveforms);

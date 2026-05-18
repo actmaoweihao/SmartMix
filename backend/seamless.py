@@ -14,7 +14,7 @@ import numpy as np
 import soundfile as sf
 from scipy import signal
 
-from .loudness import loudness_metrics, normalize_loudness
+from .loudness import loudness_metrics
 from .storage import EXPORT_DIR
 from .tuning import _demucs_available, _resolve_torch_device, _rubberband_command, _separate_stems_with_demucs_api
 
@@ -82,7 +82,11 @@ def generate_seamless_transition(
         rendered = _render_transition_audio(outgoing_segment, incoming_segment, rec, overlap, vocal_conflict_before, stem_report)
         render_overlap = float(stem_report.get("renderOverlapDuration") or overlap)
         loudness = _match_loudness_report(outgoing_segment[:, : _seconds_to_samples(before)], incoming_segment[:, _seconds_to_samples(render_overlap) :])
-        rendered = normalize_loudness(rendered, SAMPLE_RATE, -16)
+        rendered, transition_level = _stabilize_transition_loudness(
+            rendered,
+            _seconds_to_samples(before),
+            _seconds_to_samples(render_overlap),
+        )
         rendered = _limit_peak(rendered)
 
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -110,6 +114,9 @@ def generate_seamless_transition(
         "vocalConflictBefore": vocal_conflict_before,
         "vocalConflictAfter": vocal_conflict_after,
         "loudnessMatchDb": loudness["loudnessDifferenceDb"],
+        "transitionLevelGainDb": transition_level["gainDb"],
+        "transitionLevelBeforeDb": transition_level["transitionDb"],
+        "transitionLevelTargetDb": transition_level["targetDb"],
         "transientShiftMs": round((stem_report.get("transientShiftSamples") or 0) / SAMPLE_RATE * 1000, 2),
         "incomingVocalDelayMs": round(((stem_report.get("vocalHandoff") or {}).get("incomingStartFraction") or 0) * render_overlap * 1000, 2),
         "incomingEnergyTrimDb": round(float((stem_report.get("energyHandoff") or {}).get("incomingTrimDb") or 0), 2),
@@ -1127,6 +1134,48 @@ def _limit_peak(buffer: np.ndarray, ceiling: float = 0.98) -> np.ndarray:
     if peak <= ceiling:
         return buffer
     return (buffer * (ceiling / peak)).astype(np.float32)
+
+
+def _stabilize_transition_loudness(rendered: np.ndarray, before_samples: int, overlap_samples: int) -> tuple[np.ndarray, dict[str, float]]:
+    before_samples = max(0, min(before_samples, rendered.shape[1]))
+    overlap_samples = max(0, min(overlap_samples, rendered.shape[1] - before_samples))
+    transition_start = before_samples
+    transition_end = before_samples + overlap_samples
+    if overlap_samples < SAMPLE_RATE // 4:
+        return rendered, {"gainDb": 0.0, "transitionDb": 0.0, "targetDb": 0.0}
+
+    reference = rendered[:, :before_samples]
+    if reference.shape[1] < SAMPLE_RATE // 2:
+        reference = rendered
+    transition = rendered[:, transition_start:transition_end]
+    target_db = _rms_db(reference)
+    transition_db = _rms_db(transition)
+    gain_db = max(-1.5, min(8.0, target_db - transition_db))
+    if gain_db <= 0.15:
+        return rendered, {"gainDb": 0.0, "transitionDb": round(transition_db, 3), "targetDb": round(target_db, 3)}
+
+    gain = 10 ** (gain_db / 20)
+    shaped = rendered.copy()
+    fade_samples = min(overlap_samples // 3, _seconds_to_samples(0.35))
+    envelope = np.ones(overlap_samples, dtype=np.float32) * gain
+    if fade_samples > 1:
+        fade_in = _smoothstep(np.linspace(0, 1, fade_samples, dtype=np.float32))
+        fade_out = _smoothstep(np.linspace(1, 0, fade_samples, dtype=np.float32))
+        envelope[:fade_samples] = 1 + (gain - 1) * fade_in
+        envelope[-fade_samples:] = 1 + (gain - 1) * fade_out
+    shaped[:, transition_start:transition_end] *= envelope.reshape(1, -1)
+    return shaped.astype(np.float32), {
+        "gainDb": round(float(gain_db), 3),
+        "transitionDb": round(float(transition_db), 3),
+        "targetDb": round(float(target_db), 3),
+    }
+
+
+def _rms_db(buffer: np.ndarray) -> float:
+    if buffer.size == 0:
+        return -90.0
+    rms = float(np.sqrt(np.mean(buffer * buffer)) + 1e-9)
+    return 20 * math.log10(rms)
 
 
 def _seconds_to_samples(seconds: float) -> int:

@@ -128,9 +128,10 @@ button:disabled {
 
 .studio-grid {
   display: grid;
-  grid-template-columns: 340px 1fr;
+  grid-template-columns: minmax(328px, 372px) minmax(0, 1fr);
   gap: 18px;
   margin-top: 18px;
+  align-items: start;
 }
 
 .control-panel,
@@ -145,8 +146,28 @@ button:disabled {
   display: grid;
   grid-template-columns: 1fr 1fr;
   align-content: start;
-  gap: 12px;
-  padding: 16px;
+  align-self: start;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  gap: 10px;
+  padding: 14px;
+  scrollbar-color: rgba(48, 213, 160, 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.control-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.control-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.control-panel::-webkit-scrollbar-thumb {
+  background: rgba(48, 213, 160, 0.34);
+  border: 2px solid rgba(24, 26, 31, 0.88);
 }
 
 .meter-block,
@@ -156,7 +177,7 @@ button:disabled {
 .project-box {
   background: var(--panel-2);
   border: 1px solid var(--line);
-  padding: 12px;
+  padding: 10px;
 }
 
 .meter-block.wide,
@@ -176,12 +197,17 @@ button:disabled {
   display: block;
   color: var(--muted);
   font-size: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .meter-block strong {
-  font-size: 22px;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 20px;
   line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .field select,
@@ -194,7 +220,7 @@ button:disabled {
 
 select,
 input[type="text"] {
-  min-height: 40px;
+  min-height: 38px;
   border: 1px solid var(--line);
   background: #101113;
   color: var(--text);
@@ -211,6 +237,7 @@ input[type="range"] {
   gap: 10px;
   align-items: center;
   color: var(--text);
+  min-height: 42px;
 }
 
 .toggle input {
@@ -238,13 +265,13 @@ input[type="range"] {
 .button-row {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 8px;
+  gap: 6px;
 }
 
 .export-row {
   display: grid;
   grid-template-columns: 104px 1fr;
-  gap: 8px;
+  gap: 6px;
 }
 
 .download-link {
@@ -258,11 +285,282 @@ input[type="range"] {
 .project-box {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 8px;
+  gap: 7px;
+  border-color: rgba(240, 207, 90, 0.28);
+  background:
+    linear-gradient(180deg, rgba(240, 207, 90, 0.05), transparent 48%),
+    var(--panel-2);
 }
 
 .workspace {
   min-width: 0;
+}
+
+.stem-debugger-view {
+  min-height: calc(100vh - 146px);
+  margin-top: 18px;
+  border: 1px solid #15191b;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 18%),
+    #030404;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.stem-debugger-view[hidden] {
+  display: none;
+}
+
+.stem-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 84px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: #050606;
+}
+
+.stem-titlebar,
+.stem-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.stem-titlebar strong {
+  display: block;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.stem-back {
+  width: 42px;
+  min-height: 42px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 28px;
+  padding: 0;
+}
+
+.stem-picker {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 280px);
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #1e2022;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stem-picker select {
+  min-height: 32px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.stem-tools button {
+  min-height: 46px;
+  border-radius: 8px;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: #242628;
+  color: var(--text);
+  padding: 0 16px;
+}
+
+.stem-tools button:not(.secondary) {
+  border-color: rgba(101, 215, 242, 0.56);
+  background: #26363a;
+}
+
+.stem-ruler {
+  height: 44px;
+  margin-left: 202px;
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.23) 0 1px, transparent 1px 8px),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.34) 0 1px, transparent 1px 56px);
+  background-position: 0 14px, 0 8px;
+  background-size: auto 24px, auto 32px;
+  opacity: 0.38;
+}
+
+.stem-deck {
+  display: grid;
+  gap: 8px;
+  padding: 0 18px 96px;
+}
+
+.stem-mode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 42px;
+  margin-bottom: 4px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #121516;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.stem-mode strong {
+  color: var(--text);
+}
+
+.stem-mode.ready {
+  border-color: rgba(101, 215, 242, 0.36);
+  background: rgba(101, 215, 242, 0.08);
+}
+
+.stem-mode.loading {
+  border-color: rgba(240, 207, 90, 0.32);
+  background: rgba(240, 207, 90, 0.08);
+}
+
+.stem-lane {
+  display: grid;
+  grid-template-columns: 178px minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
+  min-height: 86px;
+}
+
+.stem-control-strip {
+  display: grid;
+  gap: 10px;
+}
+
+.stem-buttons {
+  display: grid;
+  grid-template-columns: 26px 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.stem-buttons button {
+  width: 26px;
+  min-height: 24px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #2a2c2f;
+  color: #d8d8d8;
+  padding: 0;
+  font-size: 12px;
+}
+
+.stem-buttons button.active {
+  border-color: var(--accent);
+  background: rgba(240, 207, 90, 0.18);
+  color: var(--accent);
+}
+
+.stem-buttons strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stem-buttons small {
+  grid-column: 3;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.stem-volume {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 8px;
+}
+
+.stem-volume input {
+  accent-color: var(--stem-color);
+}
+
+.stem-volume span {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.stem-wave {
+  display: block;
+  width: 100%;
+  height: 82px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--stem-color) 72%, #141719);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.stem-lane.muted .stem-wave {
+  filter: grayscale(1) brightness(0.72);
+  opacity: 0.72;
+}
+
+.stem-lane.solo .stem-wave {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 0 0 1px rgba(240, 207, 90, 0.52);
+}
+
+.stem-empty {
+  display: grid;
+  gap: 8px;
+  min-height: 280px;
+  place-content: center;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  color: var(--muted);
+  text-align: center;
+}
+
+.stem-empty strong {
+  color: var(--text);
+}
+
+.stem-transport {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: 48px minmax(160px, 1fr) 116px;
+  gap: 14px;
+  align-items: center;
+  min-height: 76px;
+  padding: 12px max(18px, 12vw);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(3, 4, 4, 0.94);
+  backdrop-filter: blur(12px);
+}
+
+.stem-transport button {
+  width: 48px;
+  min-height: 48px;
+  border-radius: 50%;
+  border-color: rgba(255, 255, 255, 0.15);
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+}
+
+.stem-transport input {
+  accent-color: #8a8d8f;
+}
+
+.stem-transport time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .drop-zone {
@@ -1278,6 +1576,9 @@ tr.selected {
 
   .control-panel {
     grid-template-columns: repeat(2, 1fr);
+    position: static;
+    max-height: none;
+    overflow: visible;
   }
 }
 
@@ -1309,6 +1610,40 @@ tr.selected {
   }
 
   .transport time {
+    text-align: left;
+  }
+
+  .stem-topbar,
+  .stem-titlebar,
+  .stem-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .stem-titlebar {
+    align-items: flex-start;
+  }
+
+  .stem-picker,
+  .stem-mode,
+  .stem-lane,
+  .stem-transport {
+    grid-template-columns: 1fr;
+  }
+
+  .stem-ruler {
+    margin-left: 0;
+  }
+
+  .stem-deck {
+    padding-inline: 10px;
+  }
+
+  .stem-transport {
+    padding-inline: 12px;
+  }
+
+  .stem-transport time {
     text-align: left;
   }
 }

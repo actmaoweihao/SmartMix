@@ -14,8 +14,16 @@ from .matching import evaluate_track_match
 from .mixing import render_mix
 from .repair import MatchRepairOptions, repair_track_for_match
 from .seamless import generate_seamless_transition
-from .storage import EXPORT_DIR, PROJECT_DIR, UPLOAD_DIR, ensure_dirs, read_json, write_json
-from .tuning import analyze_tuned_output, normalize_camelot, render_harmonic_tune
+from .storage import EXPORT_DIR, PROJECT_DIR, STEM_DIR, UPLOAD_DIR, ensure_dirs, read_json, write_json
+from .tuning import (
+    _demucs_available,
+    _prepare_demucs_input,
+    _resolve_torch_device,
+    _separate_stems_with_demucs_api,
+    analyze_tuned_output,
+    normalize_camelot,
+    render_harmonic_tune,
+)
 
 
 ensure_dirs()
@@ -48,6 +56,7 @@ AUDIO_EXTENSIONS = {
     ".weba",
     ".webm",
 }
+STEM_NAMES = ("vocals", "drums", "bass", "other")
 
 
 class ExportRequest(BaseModel):
@@ -69,6 +78,11 @@ class TuneTrackRequest(BaseModel):
     direction: str = "nearest"
     format: str = "wav"
     device: str = "auto"
+
+
+class StemSeparationRequest(BaseModel):
+    device: str = "auto"
+    force: bool = False
 
 
 class TransitionPreviewRequest(BaseModel):
@@ -181,6 +195,49 @@ def track_audio(track_id: str) -> FileResponse:
     return FileResponse(payload["path"], media_type=payload.get("content_type") or "audio/mpeg", filename=payload["name"])
 
 
+@app.post("/api/tracks/{track_id}/stems")
+def separate_track_stems(track_id: str, request: StemSeparationRequest) -> dict:
+    meta = _read_track_meta(track_id)
+    if request.device not in {"auto", "cuda", "cpu"}:
+        raise HTTPException(status_code=400, detail="device must be auto, cuda, or cpu")
+
+    cached = _cached_stem_paths(track_id)
+    if cached and not request.force:
+        return _stem_response(track_id, cached, device="cached", cached=True)
+
+    if not _demucs_available():
+        raise HTTPException(status_code=503, detail="Demucs is not available. Install backend/requirements-tuning.txt first.")
+
+    source_path = Path(meta["path"])
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Track audio file not found")
+
+    workspace = STEM_DIR / track_id
+    workspace.mkdir(parents=True, exist_ok=True)
+    try:
+        device = _resolve_torch_device(request.device)
+        demucs_input = _prepare_demucs_input(source_path, workspace)
+        stems = _separate_stems_with_demucs_api(demucs_input, workspace, device)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Demucs separation failed: {exc}") from exc
+
+    return _stem_response(track_id, stems, device=device, cached=False)
+
+
+@app.get("/api/tracks/{track_id}/stems/{stem_name}/audio")
+def track_stem_audio(track_id: str, stem_name: str) -> FileResponse:
+    if stem_name not in STEM_NAMES:
+        raise HTTPException(status_code=404, detail="Stem not found")
+    path = _stem_paths(track_id)[stem_name]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Stem not found")
+    return FileResponse(path, media_type="audio/wav", filename=f"{track_id}_{stem_name}.wav")
+
+
 @app.post("/api/tracks/{track_id}/tune")
 def tune_track(track_id: str, request: TuneTrackRequest) -> dict:
     meta_path = UPLOAD_DIR / f"{track_id}.json"
@@ -285,6 +342,33 @@ def _read_track_meta(track_id: str) -> dict:
     if not meta_path.exists():
         raise HTTPException(status_code=404, detail=f"Track not found: {track_id}")
     return read_json(meta_path)
+
+
+def _stem_paths(track_id: str) -> dict[str, Path]:
+    return {stem: STEM_DIR / track_id / "demucs_api" / f"{stem}.wav" for stem in STEM_NAMES}
+
+
+def _cached_stem_paths(track_id: str) -> dict[str, Path] | None:
+    paths = _stem_paths(track_id)
+    if all(path.exists() for path in paths.values()):
+        return paths
+    return None
+
+
+def _stem_response(track_id: str, paths: dict[str, Path], device: str, cached: bool) -> dict:
+    return {
+        "trackId": track_id,
+        "engine": "demucs",
+        "device": device,
+        "cached": cached,
+        "stems": {
+            stem: {
+                "url": f"/api/tracks/{track_id}/stems/{stem}/audio",
+                "path": str(paths[stem]),
+            }
+            for stem in STEM_NAMES
+        },
+    }
 
 
 @app.post("/api/projects")

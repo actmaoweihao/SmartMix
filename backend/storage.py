@@ -10,10 +10,11 @@ DATA_DIR = ROOT / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 EXPORT_DIR = DATA_DIR / "exports"
 PROJECT_DIR = DATA_DIR / "projects"
+STEM_DIR = DATA_DIR / "stems"
 
 
 def ensure_dirs() -> None:
-    for path in (DATA_DIR, UPLOAD_DIR, EXPORT_DIR, PROJECT_DIR):
+    for path in (DATA_DIR, UPLOAD_DIR, EXPORT_DIR, PROJECT_DIR, STEM_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -24,4 +25,3 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
-

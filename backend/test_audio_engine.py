@@ -19,6 +19,7 @@ from backend.seamless import (
     _rhythm_bridge_layer,
     _seconds_to_samples,
     _shift_audio,
+    _stabilize_transition_loudness,
     _transition_glue_layer,
     _vocal_handoff_timing,
     compute_tempo_adjustment,
@@ -116,6 +117,51 @@ class AnalysisCandidateTests(unittest.TestCase):
         self.assertIn("energy_curve", candidates)
 
 
+class StemDebuggerApiTests(unittest.TestCase):
+    def test_stem_debugger_api_returns_cached_demucs_stems(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from fastapi.testclient import TestClient
+        import backend.main as api
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            uploads = root / "uploads"
+            stems = root / "stems"
+            uploads.mkdir()
+            stem_dir = stems / "track-1" / "demucs_api"
+            stem_dir.mkdir(parents=True)
+            source = uploads / "track-1.wav"
+            source.write_bytes(b"audio")
+            for stem in ("vocals", "drums", "bass", "other"):
+                (stem_dir / f"{stem}.wav").write_bytes(f"{stem}-audio".encode("utf-8"))
+
+            original_upload_dir = api.UPLOAD_DIR
+            original_stem_dir = api.STEM_DIR
+            api.UPLOAD_DIR = uploads
+            api.STEM_DIR = stems
+            try:
+                api.write_json(
+                    uploads / "track-1.json",
+                    {"id": "track-1", "name": "Track 1.wav", "path": str(source), "content_type": "audio/wav"},
+                )
+                client = TestClient(api.app)
+                response = client.post("/api/tracks/track-1/stems", json={"device": "auto"})
+                payload = response.json()
+
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(payload["cached"])
+                self.assertEqual(set(payload["stems"]), {"vocals", "drums", "bass", "other"})
+                self.assertEqual(payload["stems"]["vocals"]["url"], "/api/tracks/track-1/stems/vocals/audio")
+
+                audio = client.get(payload["stems"]["vocals"]["url"])
+                self.assertEqual(audio.status_code, 200)
+                self.assertIn(b"vocals-audio", audio.content)
+            finally:
+                api.UPLOAD_DIR = original_upload_dir
+                api.STEM_DIR = original_stem_dir
+
+
 class CrossfadePlanTests(unittest.TestCase):
     def test_crossfade_uses_planned_prev_and_next_anchors(self) -> None:
         prev = np.ones((2, SAMPLE_RATE * 10), dtype=np.float32)
@@ -183,6 +229,51 @@ class CrossfadePlanTests(unittest.TestCase):
         self.assertEqual(overlap.shape, (2, SAMPLE_RATE * 4))
         self.assertFalse(np.isnan(overlap).any())
         self.assertLessEqual(np.max(np.abs(overlap)), 1.0)
+
+    def test_crossfade_embeds_applied_transition_preview_audio(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        import soundfile as sf
+        import backend.mixing as mixing
+
+        seconds = 12
+        prev = np.full((2, SAMPLE_RATE * seconds), 0.1, dtype=np.float32)
+        incoming = np.full((2, SAMPLE_RATE * seconds), -0.2, dtype=np.float32)
+        preview = np.full((2, SAMPLE_RATE * 4), -0.42, dtype=np.float32)
+
+        with TemporaryDirectory() as tmp:
+            original_export_dir = mixing.EXPORT_DIR
+            mixing.EXPORT_DIR = Path(tmp)
+            try:
+                preview_path = mixing.EXPORT_DIR / "preview.wav"
+                sf.write(preview_path, preview.T, SAMPLE_RATE, subtype="PCM_16")
+                rendered = _crossfade(
+                    [prev, incoming],
+                    [
+                        {"id": "a", "duration": seconds, "transition_candidates": {"outro": 6}},
+                        {
+                            "id": "b",
+                            "duration": seconds,
+                            "transition_candidates": {"intro": 2},
+                            "appliedTransitionPreview": {
+                                "audioPath": str(preview_path),
+                                "previewStartTime": 4,
+                                "outgoingCue": {"time": 6},
+                                "incomingCue": {"time": 2},
+                                "outgoingTrackId": "a",
+                                "incomingTrackId": "b",
+                            },
+                        },
+                    ],
+                    {"crossfade": 2, "autoTransition": False, "aiPrecision": True, "filterMode": "dynamicEq"},
+                )
+            finally:
+                mixing.EXPORT_DIR = original_export_dir
+
+        splice_start = SAMPLE_RATE * 4
+        embedded = rendered[:, splice_start : splice_start + SAMPLE_RATE]
+        self.assertLess(float(np.mean(embedded)), -0.08)
+        self.assertEqual(rendered.shape[1], SAMPLE_RATE * 16)
 
 
 class SeamlessTransitionTests(unittest.TestCase):
@@ -453,6 +544,19 @@ class SeamlessTransitionTests(unittest.TestCase):
 
         self.assertLess(profile["incomingTrimDb"], -3)
         self.assertLess(float(curves["in_drums"][0, SAMPLE_RATE // 2]), float(curves["in_drums"][0, -1]))
+
+    def test_transition_loudness_stabilizer_lifts_soft_overlap(self) -> None:
+        before = np.full((2, SAMPLE_RATE * 2), 0.2, dtype=np.float32)
+        overlap = np.full((2, SAMPLE_RATE * 2), 0.04, dtype=np.float32)
+        after = np.full((2, SAMPLE_RATE * 2), 0.2, dtype=np.float32)
+        rendered = np.concatenate([before, overlap, after], axis=1)
+
+        stabilized, report = _stabilize_transition_loudness(rendered, SAMPLE_RATE * 2, SAMPLE_RATE * 2)
+
+        lifted = stabilized[:, SAMPLE_RATE * 2 + SAMPLE_RATE // 2 : SAMPLE_RATE * 3]
+        self.assertGreater(report["gainDb"], 3)
+        self.assertGreater(float(np.mean(np.abs(lifted))), 0.09)
+        self.assertLessEqual(float(np.max(np.abs(stabilized))), 1.0)
 
     def test_frequency_handoff_can_duck_only_hot_incoming_low_band(self) -> None:
         samples = SAMPLE_RATE * 4
