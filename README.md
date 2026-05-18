@@ -12,6 +12,7 @@ SmartMix 是一个本地运行的智能混音工作台。它面向音乐爱好�
 - 两首歌衔接评分：上传任意两首歌，按 Camelot、BPM、能量和结构可过渡性计算 A 到 B / B 到 A 的匹配分。
 - Harmonic tuning 建议：当两首歌调性不够兼容时，给出可调到的 Camelot 目标、半音数和质量风险。
 - 实时混音预览：使用 Web Audio API 在浏览器里预览淡入淡出、EQ、滤波扫频和动态 EQ。
+- Demucs 分轨调试：歌曲上传并完成基础分析后会自动排队生成 vocals、drums、bass、other 四个真实 stems；调试界面会在分轨未完成时显示灰色模拟波形和扫描态，完成后切换到蓝色真实分轨。
 - 可视化编辑：显示选中歌曲波形，可拖动 IN/OUT 手柄调整入点和出点；时间线展示整段混音结构。
 - 双 Deck 控制：对当前过渡的上一首和下一首分别调节增益、Low、Mid、High。
 - 精准过渡：按 4/8/16 小节计算重叠区间，结合 intro/outro 候选点和人声密度避让。
@@ -64,14 +65,15 @@ pnpm dev
 
 1. 打开 http://127.0.0.1:3000。
 2. 点击“选择音频”，或把音频文件拖进上传区域。
-3. 等待每首歌分析完成，列表中会显示时长、BPM、调性、能量和过渡信息。
+3. 等待每首歌分析完成，列表中会显示时长、BPM、调性、能量和过渡信息；如果已安装 Demucs 依赖，系统会在后台自动排队生成真实分轨。
 4. 在左侧选择排序策略，然后点击“应用排序”。
 5. 调整过渡时长、AI 精准小节混音、响度归一化、滤波和 EQ 设置。
 6. 点击“预览”，在浏览器里试听当前混音。
 7. 点击波形或时间线跳转播放位置；拖动 IN/OUT 手柄调整每首歌的入点和出点。
-8. 在 Deck Mixer 里微调当前过渡两首歌的增益和三段 EQ。
-9. 选择 MP3 或 WAV，点击“导出”。
-10. 导出完成后点击下载链接保存混音文件。
+8. 打开“分轨调试”，选择任意已上传歌曲；未分轨完成时先听模拟分轨，完成后自动切到真实 Demucs stems。
+9. 在 Deck Mixer 里微调当前过渡两首歌的增益和三段 EQ。
+10. 选择 MP3 或 WAV，点击“导出”。
+11. 导出完成后点击下载链接保存混音文件。
 
 ## 功能说明
 
@@ -90,6 +92,35 @@ pnpm dev
 - `peaks`：用于波形绘制的峰值数组
 
 如果后端暂时不可用，前端会尝试用浏览器本地算法做 fallback 分析，但精度会低于后端。
+
+### 分轨调试
+
+分轨调试依赖可选的 Demucs 依赖。安装后：
+
+```bash
+pnpm setup:tuning
+```
+
+上传歌曲并完成基础分析后，前端会自动把歌曲加入 Demucs 分轨队列，依次调用后端 `/api/tracks/{track_id}/stems` 生成四个 stem：
+
+- `vocals`：人声
+- `drums`：鼓
+- `bass`：贝斯/低频
+- `other`：其他乐器与伴奏
+
+生成结果会缓存在：
+
+```text
+backend/data/stems/{track_id}/demucs_api/
+```
+
+打开“分轨调试”时，选择哪首歌就会加载哪首歌的分轨状态：
+
+- `Demucs 等待分轨` / `Demucs 分轨中`：先显示灰色模拟分轨波形，并用扫描光提示后台仍在处理。
+- `Demucs 真分轨`：自动加载真实 stem 音频，波形切换为蓝色，M/S/音量控制直接作用在真实分轨上。
+- 如果用户在模拟分轨播放中等待，真实分轨加载完成后会从当前进度自动切换到真实 stems。
+
+如果未安装 Demucs，分轨调试仍可使用浏览器里的滤波模拟模式，但不会得到真正独立的人声、鼓、贝斯和其他声部。
 
 ### 排序策略
 
@@ -276,6 +307,8 @@ pnpm test:backend     # 运行后端单元测试
 | `GET` | `/api/health` | 后端健康检查 |
 | `POST` | `/api/tracks` | 上传并分析单首歌 |
 | `GET` | `/api/tracks/{track_id}/audio` | 获取已上传音频 |
+| `POST` | `/api/tracks/{track_id}/stems` | 使用 Demucs 生成或读取缓存的真实分轨 |
+| `GET` | `/api/tracks/{track_id}/stems/{stem_name}/audio` | 获取单个 stem 音频，`stem_name` 为 `vocals`、`drums`、`bass` 或 `other` |
 | `POST` | `/api/tracks/{track_id}/tune` | 把曲目调到指定 Camelot |
 | `POST` | `/api/match` | 计算两首歌衔接匹配分 |
 | `POST` | `/api/export` | 导出当前混音 |
@@ -301,7 +334,7 @@ SmartMix/
     mixing.py               # 后端混音、动态 EQ、节拍同步、MP3/WAV 导出
     loudness.py             # LUFS 测量和响度归一化
     tuning.py               # Camelot 调音、Demucs/Rubber Band/librosa fallback
-    storage.py              # 本地上传、导出、项目 JSON 存储
+    storage.py              # 本地上传、导出、项目 JSON 和 stems 缓存路径
     test_audio_engine.py    # 音频管线单元测试
     requirements.txt
     requirements-tuning.txt
@@ -317,6 +350,7 @@ backend/data/
   uploads/                  # 上传音频和分析 JSON
   exports/                  # 导出的 MP3/WAV
   projects/                 # 保存的项目 JSON
+  stems/                    # Demucs 生成的 vocals/drums/bass/other 分轨缓存
 ```
 
 ## 新手常见问题
@@ -374,6 +408,22 @@ python -m pip install imageio-ffmpeg
 pnpm setup:tuning
 winget install BreakfastQuay.RubberBand
 ```
+
+### 分轨调试一直是灰色模拟波形
+
+真实分轨依赖 Demucs。先安装可选依赖：
+
+```bash
+pnpm setup:tuning
+```
+
+然后重启后端或重新运行：
+
+```bash
+pnpm dev
+```
+
+上传歌曲后，SmartMix 会在基础分析完成时自动排队跑 Demucs。长歌或 CPU 模式可能需要较久；等待期间分轨调试界面会显示灰色模拟波形和扫描态。完成后会自动加载真实 stems，波形变为蓝色。已生成的结果会缓存在 `backend/data/stems/`，下次选择同一首歌会直接复用缓存。
 
 ### 分析结果不准
 
