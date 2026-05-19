@@ -35,6 +35,8 @@ const state = {
     controls: {},
     isSeparating: false,
     scanFrame: null,
+    referenceTrackId: null,
+    isAutoMixing: false,
   },
   teaching: {
     open: false,
@@ -67,6 +69,15 @@ const state = {
     filterMode: "dynamicEq",
     exportFormat: "mp3",
     eq: { low: 0, mid: 0, high: 0 },
+    mixStyleTransfer: {
+      enabled: false,
+      source: "reference-guided-auto-mix",
+      trackId: null,
+      referenceTrackId: null,
+      referenceTrackName: "",
+      params: null,
+      result: null,
+    },
   },
 };
 
@@ -325,6 +336,11 @@ app.innerHTML = `
             <span>\u97f3\u9891</span>
             <select id="stemTrackSelect"></select>
           </label>
+          <label class="stem-picker stem-reference-picker">
+            <span>\u53c2\u8003\u66f2</span>
+            <select id="stemReferenceSelect"></select>
+          </label>
+          <button id="stemAutoMixButton" type="button" class="secondary">\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3</button>
           <button id="stemRestartButton" type="button" class="secondary">\u4ece\u5934</button>
           <button id="stemSeparateButton" type="button" class="secondary">Demucs \u5206\u8f68</button>
           <button id="stemPlayButton" type="button">\u64ad\u653e</button>
@@ -333,6 +349,7 @@ app.innerHTML = `
       </header>
 
       <div class="stem-ruler" aria-hidden="true"></div>
+      <div id="stemMixResult" class="stem-mix-result" hidden></div>
       <div id="stemDeck" class="stem-deck"></div>
 
       <footer class="stem-transport">
@@ -351,6 +368,9 @@ const els = {
   stemDebuggerToggle: document.querySelector("#stemDebuggerToggle"),
   stemBackButton: document.querySelector("#stemBackButton"),
   stemTrackSelect: document.querySelector("#stemTrackSelect"),
+  stemReferenceSelect: document.querySelector("#stemReferenceSelect"),
+  stemAutoMixButton: document.querySelector("#stemAutoMixButton"),
+  stemMixResult: document.querySelector("#stemMixResult"),
   stemRestartButton: document.querySelector("#stemRestartButton"),
   stemSeparateButton: document.querySelector("#stemSeparateButton"),
   stemPlayButton: document.querySelector("#stemPlayButton"),
@@ -442,6 +462,8 @@ function bindEvents() {
   els.stemDebuggerToggle.addEventListener("click", openStemDebugger);
   els.stemBackButton.addEventListener("click", closeStemDebugger);
   els.stemTrackSelect.addEventListener("change", selectStemDebugTrack);
+  els.stemReferenceSelect.addEventListener("change", selectStemReferenceTrack);
+  els.stemAutoMixButton.addEventListener("click", runStemReferenceMix);
   els.stemRestartButton.addEventListener("click", () => playStemDebugger(0));
   els.stemSeparateButton.addEventListener("click", separateActiveStemTrack);
   els.stemPlayButton.addEventListener("click", toggleStemDebuggerPlayback);
@@ -1923,6 +1945,7 @@ function exportableTrack(track) {
     introPoint: track.introPoint,
     outroPoint: track.outroPoint,
     mixer: ensureTrackMixer(track),
+    stemMixer: serializeStemMixerSettings(track),
     appliedTransitionPreview: track.appliedTransitionPreview || null,
     peaks: track.peaks,
     status: track.status,
@@ -2073,9 +2096,22 @@ function activeStemTrack() {
   return chosen || playable.find((track) => track.localId === state.selectedId) || playable[0] || null;
 }
 
+function stemReferenceTracks(active = activeStemTrack()) {
+  return playableTracks().filter((track) => track.buffer && track.id && track.id !== active?.id);
+}
+
+function selectedStemReferenceTrack(active = activeStemTrack()) {
+  const candidates = stemReferenceTracks(active);
+  if (!candidates.length) return null;
+  const selected = state.stemDebugger.referenceTrackId || state.settings.mixStyleTransfer.referenceTrackId;
+  return candidates.find((track) => track.id === selected || track.localId === selected) || candidates[0];
+}
+
 function openStemDebugger() {
   const track = selectedTrack()?.buffer ? selectedTrack() : playableTracks().find((item) => item.buffer) || state.tracks.find((item) => item.buffer);
   if (track) state.stemDebugger.trackId = track.localId;
+  const reference = selectedStemReferenceTrack(track);
+  state.stemDebugger.referenceTrackId = reference?.id || null;
   if (track?.status === "ready") queueTrackStemSeparation(track);
   state.view = "stems";
   stopPreview({ keepStatus: true });
@@ -2092,6 +2128,8 @@ function selectStemDebugTrack() {
   state.stemDebugger.trackId = els.stemTrackSelect.value || null;
   state.stemDebugger.playbackOffset = 0;
   const track = activeStemTrack();
+  const reference = selectedStemReferenceTrack(track);
+  state.stemDebugger.referenceTrackId = reference?.id || null;
   if (track?.status === "ready") queueTrackStemSeparation(track);
   if (state.stemDebugger.isPlaying) playStemDebugger(0);
   renderStemDebugger();
@@ -2102,6 +2140,101 @@ function ensureStemControl(stemId) {
     state.stemDebugger.controls[stemId] = { gain: 1, mute: false, solo: false };
   }
   return state.stemDebugger.controls[stemId];
+}
+
+function selectStemReferenceTrack() {
+  state.stemDebugger.referenceTrackId = els.stemReferenceSelect.value || null;
+  state.settings.mixStyleTransfer.referenceTrackId = state.stemDebugger.referenceTrackId;
+  renderStemMixResult();
+}
+
+function neutralStemStyle() {
+  return {
+    gainDb: 0,
+    pan: 0.5,
+    eqDb: { low: 0, mid: 0, high: 0 },
+    compressor: { thresholdDb: 0, ratio: 1, attackMs: 25, releaseMs: 100, makeupGainDb: 0 },
+  };
+}
+
+function effectiveStemStyle(stemId) {
+  if (!state.settings.mixStyleTransfer.enabled) return neutralStemStyle();
+  const stem = state.settings.mixStyleTransfer.params?.stems?.[stemId];
+  if (!stem) return neutralStemStyle();
+  return {
+    gainDb: Number(stem.gainDb) || 0,
+    pan: Number.isFinite(stem.pan) ? stem.pan : 0.5,
+    eqDb: {
+      low: Number(stem.eqDb?.low) || 0,
+      mid: Number(stem.eqDb?.mid) || 0,
+      high: Number(stem.eqDb?.high) || 0,
+    },
+    compressor: {
+      thresholdDb: Number(stem.compressor?.thresholdDb) || 0,
+      ratio: Number(stem.compressor?.ratio) || 1,
+      attackMs: Number(stem.compressor?.attackMs) || 25,
+      releaseMs: Number(stem.compressor?.releaseMs) || 100,
+      makeupGainDb: Number(stem.compressor?.makeupGainDb) || 0,
+    },
+    reverbSend: Number(stem.reverbSend) || 0,
+  };
+}
+
+function effectiveMasterStyle() {
+  if (!state.settings.mixStyleTransfer.enabled) {
+    return { gainDb: 0, eqDb: { low: 0, mid: 0, high: 0 }, compressor: { thresholdDb: 0, ratio: 1, attackMs: 25, releaseMs: 100, makeupGainDb: 0 } };
+  }
+  const master = state.settings.mixStyleTransfer.params?.master || {};
+  return {
+    gainDb: Number(master.gainDb) || 0,
+    eqDb: {
+      low: Number(master.eqDb?.low) || 0,
+      mid: Number(master.eqDb?.mid) || 0,
+      high: Number(master.eqDb?.high) || 0,
+    },
+    compressor: {
+      thresholdDb: Number(master.compressor?.thresholdDb) || 0,
+      ratio: Number(master.compressor?.ratio) || 1,
+      attackMs: Number(master.compressor?.attackMs) || 25,
+      releaseMs: Number(master.compressor?.releaseMs) || 100,
+      makeupGainDb: Number(master.compressor?.makeupGainDb) || 0,
+    },
+    targetLufs: Number(master.targetLufs) || state.settings.targetLufs,
+    stereoWidth: Number(master.stereoWidth) || 1,
+  };
+}
+
+function serializeStemMixerSettings(track = null) {
+  const transferTrackId = state.settings.mixStyleTransfer.trackId;
+  const trackMatchesTransfer = !track || !transferTrackId || track.id === transferTrackId;
+  const enabled = Boolean(state.settings.mixStyleTransfer.enabled && trackMatchesTransfer);
+  const soloActive = anyStemSolo();
+  return {
+    enabled: enabled || (trackMatchesTransfer && STEMS.some((stem) => {
+      const control = ensureStemControl(stem.id);
+      return Math.abs(control.gain - 1) > 0.001 || control.mute || control.solo;
+    })),
+    source: "reference-guided-auto-mix",
+    trackId: transferTrackId,
+    referenceTrackId: state.settings.mixStyleTransfer.referenceTrackId,
+    referenceTrackName: state.settings.mixStyleTransfer.referenceTrackName,
+    outputUrl: state.settings.mixStyleTransfer.result?.url || "",
+    reportUrl: state.settings.mixStyleTransfer.result?.reportUrl || "",
+    stems: Object.fromEntries(STEMS.map((stem) => {
+      const control = ensureStemControl(stem.id);
+      const style = enabled ? effectiveStemStyle(stem.id) : neutralStemStyle();
+      const audible = !control.mute && (!soloActive || control.solo);
+      return [stem.id, {
+        gain: audible ? control.gain : 0,
+        mute: control.mute,
+        solo: control.solo,
+        pan: style.pan,
+        eqDb: style.eqDb,
+        compressor: style.compressor,
+      }];
+    })),
+    master: effectiveMasterStyle(),
+  };
 }
 
 function anyStemSolo() {
@@ -2186,6 +2319,73 @@ async function separateActiveStemTrack() {
   queueTrackStemSeparation(track, { force: true });
 }
 
+async function runStemReferenceMix() {
+  const track = activeStemTrack();
+  const reference = selectedStemReferenceTrack(track);
+  if (!track?.id || track.status !== "ready") {
+    setStatus("\u8bf7\u5148\u9009\u62e9\u5df2\u5b8c\u6210\u5206\u6790\u7684\u97f3\u9891");
+    return;
+  }
+  if (!trackHasRealStems(track)) {
+    setStatus("\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3\u9700\u8981\u5148\u5b8c\u6210 Demucs \u771f\u5206\u8f68");
+    queueTrackStemSeparation(track);
+    renderStemDebugger();
+    return;
+  }
+  if (!reference?.id) {
+    setStatus("\u8bf7\u5728\u5206\u8f68\u754c\u9762\u9009\u62e9\u4e00\u9996\u53c2\u8003\u66f2");
+    return;
+  }
+  state.stemDebugger.isAutoMixing = true;
+  state.settings.mixStyleTransfer.result = null;
+  renderStemDebugger();
+  try {
+    setStatus(`\u6b63\u5728\u7528 ${reference.name} \u751f\u6210\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3`);
+    await assertBackendReachable();
+    const result = await fetchJson(`${API}/api/tracks/${track.id}/reference-mix`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        referenceTrackId: reference.id,
+        style: "auto",
+        optimize: true,
+        optimizeSeconds: 30,
+        optimizeTrials: 18,
+      }),
+    });
+    applyReferenceMixResult(track, reference, result);
+    if (state.stemDebugger.isPlaying) playStemDebugger(state.stemDebugger.playbackOffset);
+    setStatus(`\u5df2\u751f\u6210\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3: ${reference.name}`);
+  } catch (error) {
+    state.settings.mixStyleTransfer.result = { error: error.message || "\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3\u5931\u8d25" };
+    setStatus(state.settings.mixStyleTransfer.result.error);
+  } finally {
+    state.stemDebugger.isAutoMixing = false;
+    renderStemDebugger();
+  }
+}
+
+function applyReferenceMixResult(track, reference, result) {
+  const mixer = result?.mixer;
+  if (!mixer?.stems) throw new Error("\u540e\u7aef\u672a\u8fd4\u56de\u53ef\u7528\u7684\u6df7\u97f3\u53c2\u6570");
+  state.settings.mixStyleTransfer.enabled = true;
+  state.settings.mixStyleTransfer.trackId = track.id;
+  state.settings.mixStyleTransfer.referenceTrackId = reference.id;
+  state.settings.mixStyleTransfer.referenceTrackName = reference.name;
+  state.settings.mixStyleTransfer.params = mixer;
+  state.settings.mixStyleTransfer.result = result;
+  state.stemDebugger.referenceTrackId = reference.id;
+  STEMS.forEach((stem) => {
+    const control = ensureStemControl(stem.id);
+    const style = effectiveStemStyle(stem.id);
+    control.gain = clamp(dbToGain(style.gainDb), 0, 1.5);
+    control.mute = false;
+    control.solo = false;
+  });
+  track.stemReferenceMix = result;
+  applyLiveStemControls();
+}
+
 async function runTrackStemSeparation(track, options = {}) {
   if (!track?.id || track.status !== "ready") return;
   track.stemStatus = "loading";
@@ -2251,11 +2451,7 @@ async function playStemDebugger(offset = 0) {
     const source = context.createBufferSource();
     const outputGain = context.createGain();
     source.buffer = stemBuffer;
-    if (trackHasRealStems(track)) {
-      source.connect(outputGain);
-    } else {
-      connectStemChain(context, source, outputGain, stem.filter);
-    }
+    connectStemChain(context, source, outputGain, trackHasRealStems(track) ? "none" : stem.filter, stem.id);
     outputGain.gain.setValueAtTime(effectiveStemGain(stem.id), startAt);
     outputGain.connect(context.destination);
     source.start(startAt, safeOffset);
@@ -2276,16 +2472,17 @@ async function playStemDebugger(offset = 0) {
   renderStemDebugger();
 }
 
-function connectStemChain(context, source, outputGain, filter) {
+function connectStemChain(context, source, outputGain, filter, stemId) {
   const input = context.createGain();
   source.connect(input);
+  let tail = input;
   if (filter === "bass") {
     const lowpass = context.createBiquadFilter();
     lowpass.type = "lowpass";
     lowpass.frequency.value = 185;
     lowpass.Q.value = 0.9;
-    input.connect(lowpass).connect(outputGain);
-    return;
+    input.connect(lowpass);
+    tail = lowpass;
   }
   if (filter === "vocal") {
     const highpass = context.createBiquadFilter();
@@ -2299,8 +2496,8 @@ function connectStemChain(context, source, outputGain, filter) {
     presence.frequency.value = 1300;
     presence.Q.value = 0.85;
     presence.gain.value = 3.5;
-    input.connect(highpass).connect(lowpass).connect(presence).connect(outputGain);
-    return;
+    input.connect(highpass).connect(lowpass).connect(presence);
+    tail = presence;
   }
   if (filter === "drums") {
     const highpass = context.createBiquadFilter();
@@ -2311,17 +2508,57 @@ function connectStemChain(context, source, outputGain, filter) {
     snap.frequency.value = 5200;
     snap.Q.value = 1.2;
     snap.gain.value = 4;
-    input.connect(highpass).connect(snap).connect(outputGain);
+    input.connect(highpass).connect(snap);
+    tail = snap;
+  }
+  if (filter === "other") {
+    const highpass = context.createBiquadFilter();
+    const notch = context.createBiquadFilter();
+    highpass.type = "highpass";
+    highpass.frequency.value = 650;
+    notch.type = "notch";
+    notch.frequency.value = 1400;
+    notch.Q.value = 0.7;
+    input.connect(highpass).connect(notch);
+    tail = notch;
+  }
+  connectStemStyleChain(context, tail, outputGain, stemId);
+}
+
+function connectStemStyleChain(context, input, outputGain, stemId) {
+  if (!state.settings.mixStyleTransfer.enabled) {
+    input.connect(outputGain);
     return;
   }
-  const highpass = context.createBiquadFilter();
-  const notch = context.createBiquadFilter();
-  highpass.type = "highpass";
-  highpass.frequency.value = 650;
-  notch.type = "notch";
-  notch.frequency.value = 1400;
-  notch.Q.value = 0.7;
-  input.connect(highpass).connect(notch).connect(outputGain);
+  const style = effectiveStemStyle(stemId);
+  const low = context.createBiquadFilter();
+  const mid = context.createBiquadFilter();
+  const high = context.createBiquadFilter();
+  const compressor = context.createDynamicsCompressor();
+  low.type = "lowshelf";
+  low.frequency.value = 160;
+  low.gain.value = style.eqDb.low;
+  mid.type = "peaking";
+  mid.frequency.value = 1800;
+  mid.Q.value = 0.9;
+  mid.gain.value = style.eqDb.mid;
+  high.type = "highshelf";
+  high.frequency.value = 7200;
+  high.gain.value = style.eqDb.high;
+  compressor.threshold.value = style.compressor.thresholdDb;
+  compressor.knee.value = 6;
+  compressor.ratio.value = style.compressor.ratio;
+  compressor.attack.value = style.compressor.attackMs / 1000;
+  compressor.release.value = style.compressor.releaseMs / 1000;
+  const makeup = context.createGain();
+  makeup.gain.value = dbToGain(style.compressor.makeupGainDb);
+  if (context.createStereoPanner) {
+    const panner = context.createStereoPanner();
+    panner.pan.value = clamp((style.pan - 0.5) * 2, -1, 1);
+    input.connect(low).connect(mid).connect(high).connect(compressor).connect(makeup).connect(panner).connect(outputGain);
+    return;
+  }
+  input.connect(low).connect(mid).connect(high).connect(compressor).connect(makeup).connect(outputGain);
 }
 
 function applyLiveStemControls(stemId = null) {
@@ -2655,20 +2892,30 @@ function renderStemDebugger() {
   const fallbackTracks = tracks.length ? tracks : state.tracks.filter((track) => track.buffer);
   const active = activeStemTrack();
   if (active && state.stemDebugger.trackId !== active.localId) state.stemDebugger.trackId = active.localId;
+  const references = stemReferenceTracks(active);
+  const selectedReference = selectedStemReferenceTrack(active);
+  if (selectedReference) state.stemDebugger.referenceTrackId = selectedReference.id;
 
   els.stemTrackSelect.innerHTML = fallbackTracks.length
     ? fallbackTracks.map((track) => `<option value="${track.localId}" ${track.localId === state.stemDebugger.trackId ? "selected" : ""}>${escapeHtml(track.name)}</option>`).join("")
     : `<option value="">\u672a\u9009\u62e9\u97f3\u9891</option>`;
+  els.stemReferenceSelect.innerHTML = references.length
+    ? references.map((track) => `<option value="${track.id}" ${track.id === selectedReference?.id ? "selected" : ""}>${escapeHtml(track.name)}</option>`).join("")
+    : `<option value="">\u9700\u8981\u7b2c\u4e8c\u9996\u66f2\u4f5c\u53c2\u8003</option>`;
 
   const hasTrack = Boolean(active?.buffer);
   els.stemPlayButton.disabled = !hasTrack;
   els.stemRestartButton.disabled = !hasTrack;
   els.stemSeparateButton.disabled = !hasTrack || isStemPending(active) || active?.status !== "ready";
+  els.stemAutoMixButton.disabled = !hasTrack || !references.length || state.stemDebugger.isAutoMixing || isStemPending(active);
   els.stemStopButton.disabled = !state.stemDebugger.isPlaying;
   els.stemTransportPlay.disabled = !hasTrack;
+  els.stemAutoMixButton.classList.toggle("active", state.settings.mixStyleTransfer.enabled);
+  els.stemAutoMixButton.textContent = state.stemDebugger.isAutoMixing ? "\u6b63\u5728\u81ea\u52a8\u6df7\u97f3..." : "\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3";
   els.stemSeparateButton.textContent = isStemPending(active) ? "Demucs ..." : trackHasRealStems(active) ? "\u91cd\u65b0\u5206\u8f68" : "Demucs \u5206\u8f68";
   els.stemPlayButton.textContent = state.stemDebugger.isPlaying ? "\u6682\u505c" : "\u64ad\u653e";
-  els.stemTransportPlay.textContent = state.stemDebugger.isPlaying ? "Ⅱ" : "▶";
+  els.stemTransportPlay.textContent = state.stemDebugger.isPlaying ? "II" : ">";
+  renderStemMixResult();
 
   if (!hasTrack) {
     els.stemDeck.innerHTML = `
@@ -2703,9 +2950,159 @@ function renderStemDebuggerStatus(track) {
   return `
     <div class="stem-mode ${ready ? "ready" : loading ? "loading" : "simulated"}">
       <strong>${label}</strong>
-      <span>${escapeHtml(error || note)}</span>
+      <span>${escapeHtml(error || note)}${renderStemStyleStatus()}</span>
     </div>
   `;
+}
+
+function renderStemStyleStatus() {
+  if (!state.settings.mixStyleTransfer.enabled) return "";
+  const name = state.settings.mixStyleTransfer.referenceTrackName || "\u53c2\u8003\u66f2";
+  return ` · \u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3: ${escapeHtml(name)}`;
+}
+
+function renderStemMixResult() {
+  if (!els.stemMixResult) return;
+  const result = state.settings.mixStyleTransfer.result;
+  if (!result && !state.stemDebugger.isAutoMixing) {
+    els.stemMixResult.hidden = true;
+    els.stemMixResult.innerHTML = "";
+    return;
+  }
+  els.stemMixResult.hidden = false;
+  if (state.stemDebugger.isAutoMixing) {
+    els.stemMixResult.innerHTML = `
+      <div class="stem-result-head">
+        <strong>\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3</strong>
+        <span>\u6b63\u5728\u5206\u6790\u53c2\u8003\u66f2\u7279\u5f81\u5e76\u641c\u7d22 DSP \u6df7\u97f3\u53c2\u6570...</span>
+      </div>
+    `;
+    return;
+  }
+  if (result?.error) {
+    els.stemMixResult.innerHTML = `
+      <div class="stem-result-head">
+        <strong>\u751f\u6210\u5931\u8d25</strong>
+        <span>${escapeHtml(result.error)}</span>
+      </div>
+    `;
+    return;
+  }
+  const summary = result?.summary || {};
+  const before = Number(result?.featureDistanceBefore);
+  const after = Number(result?.featureDistanceAfter);
+  els.stemMixResult.innerHTML = `
+    <div class="stem-result-head">
+      <strong>\u53c2\u8003: ${escapeHtml(result?.referenceTrackName || state.settings.mixStyleTransfer.referenceTrackName || "")}</strong>
+      <span>${Number.isFinite(after) ? `feature distance ${formatNumber(after)}${Number.isFinite(before) ? ` \u2190 ${formatNumber(before)}` : ""}` : "\u5df2\u751f\u6210 DSP \u6df7\u97f3\u53c2\u6570"}</span>
+    </div>
+    <div class="stem-audio-compare">
+      ${result?.rawUrl ? `<label><span>\u5904\u7406\u524d</span><audio controls preload="none" src="${API}${result.rawUrl}"></audio></label>` : ""}
+      ${result?.url ? `<label><span>\u81ea\u52a8\u6df7\u97f3\u540e</span><audio controls preload="none" src="${API}${result.url}"></audio></label>` : ""}
+    </div>
+    <div class="stem-feature-grid">
+      ${renderMetricCompare("LUFS", summary.beforeLufs, summary.finalLufs, summary.referenceLufs, -30, -6)}
+      ${renderMetricCompare("Crest", summary.beforeCrestDb, summary.finalCrestDb, summary.referenceCrestDb, 0, 24)}
+      ${renderMetricCompare("Width", summary.beforeWidth, summary.finalWidth, summary.referenceWidth, 0, 1.5)}
+    </div>
+    ${renderBandEnergyCompare(result)}
+    ${renderStemParamVisual(result?.mixer)}
+    <div class="stem-mix-links">
+      ${result?.url ? `<a href="${API}${result.url}" target="_blank" rel="noreferrer">\u6253\u5f00\u6df7\u97f3 WAV</a>` : ""}
+      ${result?.reportUrl ? `<a href="${API}${result.reportUrl}" target="_blank" rel="noreferrer">mix_report.json</a>` : ""}
+    </div>
+  `;
+}
+
+function renderMetricCompare(label, before, after, reference, min, max) {
+  const beforePct = metricPercent(before, min, max);
+  const afterPct = metricPercent(after, min, max);
+  const referencePct = metricPercent(reference, min, max);
+  const delta = Number(after) - Number(before);
+  return `
+    <section class="stem-metric-card">
+      <header><span>${label}</span><b>${formatSignedNumber(delta, label === "Width" ? 3 : 2)}</b></header>
+      <div class="stem-metric-track">
+        <i class="before" style="width:${beforePct}%"></i>
+        <i class="after" style="width:${afterPct}%"></i>
+        <em style="left:${referencePct}%"></em>
+      </div>
+      <footer><span>\u524d ${formatNumber(before, label === "Width" ? 3 : 2)}</span><span>\u540e ${formatNumber(after, label === "Width" ? 3 : 2)}</span><span>\u53c2\u8003 ${formatNumber(reference, label === "Width" ? 3 : 2)}</span></footer>
+    </section>
+  `;
+}
+
+function renderBandEnergyCompare(result) {
+  const bands = [
+    ["sub", "Sub"],
+    ["bass", "Bass"],
+    ["low_mid", "Low Mid"],
+    ["mid", "Mid"],
+    ["high_mid", "High Mid"],
+    ["high", "High"],
+  ];
+  const before = result?.beforeFeatures?.band_energy || {};
+  const after = result?.finalFeatures?.band_energy || {};
+  const reference = result?.referenceFeatures?.band_energy || {};
+  const maxValue = Math.max(0.04, ...bands.flatMap(([key]) => [Number(before[key]) || 0, Number(after[key]) || 0, Number(reference[key]) || 0]));
+  return `
+    <section class="stem-band-compare">
+      <header><strong>\u9891\u6bb5\u80fd\u91cf</strong><span>\u7070=\u5904\u7406\u524d / \u9752=\u81ea\u52a8\u6df7\u97f3 / \u9ec4\u7ebf=\u53c2\u8003\u66f2</span></header>
+      ${bands.map(([key, label]) => renderBandRow(label, before[key], after[key], reference[key], maxValue)).join("")}
+    </section>
+  `;
+}
+
+function renderBandRow(label, before, after, reference, maxValue) {
+  const beforePct = metricPercent(before, 0, maxValue);
+  const afterPct = metricPercent(after, 0, maxValue);
+  const referencePct = metricPercent(reference, 0, maxValue);
+  return `
+    <div class="stem-band-row">
+      <span>${label}</span>
+      <div class="stem-band-track">
+        <i class="before" style="width:${beforePct}%"></i>
+        <i class="after" style="width:${afterPct}%"></i>
+        <em style="left:${referencePct}%"></em>
+      </div>
+    </div>
+  `;
+}
+
+function renderStemParamVisual(mixer) {
+  const stems = mixer?.stems || {};
+  if (!Object.keys(stems).length) return "";
+  return `
+    <section class="stem-param-viz">
+      <header><strong>DSP \u53c2\u6570\u53d8\u5316</strong><span>gain / pan / EQ / reverb send</span></header>
+      ${STEMS.map((stem) => {
+        const params = stems[stem.id] || {};
+        const gainDb = Number(params.gainDb) || 0;
+        const pan = Number.isFinite(params.pan) ? params.pan : 0.5;
+        const eq = params.eqDb || {};
+        return `
+          <div class="stem-param-row">
+            <span>${stem.label}</span>
+            <div class="stem-gain-axis"><i style="left:${metricPercent(gainDb, -12, 12)}%"></i><b>${formatSignedNumber(gainDb, 1)} dB</b></div>
+            <div class="stem-pan-axis"><i style="left:${metricPercent(pan, 0, 1)}%"></i><b>${panLabel(pan)}</b></div>
+            <small>L ${formatSignedNumber(eq.low, 1)} / M ${formatSignedNumber(eq.mid, 1)} / H ${formatSignedNumber(eq.high, 1)} / R ${formatNumber(params.reverbSend, 2)}</small>
+          </div>
+        `;
+      }).join("")}
+    </section>
+  `;
+}
+
+function metricPercent(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || max <= min) return 0;
+  return clamp(((number - min) / (max - min)) * 100, 0, 100);
+}
+
+function panLabel(value) {
+  const pan = Number(value);
+  if (!Number.isFinite(pan) || Math.abs(pan - 0.5) < 0.03) return "C";
+  return pan < 0.5 ? `L${Math.round((0.5 - pan) * 200)}` : `R${Math.round((pan - 0.5) * 200)}`;
 }
 
 function renderStemLane(stem, track) {
@@ -3530,6 +3927,17 @@ function formatSignedSeconds(seconds) {
   return `${sign}${Math.abs(value).toFixed(1)}s`;
 }
 
+function formatNumber(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "--";
+}
+
+function formatSignedNumber(value, digits = 2) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "--";
+  return `${number >= 0 ? "+" : ""}${number.toFixed(digits)}`;
+}
+
 function drawEmptyWave(ctx, width, height) {
   ctx.fillStyle = "rgba(255,255,255,0.36)";
   ctx.font = "14px Bahnschrift, Segoe UI, sans-serif";
@@ -3580,6 +3988,15 @@ function formatTime(seconds) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function lerp(from, to, amount) {
+  const t = clamp(Number(amount) || 0, 0, 1);
+  return from + (to - from) * t;
+}
+
+function dbToGain(db) {
+  return 10 ** ((Number(db) || 0) / 20);
 }
 
 function escapeHtml(value) {

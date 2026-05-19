@@ -365,6 +365,32 @@ input[type="range"] {
   padding: 0;
 }
 
+.stem-reference-picker {
+  grid-template-columns: auto minmax(130px, 180px);
+}
+
+.stem-style-intensity {
+  display: grid;
+  grid-template-columns: minmax(78px, auto) 112px;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #1e2022;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stem-style-intensity span {
+  white-space: nowrap;
+}
+
+.stem-style-intensity b {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .stem-tools button {
   min-height: 46px;
   border-radius: 8px;
@@ -377,6 +403,12 @@ input[type="range"] {
 .stem-tools button:not(.secondary) {
   border-color: rgba(101, 215, 242, 0.56);
   background: #26363a;
+}
+
+.stem-tools button.active {
+  border-color: rgba(240, 207, 90, 0.72);
+  background: rgba(240, 207, 90, 0.16);
+  color: var(--accent);
 }
 
 .stem-ruler {
@@ -394,6 +426,240 @@ input[type="range"] {
   display: grid;
   gap: 8px;
   padding: 0 18px 96px;
+}
+
+.stem-mix-result {
+  display: grid;
+  gap: 12px;
+  margin: 0 18px 10px;
+  padding: 12px;
+  border: 1px solid rgba(240, 207, 90, 0.28);
+  background: rgba(240, 207, 90, 0.08);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.stem-mix-result[hidden] {
+  display: none;
+}
+
+.stem-result-head {
+  display: grid;
+  grid-template-columns: minmax(180px, auto) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.stem-result-head strong,
+.stem-band-compare strong,
+.stem-param-viz strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stem-result-head span,
+.stem-band-compare header span,
+.stem-param-viz header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stem-audio-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stem-audio-compare label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 8px;
+}
+
+.stem-audio-compare span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.stem-audio-compare audio {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+}
+
+.stem-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stem-metric-card,
+.stem-band-compare,
+.stem-param-viz {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 10px;
+}
+
+.stem-metric-card {
+  display: grid;
+  gap: 8px;
+}
+
+.stem-metric-card header,
+.stem-band-compare header,
+.stem-param-viz header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.stem-metric-card header span {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.stem-metric-card header b {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.stem-metric-track,
+.stem-band-track {
+  position: relative;
+  height: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.stem-metric-track i,
+.stem-band-track i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  min-width: 1px;
+}
+
+.stem-metric-track .before,
+.stem-band-track .before {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.stem-metric-track .after,
+.stem-band-track .after {
+  background: rgba(101, 215, 242, 0.62);
+  mix-blend-mode: screen;
+}
+
+.stem-metric-track em,
+.stem-band-track em {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--accent);
+}
+
+.stem-metric-card footer {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stem-band-compare,
+.stem-param-viz {
+  display: grid;
+  gap: 8px;
+}
+
+.stem-band-row,
+.stem-param-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.stem-band-row > span,
+.stem-param-row > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.stem-param-row {
+  grid-template-columns: 52px minmax(90px, 1fr) minmax(90px, 1fr) minmax(190px, 1.2fr);
+}
+
+.stem-gain-axis,
+.stem-pan-axis {
+  position: relative;
+  height: 20px;
+  background:
+    linear-gradient(90deg, transparent calc(50% - 1px), rgba(255, 255, 255, 0.25) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    rgba(255, 255, 255, 0.08);
+}
+
+.stem-gain-axis i,
+.stem-pan-axis i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+}
+
+.stem-gain-axis b,
+.stem-pan-axis b {
+  position: absolute;
+  right: 6px;
+  top: 3px;
+  color: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stem-param-row small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stem-mix-links {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.stem-mix-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
 }
 
 .stem-mode {
@@ -1605,6 +1871,14 @@ tr.selected {
     max-height: none;
     overflow: visible;
   }
+
+  .stem-param-row {
+    grid-template-columns: 52px minmax(90px, 1fr) minmax(90px, 1fr);
+  }
+
+  .stem-param-row small {
+    grid-column: 2 / -1;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1650,10 +1924,19 @@ tr.selected {
   }
 
   .stem-picker,
+  .stem-mix-result,
+  .stem-result-head,
+  .stem-audio-compare,
+  .stem-feature-grid,
+  .stem-param-row,
   .stem-mode,
   .stem-lane,
   .stem-transport {
     grid-template-columns: 1fr;
+  }
+
+  .stem-param-row small {
+    grid-column: auto;
   }
 
   .stem-ruler {

@@ -7,7 +7,7 @@ import numpy as np
 
 from backend.loudness import loudness_metrics, normalize_loudness
 from backend.analysis import _transition_candidates
-from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade, _dynamic_eq_overlap, _resolve_mix_strategy
+from backend.mixing import SAMPLE_RATE, _apply_track_mixer, _beat_sync, _crossfade, _dynamic_eq_overlap, _render_stem_mixer, _resolve_mix_strategy
 from backend.seamless import (
     _adapt_render_method,
     _refine_alignment_for_smoothness,
@@ -189,6 +189,47 @@ class CrossfadePlanTests(unittest.TestCase):
         mixed = _apply_track_mixer(buffer, {"mixer": {"gain": 0.5, "eq": {"low": 0, "mid": 0, "high": 0}}})
 
         self.assertTrue(np.allclose(mixed, 0.25))
+
+    def test_diffmst_stem_mixer_renders_cached_stems(self) -> None:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        import soundfile as sf
+        import backend.mixing as mixing
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stem_dir = root / "track-1" / "demucs_api"
+            stem_dir.mkdir(parents=True)
+            tone = np.ones((2, 256), dtype=np.float32) * 0.1
+            for stem in ("vocals", "drums", "bass", "other"):
+                sf.write(stem_dir / f"{stem}.wav", tone.T, SAMPLE_RATE)
+
+            original_stem_dir = mixing.STEM_DIR
+            mixing.STEM_DIR = root
+            try:
+                rendered = _render_stem_mixer(
+                    {
+                        "id": "track-1",
+                        "duration": 256 / SAMPLE_RATE,
+                        "stemMixer": {
+                            "enabled": True,
+                            "stems": {
+                                "vocals": {"gain": 1.0, "pan": 0.5, "eqDb": {}, "compressor": {}},
+                                "drums": {"gain": 0.0, "pan": 0.5, "eqDb": {}, "compressor": {}},
+                                "bass": {"gain": 0.0, "pan": 0.5, "eqDb": {}, "compressor": {}},
+                                "other": {"gain": 0.0, "pan": 0.5, "eqDb": {}, "compressor": {}},
+                            },
+                            "master": {"gainDb": 0.0, "eqDb": {}, "compressor": {}},
+                        },
+                    }
+                )
+            finally:
+                mixing.STEM_DIR = original_stem_dir
+
+        self.assertIsNotNone(rendered)
+        assert rendered is not None
+        self.assertEqual(rendered.shape, (2, 256))
+        self.assertGreater(float(np.mean(np.abs(rendered))), 0.05)
 
     def test_auto_mix_strategy_prefers_vocal_safe_for_dense_vocals(self) -> None:
         strategy = _resolve_mix_strategy(

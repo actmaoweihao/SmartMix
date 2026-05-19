@@ -11,25 +11,26 @@ import soundfile as sf
 from scipy import signal
 
 from .loudness import normalize_loudness
-from .storage import EXPORT_DIR
+from .storage import EXPORT_DIR, STEM_DIR
 from .transition import plan_transition
 
 
 SAMPLE_RATE = 44100
+STEM_NAMES = ("vocals", "drums", "bass", "other")
 
 
 def render_mix(tracks: list[dict], settings: dict, fmt: str) -> Path:
     if not tracks:
         raise ValueError("没有可导出的曲目")
 
-    buffers = [_load_stereo(Path(track["path"])) for track in tracks]
+    buffers = [_load_track_audio_for_mix(track) for track in tracks]
     if settings.get("beatSync"):
         buffers = _beat_sync(buffers, tracks)
 
     if settings.get("aiPrecision") or settings.get("loudnessNormalize"):
         buffers = [normalize_loudness(buffer, SAMPLE_RATE, float(settings.get("targetLufs", -16))) for buffer in buffers]
 
-    buffers = [_apply_track_mixer(buffer, track) for buffer, track in zip(buffers, tracks)]
+    buffers = [_apply_track_mixer(buffer, track, settings) for buffer, track in zip(buffers, tracks)]
     buffers = [_apply_static_eq(buffer, settings.get("eq", {})) for buffer in buffers]
     mix = _crossfade(buffers, tracks, settings)
     if settings.get("aiPrecision") or settings.get("loudnessNormalize"):
@@ -52,6 +53,13 @@ def _load_stereo(path: Path) -> np.ndarray:
     if y.shape[0] > 2:
         y = y[:2]
     return np.ascontiguousarray(y, dtype=np.float32)
+
+
+def _load_track_audio_for_mix(track: dict) -> np.ndarray:
+    stem_mix = _render_stem_mixer(track)
+    if stem_mix is not None:
+        return stem_mix
+    return _load_stereo(Path(track["path"]))
 
 
 def _beat_sync(buffers: list[np.ndarray], tracks: list[dict]) -> list[np.ndarray]:
@@ -88,12 +96,106 @@ def _apply_static_eq(buffer: np.ndarray, eq: dict) -> np.ndarray:
     return np.clip(out, -1, 1).astype(np.float32)
 
 
-def _apply_track_mixer(buffer: np.ndarray, track: dict) -> np.ndarray:
+def _apply_track_mixer(buffer: np.ndarray, track: dict, settings: dict | None = None) -> np.ndarray:
     mixer = track.get("mixer") or {}
     eq = mixer.get("eq") or {}
     gain = float(mixer.get("gain", 1.0))
     out = _apply_static_eq(buffer, eq)
     return np.clip(out * gain, -1, 1).astype(np.float32)
+
+
+def _render_stem_mixer(track: dict) -> np.ndarray | None:
+    stem_mixer = track.get("stemMixer") or {}
+    if not stem_mixer.get("enabled"):
+        return None
+    paths = _cached_stem_paths(str(track.get("id") or ""))
+    if not paths:
+        return None
+
+    stem_controls = stem_mixer.get("stems") or {}
+    solo_active = any(bool((stem_controls.get(name) or {}).get("solo")) for name in STEM_NAMES)
+    rendered_stems: list[np.ndarray] = []
+    max_samples = 0
+    for name in STEM_NAMES:
+        control = stem_controls.get(name) or {}
+        if bool(control.get("mute")) or (solo_active and not bool(control.get("solo"))):
+            continue
+        gain_value = float(control.get("gain", 1.0) or 0.0)
+        if gain_value <= 0.0001:
+            continue
+        stem = _load_stereo(paths[name])
+        stem = _apply_eq_db(stem, control.get("eqDb") or {})
+        stem = _apply_soft_compressor(stem, control.get("compressor") or {})
+        stem = _apply_pan(stem, float(control.get("pan", 0.5)))
+        stem = np.clip(stem * gain_value, -1, 1).astype(np.float32)
+        rendered_stems.append(stem)
+        max_samples = max(max_samples, stem.shape[1])
+
+    if not rendered_stems:
+        return np.zeros((2, _seconds_to_samples(float(track.get("duration") or 0))), dtype=np.float32)
+
+    mix = np.zeros((2, max_samples), dtype=np.float32)
+    for stem in rendered_stems:
+        mix[:, : stem.shape[1]] += stem
+
+    master = stem_mixer.get("master") or {}
+    mix = _apply_eq_db(mix, master.get("eqDb") or {})
+    mix = _apply_soft_compressor(mix, master.get("compressor") or {})
+    mix *= _db_to_gain(float(master.get("gainDb", 0.0) or 0.0))
+    return np.clip(mix, -1, 1).astype(np.float32)
+
+
+def _cached_stem_paths(track_id: str) -> dict[str, Path] | None:
+    if not track_id:
+        return None
+    root = STEM_DIR / track_id / "demucs_api"
+    stems = {name: root / f"{name}.wav" for name in STEM_NAMES}
+    if all(path.exists() for path in stems.values()):
+        return stems
+    return None
+
+
+def _apply_eq_db(buffer: np.ndarray, eq_db: dict) -> np.ndarray:
+    low_db = float(eq_db.get("low", 0.0) or 0.0)
+    mid_db = float(eq_db.get("mid", 0.0) or 0.0)
+    high_db = float(eq_db.get("high", 0.0) or 0.0)
+    if max(abs(low_db), abs(mid_db), abs(high_db)) < 0.05:
+        return buffer
+    low_band = _sos_filter(buffer, "lowpass", 170)
+    high_band = _sos_filter(buffer, "highpass", 6500)
+    mid_band = buffer - low_band - high_band
+    out = low_band * _db_to_gain(low_db) + mid_band * _db_to_gain(mid_db) + high_band * _db_to_gain(high_db)
+    return np.clip(out, -1, 1).astype(np.float32)
+
+
+def _apply_pan(buffer: np.ndarray, pan: float) -> np.ndarray:
+    position = float(np.clip(pan, 0.0, 1.0))
+    angle = position * np.pi / 2
+    left = np.cos(angle) * np.sqrt(2)
+    right = np.sin(angle) * np.sqrt(2)
+    out = buffer.copy()
+    out[0] *= left
+    out[1] *= right
+    return np.clip(out, -1, 1).astype(np.float32)
+
+
+def _apply_soft_compressor(buffer: np.ndarray, compressor: dict) -> np.ndarray:
+    ratio = float(compressor.get("ratio", 1.0) or 1.0)
+    threshold_db = float(compressor.get("thresholdDb", 0.0) or 0.0)
+    makeup_db = float(compressor.get("makeupGainDb", 0.0) or 0.0)
+    if ratio <= 1.01 and abs(makeup_db) < 0.05:
+        return buffer
+    threshold = _db_to_gain(threshold_db)
+    level = np.maximum(np.max(np.abs(buffer), axis=0, keepdims=True), 1e-8)
+    over = level > threshold
+    compressed_level = threshold + (level - threshold) / max(1.0, ratio)
+    gain = np.where(over, compressed_level / level, 1.0)
+    out = buffer * gain * _db_to_gain(makeup_db)
+    return np.clip(out, -1, 1).astype(np.float32)
+
+
+def _db_to_gain(db: float) -> float:
+    return float(10 ** (db / 20))
 
 
 def _sos_filter(buffer: np.ndarray, kind: str, freq: float) -> np.ndarray:

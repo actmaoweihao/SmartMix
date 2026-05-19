@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from .analysis import analyze_audio
 from .matching import evaluate_track_match
 from .mixing import render_mix
+from .reference_mix import render_reference_mix
 from .repair import MatchRepairOptions, repair_track_for_match
 from .seamless import generate_seamless_transition
 from .storage import EXPORT_DIR, PROJECT_DIR, STEM_DIR, UPLOAD_DIR, ensure_dirs, read_json, write_json
@@ -83,6 +84,14 @@ class TuneTrackRequest(BaseModel):
 class StemSeparationRequest(BaseModel):
     device: str = "auto"
     force: bool = False
+
+
+class ReferenceMixRequest(BaseModel):
+    referenceTrackId: str
+    style: str = "auto"
+    optimize: bool = True
+    optimizeSeconds: float = 30.0
+    optimizeTrials: int = 18
 
 
 class TransitionPreviewRequest(BaseModel):
@@ -238,6 +247,29 @@ def track_stem_audio(track_id: str, stem_name: str) -> FileResponse:
     return FileResponse(path, media_type="audio/wav", filename=f"{track_id}_{stem_name}.wav")
 
 
+@app.post("/api/tracks/{track_id}/reference-mix")
+def reference_mix(track_id: str, request: ReferenceMixRequest) -> dict:
+    _read_track_meta(track_id)
+    reference = _read_track_meta(request.referenceTrackId)
+    if request.referenceTrackId == track_id:
+        raise HTTPException(status_code=400, detail="Reference track must be different from the stem track")
+    if request.style not in {"auto", "pop", "modern", "lofi", "cinematic", "club", "edm"}:
+        raise HTTPException(status_code=400, detail="Unsupported style")
+    try:
+        return render_reference_mix(
+            track_id,
+            reference,
+            style=request.style,
+            optimize=request.optimize,
+            optimize_seconds=request.optimizeSeconds,
+            optimize_trials=request.optimizeTrials,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Reference mix failed: {exc}") from exc
+
+
 @app.post("/api/tracks/{track_id}/tune")
 def tune_track(track_id: str, request: TuneTrackRequest) -> dict:
     meta_path = UPLOAD_DIR / f"{track_id}.json"
@@ -333,7 +365,10 @@ def download_export(filename: str) -> FileResponse:
     path = EXPORT_DIR / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="Export file not found")
-    media_type = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
+    if path.suffix == ".json":
+        media_type = "application/json"
+    else:
+        media_type = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
