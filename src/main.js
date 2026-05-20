@@ -55,6 +55,20 @@ const state = {
     repairLoading: false,
     error: "",
   },
+  mashup: {
+    trackAId: null,
+    trackBId: null,
+    mode: "auto",
+    barsPerSegment: 16,
+    useStems: true,
+    analysis: null,
+    plan: null,
+    renderResult: null,
+    analyzing: false,
+    planning: false,
+    rendering: false,
+    error: "",
+  },
   settings: {
     sortMode: "recommended",
     crossfade: 8,
@@ -260,6 +274,52 @@ app.innerHTML = `
           <div id="teachingContent" class="teaching-content"></div>
         </section>
 
+        <section class="mashup-panel" aria-label="双曲重组 / Mashup Builder">
+          <div class="mashup-head">
+            <div>
+              <span class="tiny-label">Mashup Builder</span>
+              <strong>双曲重组</strong>
+            </div>
+            <div class="mashup-actions">
+              <button id="mashupAnalyzeButton" type="button">分析段落</button>
+              <button id="mashupPlanButton" type="button" class="secondary">生成拼接方案</button>
+              <button id="mashupRenderButton" type="button" class="export">渲染试听/导出</button>
+            </div>
+          </div>
+          <div class="mashup-controls">
+            <label>
+              <span>Song A</span>
+              <select id="mashupTrackA"></select>
+            </label>
+            <label>
+              <span>Song B</span>
+              <select id="mashupTrackB"></select>
+            </label>
+            <label>
+              <span>Mode</span>
+              <select id="mashupMode">
+                <option value="auto">auto</option>
+                <option value="smooth_join">smooth_join</option>
+                <option value="hook_swap">hook_swap</option>
+                <option value="a_vocal_b_instrumental">A vocals + B instrumental</option>
+                <option value="b_vocal_a_instrumental">B vocals + A instrumental</option>
+                <option value="energy_build">energy_build</option>
+              </select>
+            </label>
+            <label>
+              <span>Segment</span>
+              <select id="mashupBars">
+                <option value="8">8 bars</option>
+                <option value="16" selected>16 bars</option>
+              </select>
+            </label>
+            <label class="mashup-stems"><input id="mashupUseStems" type="checkbox" checked /><span>useStems</span></label>
+          </div>
+          <div id="mashupSegments" class="mashup-segments"></div>
+          <div id="mashupTimeline" class="mashup-timeline"></div>
+          <div id="mashupResult" class="mashup-result"></div>
+        </section>
+
         <section class="transport">
           <button id="restartButton" type="button" class="iconish">从头播放</button>
           <input id="mixProgress" type="range" min="0" max="0" value="0" step="0.01" />
@@ -433,6 +493,17 @@ const els = {
   teachingEnergy: document.querySelector("#teachingEnergy"),
   teachingBeginner: document.querySelector("#teachingBeginner"),
   teachingComplexity: document.querySelector("#teachingComplexity"),
+  mashupTrackA: document.querySelector("#mashupTrackA"),
+  mashupTrackB: document.querySelector("#mashupTrackB"),
+  mashupMode: document.querySelector("#mashupMode"),
+  mashupBars: document.querySelector("#mashupBars"),
+  mashupUseStems: document.querySelector("#mashupUseStems"),
+  mashupAnalyzeButton: document.querySelector("#mashupAnalyzeButton"),
+  mashupPlanButton: document.querySelector("#mashupPlanButton"),
+  mashupRenderButton: document.querySelector("#mashupRenderButton"),
+  mashupSegments: document.querySelector("#mashupSegments"),
+  mashupTimeline: document.querySelector("#mashupTimeline"),
+  mashupResult: document.querySelector("#mashupResult"),
 };
 
 const wave = {
@@ -493,6 +564,14 @@ function bindEvents() {
   els.teachingBeginner.addEventListener("change", syncTeachingSettings);
   els.teachingComplexity.addEventListener("change", syncTeachingSettings);
   els.teachingContent.addEventListener("click", teachingPanelClick);
+  els.mashupTrackA.addEventListener("change", syncMashupSettings);
+  els.mashupTrackB.addEventListener("change", syncMashupSettings);
+  els.mashupMode.addEventListener("change", syncMashupSettings);
+  els.mashupBars.addEventListener("change", syncMashupSettings);
+  els.mashupUseStems.addEventListener("change", syncMashupSettings);
+  els.mashupAnalyzeButton.addEventListener("click", analyzeMashupSegments);
+  els.mashupPlanButton.addEventListener("click", generateMashupPlan);
+  els.mashupRenderButton.addEventListener("click", renderMashupExport);
   els.matchFileA.addEventListener("change", () => {
     state.match.fileA = els.matchFileA.files?.[0] || null;
     state.match.repairResult = null;
@@ -2861,6 +2940,7 @@ function render() {
   renderDeckMixer();
   renderMatchResult();
   renderTeachingPanel();
+  renderMashupPanel();
   if (state.view === "studio") drawWaveform();
   renderStemDebugger();
 }
@@ -2884,6 +2964,246 @@ function renderMetrics() {
   els.restartButton.disabled = playable.length < 1;
   els.stopButton.disabled = !state.isPlaying;
   els.exportButton.disabled = playable.length < 1 || state.isExporting;
+}
+
+function syncMashupSettings() {
+  state.mashup.trackAId = els.mashupTrackA.value || null;
+  state.mashup.trackBId = els.mashupTrackB.value || null;
+  state.mashup.mode = els.mashupMode.value || "auto";
+  state.mashup.barsPerSegment = Number(els.mashupBars.value) || 16;
+  state.mashup.useStems = els.mashupUseStems.checked;
+  state.mashup.error = "";
+  renderMashupPanel();
+}
+
+async function analyzeMashupSegments() {
+  const ready = playableTracks();
+  if (ready.length < 2) {
+    state.mashup.error = "请先上传并完成分析至少两首歌。";
+    renderMashupPanel();
+    return;
+  }
+  ensureMashupSelection();
+  state.mashup.analyzing = true;
+  state.mashup.error = "";
+  state.mashup.analysis = null;
+  state.mashup.plan = null;
+  state.mashup.renderResult = null;
+  renderMashupPanel();
+  try {
+    await assertBackendReachable();
+    state.mashup.analysis = await fetchJson(`${API}/api/mashup/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(mashupRequestBase()),
+    });
+    setStatus("Mashup 段落分析完成");
+  } catch (error) {
+    state.mashup.error = error.message || "Mashup 段落分析失败";
+  } finally {
+    state.mashup.analyzing = false;
+    renderMashupPanel();
+  }
+}
+
+async function generateMashupPlan() {
+  const ready = playableTracks();
+  if (ready.length < 2) {
+    state.mashup.error = "请先上传并完成分析至少两首歌。";
+    renderMashupPanel();
+    return;
+  }
+  ensureMashupSelection();
+  state.mashup.planning = true;
+  state.mashup.error = "";
+  state.mashup.plan = null;
+  state.mashup.renderResult = null;
+  renderMashupPanel();
+  try {
+    await assertBackendReachable();
+    state.mashup.plan = await fetchJson(`${API}/api/mashup/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...mashupRequestBase(),
+        mode: state.mashup.mode,
+        targetDurationSec: 180,
+      }),
+    });
+    setStatus(`Mashup 方案已生成：${state.mashup.plan.score}/100`);
+  } catch (error) {
+    state.mashup.error = error.message || "Mashup 方案生成失败";
+  } finally {
+    state.mashup.planning = false;
+    renderMashupPanel();
+  }
+}
+
+async function renderMashupExport() {
+  if (!state.mashup.plan?.plan?.length) {
+    state.mashup.error = "请先生成拼接方案。";
+    renderMashupPanel();
+    return;
+  }
+  state.mashup.rendering = true;
+  state.mashup.error = "";
+  state.mashup.renderResult = null;
+  renderMashupPanel();
+  try {
+    await assertBackendReachable();
+    state.mashup.renderResult = await fetchJson(`${API}/api/mashup/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        plan: state.mashup.plan.plan,
+        format: "wav",
+        targetLufs: -14,
+        useStems: state.mashup.useStems,
+      }),
+    });
+    setStatus("Mashup 渲染完成");
+  } catch (error) {
+    state.mashup.error = error.message || "Mashup 渲染失败";
+  } finally {
+    state.mashup.rendering = false;
+    renderMashupPanel();
+  }
+}
+
+function mashupRequestBase() {
+  return {
+    trackAId: state.mashup.trackAId,
+    trackBId: state.mashup.trackBId,
+    barsPerSegment: state.mashup.barsPerSegment,
+    useStems: state.mashup.useStems,
+  };
+}
+
+function ensureMashupSelection() {
+  const ready = playableTracks();
+  const ids = ready.map((track) => track.id);
+  if (!ids.includes(state.mashup.trackAId)) state.mashup.trackAId = ids[0] || null;
+  if (!ids.includes(state.mashup.trackBId) || state.mashup.trackBId === state.mashup.trackAId) {
+    state.mashup.trackBId = ids.find((id) => id !== state.mashup.trackAId) || null;
+  }
+}
+
+function renderMashupPanel() {
+  if (!els.mashupTrackA) return;
+  const ready = playableTracks();
+  ensureMashupSelection();
+  const options = ready.length
+    ? ready.map((track) => `<option value="${track.id}">${escapeHtml(track.name)}</option>`).join("")
+    : `<option value="">需要已分析曲目</option>`;
+  els.mashupTrackA.innerHTML = options;
+  els.mashupTrackB.innerHTML = options;
+  els.mashupTrackA.value = state.mashup.trackAId || "";
+  els.mashupTrackB.value = state.mashup.trackBId || "";
+  els.mashupMode.value = state.mashup.mode;
+  els.mashupBars.value = String(state.mashup.barsPerSegment);
+  els.mashupUseStems.checked = state.mashup.useStems;
+
+  const validPair = Boolean(state.mashup.trackAId && state.mashup.trackBId && state.mashup.trackAId !== state.mashup.trackBId);
+  els.mashupAnalyzeButton.disabled = !validPair || state.mashup.analyzing;
+  els.mashupPlanButton.disabled = !validPair || state.mashup.planning;
+  els.mashupRenderButton.disabled = !state.mashup.plan?.plan?.length || state.mashup.rendering;
+  els.mashupAnalyzeButton.textContent = state.mashup.analyzing ? "分析中..." : "分析段落";
+  els.mashupPlanButton.textContent = state.mashup.planning ? "生成中..." : "生成拼接方案";
+  els.mashupRenderButton.textContent = state.mashup.rendering ? "渲染中..." : "渲染试听/导出";
+
+  renderMashupSegments();
+  renderMashupTimeline();
+  renderMashupResult();
+}
+
+function renderMashupSegments() {
+  if (state.mashup.error) {
+    els.mashupSegments.innerHTML = `<div class="mashup-error">${escapeHtml(state.mashup.error)}</div>`;
+    return;
+  }
+  const analysis = state.mashup.analysis;
+  if (!analysis) {
+    els.mashupSegments.innerHTML = `<div class="mashup-empty">选择两首已上传歌曲后，先分析 8/16 小节段落。</div>`;
+    return;
+  }
+  els.mashupSegments.innerHTML = `
+    ${renderMashupSegmentColumn("Song A", analysis.trackA?.segments || [])}
+    ${renderMashupSegmentColumn("Song B", analysis.trackB?.segments || [])}
+  `;
+}
+
+function renderMashupSegmentColumn(title, segments) {
+  return `
+    <section class="mashup-segment-column">
+      <header><strong>${title}</strong><span>${segments.length} segments</span></header>
+      <div class="mashup-segment-list">
+        ${segments.map(renderMashupSegmentBlock).join("") || `<div class="mashup-empty">暂无段落</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderMashupSegmentBlock(segment) {
+  const energy = Math.round((Number(segment.energy) || 0) * 100);
+  const vocal = Math.round((Number(segment.vocalDensity) || 0) * 100);
+  return `
+    <article class="mashup-segment-block ${escapeHtml(segment.source || "")}">
+      <div><strong>${escapeHtml(segment.label || "segment")}</strong><span>${formatTime(segment.start)}-${formatTime(segment.end)}</span></div>
+      <div class="mashup-mini-meters">
+        <span style="--value:${energy}%">E ${energy}</span>
+        <span style="--value:${vocal}%">V ${vocal}</span>
+      </div>
+      <small>${escapeHtml(segment.camelot || "--")} · ${formatNumber(segment.bpm, 1)} BPM · in ${Math.round((segment.mixInScore || 0) * 100)} / out ${Math.round((segment.mixOutScore || 0) * 100)}</small>
+    </article>
+  `;
+}
+
+function renderMashupTimeline() {
+  const result = state.mashup.plan;
+  if (!result?.plan?.length) {
+    els.mashupTimeline.innerHTML = `<div class="mashup-empty">生成方案后，这里会显示新的拼接时间线。</div>`;
+    return;
+  }
+  const plan = result.plan;
+  const total = Math.max(1, ...plan.map((item) => Number(item.timelineEnd) || 0));
+  els.mashupTimeline.innerHTML = `
+    <div class="mashup-plan-head">
+      <strong>Score ${result.score}/100</strong>
+      <span>${escapeHtml(result.mode || state.mashup.mode)} · ${formatTime(total)}</span>
+    </div>
+    <div class="mashup-plan-stage">
+      ${plan.map((item) => renderMashupPlanItem(item, total)).join("")}
+    </div>
+    ${(result.warnings || []).length ? `<div class="mashup-warnings">${result.warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
+  `;
+}
+
+function renderMashupPlanItem(item, total) {
+  const left = clamp(((Number(item.timelineStart) || 0) / total) * 100, 0, 100);
+  const width = clamp((((Number(item.timelineEnd) || 0) - (Number(item.timelineStart) || 0)) / total) * 100, 1, 100);
+  const lane = item.layerMode === "vocals" ? 1 : item.layerMode === "instrumental" || item.layerMode === "drums_bass_other" ? 2 : item.source === "B" ? 1 : 0;
+  return `
+    <div class="mashup-plan-item lane-${lane} ${escapeHtml(item.source || "")}" style="left:${left}%;width:${width}%">
+      <strong>${escapeHtml(item.source)} · ${escapeHtml(item.layerMode)}</strong>
+      <span>${formatTime(item.sourceStart)}-${formatTime(item.sourceEnd)} · ${escapeHtml(item.transitionIn || "none")}</span>
+    </div>
+  `;
+}
+
+function renderMashupResult() {
+  const result = state.mashup.renderResult;
+  if (!result) {
+    els.mashupResult.innerHTML = "";
+    return;
+  }
+  const url = `${API}${result.downloadUrl}`;
+  els.mashupResult.innerHTML = `
+    <div class="mashup-rendered">
+      <strong>已渲染 ${escapeHtml(result.report?.filename || "mashup.wav")}</strong>
+      <audio controls preload="none" src="${url}"></audio>
+      <a href="${url}" target="_blank" rel="noreferrer">下载 WAV</a>
+    </div>
+  `;
 }
 
 function renderStemDebugger() {

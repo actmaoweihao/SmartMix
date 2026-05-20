@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import shutil
 import uuid
@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from .analysis import analyze_audio
 from .matching import evaluate_track_match
+from .mashup import analyze_mashup_tracks, build_mashup_plan, render_mashup_plan
 from .mixing import render_mix
 from .reference_mix import render_reference_mix
 from .repair import MatchRepairOptions, repair_track_for_match
@@ -99,6 +100,29 @@ class TransitionPreviewRequest(BaseModel):
     incomingTrackId: str
     recommendation: dict | None = None
     options: dict = {}
+
+
+class MashupAnalyzeRequest(BaseModel):
+    trackAId: str
+    trackBId: str
+    barsPerSegment: int = 16
+    useStems: bool = True
+
+
+class MashupPlanRequest(BaseModel):
+    trackAId: str
+    trackBId: str
+    mode: str = "auto"
+    targetDurationSec: float = 180
+    barsPerSegment: int = 16
+    useStems: bool = True
+
+
+class MashupRenderRequest(BaseModel):
+    plan: list[dict]
+    format: str = "wav"
+    targetLufs: float = -14
+    useStems: bool = True
 
 
 @app.get("/api/health")
@@ -360,6 +384,55 @@ def transition_preview(request: TransitionPreviewRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"Transition preview failed: {exc}") from exc
 
 
+@app.post("/api/mashup/analyze")
+def mashup_analyze(request: MashupAnalyzeRequest) -> dict:
+    track_a = _read_track_meta(request.trackAId)
+    track_b = _read_track_meta(request.trackBId)
+    try:
+        return analyze_mashup_tracks(track_a, track_b, request.barsPerSegment, request.useStems)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mashup analysis failed: {exc}") from exc
+
+
+@app.post("/api/mashup/plan")
+def mashup_plan(request: MashupPlanRequest) -> dict:
+    track_a = _read_track_meta(request.trackAId)
+    track_b = _read_track_meta(request.trackBId)
+    try:
+        return build_mashup_plan(
+            track_a,
+            track_b,
+            mode=request.mode,
+            target_duration_sec=request.targetDurationSec,
+            bars_per_segment=request.barsPerSegment,
+            use_stems=request.useStems,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mashup plan failed: {exc}") from exc
+
+
+@app.post("/api/mashup/render")
+def mashup_render(request: MashupRenderRequest) -> dict:
+    track_ids = sorted({str(item.get("trackId") or "") for item in request.plan if item.get("trackId")})
+    tracks_by_id = {track_id: _read_track_meta(track_id) for track_id in track_ids}
+    try:
+        return render_mashup_plan(
+            request.plan,
+            tracks_by_id,
+            fmt=request.format,
+            target_lufs=request.targetLufs,
+            use_stems=request.useStems,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mashup render failed: {exc}") from exc
+
+
 @app.get("/api/exports/{filename}")
 def download_export(filename: str) -> FileResponse:
     path = EXPORT_DIR / filename
@@ -430,3 +503,5 @@ def load_project(project_id: str) -> dict:
     if not path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
     return read_json(path)
+
+

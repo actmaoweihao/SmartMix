@@ -471,3 +471,32 @@ BPM、Key 和 Camelot 都是算法估计，复杂现场录音、弱节奏、古�
 更详细的技术方案、模块职责、API、算法原理和实现细节见：
 
 [TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md)
+
+## 双曲重组 / Mashup Builder
+
+SmartMix 现在提供 “双曲重组 / Mashup Builder” 第一版，用于把两首已上传歌曲自动拆成 8/16 小节段落，并基于 BPM、Camelot、energy、vocal density、timbre 和 transition candidates 生成 mashup / re-edit 拼接方案。它不训练模型，使用规则系统复用现有 `backend/analysis.py` 的节拍、小节、乐句、能量、调性和过渡候选分析。
+
+工作流：
+
+1. 在前端上传并分析至少两首歌。
+2. 在 “双曲重组 / Mashup Builder” 面板选择 Song A / Song B、mode、8/16 bars 和 useStems。
+3. 点击 “分析段落” 查看两首歌的 segment blocks。
+4. 点击 “生成拼接方案” 查看新的 plan 时间线和兼容性警告。
+5. 点击 “渲染试听/导出” 生成新的 WAV，下载链接由 `/api/exports/{filename}` 提供。
+
+支持模式：
+
+- `smooth_join`：A 的 intro/verse/chorus 接 B 的兼容 chorus/outro。
+- `hook_swap`：A verse、B chorus、A breakdown、B chorus/outro。
+- `a_vocal_b_instrumental`：A vocals 叠加 B instrumental。
+- `b_vocal_a_instrumental`：B vocals 叠加 A instrumental。
+- `energy_build`：低能量到高能量排序组合，确保两首歌都出现。
+- `auto`：从以上模板中选择评分最高的方案。
+
+如果 Demucs stems 缓存可用，layered 模式会使用 `vocals` stem 与另一首歌的 `drums + bass + other` instrumental 组合；否则会降级到 full mix 并在 warnings 中提示。渲染阶段会做 BPM 对齐，time-stretch 限制在 0.88x 到 1.12x，并进行 LUFS normalize。Camelot 不强制移调，第一版只输出调性兼容性 warnings。
+
+新增 API：
+
+- `POST /api/mashup/analyze`
+- `POST /api/mashup/plan`
+- `POST /api/mashup/render`
