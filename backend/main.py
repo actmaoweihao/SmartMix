@@ -116,6 +116,11 @@ class MashupPlanRequest(BaseModel):
     targetDurationSec: float = 180
     barsPerSegment: int = 16
     useStems: bool = True
+    transitionStrictness: str = "balanced"
+    stemUsage: str = "auto"
+    vocalPriority: str = "auto"
+    energyCurve: str = "smooth"
+    returnAlternatives: bool = True
 
 
 class MashupRenderRequest(BaseModel):
@@ -408,6 +413,11 @@ def mashup_plan(request: MashupPlanRequest) -> dict:
             target_duration_sec=request.targetDurationSec,
             bars_per_segment=request.barsPerSegment,
             use_stems=request.useStems,
+            transition_strictness=request.transitionStrictness,
+            stem_usage=request.stemUsage,
+            vocal_priority=request.vocalPriority,
+            energy_curve=request.energyCurve,
+            return_alternatives=request.returnAlternatives,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

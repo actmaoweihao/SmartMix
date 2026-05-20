@@ -61,6 +61,10 @@ const state = {
     mode: "auto",
     barsPerSegment: 16,
     useStems: true,
+    transitionStrictness: "balanced",
+    stemUsage: "auto",
+    vocalPriority: "auto",
+    energyCurve: "smooth",
     analysis: null,
     plan: null,
     renderResult: null,
@@ -314,6 +318,38 @@ app.innerHTML = `
               </select>
             </label>
             <label class="mashup-stems"><input id="mashupUseStems" type="checkbox" checked /><span>useStems</span></label>
+            <label>
+              <span>Transition strictness</span>
+              <select id="mashupTransitionStrictness">
+                <option value="conservative">conservative</option>
+                <option value="balanced" selected>balanced</option>
+                <option value="creative">creative</option>
+              </select>
+            </label>
+            <label>
+              <span>Stem usage</span>
+              <select id="mashupStemUsage">
+                <option value="auto" selected>auto</option>
+                <option value="force_full_mix">force full mix</option>
+                <option value="prefer_stems">prefer stems</option>
+              </select>
+            </label>
+            <label>
+              <span>Vocal priority</span>
+              <select id="mashupVocalPriority">
+                <option value="auto" selected>auto</option>
+                <option value="prefer_a">prefer A vocal</option>
+                <option value="prefer_b">prefer B vocal</option>
+              </select>
+            </label>
+            <label>
+              <span>Energy curve</span>
+              <select id="mashupEnergyCurve">
+                <option value="smooth" selected>smooth</option>
+                <option value="build">build</option>
+                <option value="drop_focused">drop-focused</option>
+              </select>
+            </label>
           </div>
           <div id="mashupSegments" class="mashup-segments"></div>
           <div id="mashupTimeline" class="mashup-timeline"></div>
@@ -498,6 +534,10 @@ const els = {
   mashupMode: document.querySelector("#mashupMode"),
   mashupBars: document.querySelector("#mashupBars"),
   mashupUseStems: document.querySelector("#mashupUseStems"),
+  mashupTransitionStrictness: document.querySelector("#mashupTransitionStrictness"),
+  mashupStemUsage: document.querySelector("#mashupStemUsage"),
+  mashupVocalPriority: document.querySelector("#mashupVocalPriority"),
+  mashupEnergyCurve: document.querySelector("#mashupEnergyCurve"),
   mashupAnalyzeButton: document.querySelector("#mashupAnalyzeButton"),
   mashupPlanButton: document.querySelector("#mashupPlanButton"),
   mashupRenderButton: document.querySelector("#mashupRenderButton"),
@@ -569,6 +609,11 @@ function bindEvents() {
   els.mashupMode.addEventListener("change", syncMashupSettings);
   els.mashupBars.addEventListener("change", syncMashupSettings);
   els.mashupUseStems.addEventListener("change", syncMashupSettings);
+  els.mashupTransitionStrictness.addEventListener("change", syncMashupSettings);
+  els.mashupStemUsage.addEventListener("change", syncMashupSettings);
+  els.mashupVocalPriority.addEventListener("change", syncMashupSettings);
+  els.mashupEnergyCurve.addEventListener("change", syncMashupSettings);
+  els.mashupTimeline.addEventListener("click", mashupTimelineClick);
   els.mashupAnalyzeButton.addEventListener("click", analyzeMashupSegments);
   els.mashupPlanButton.addEventListener("click", generateMashupPlan);
   els.mashupRenderButton.addEventListener("click", renderMashupExport);
@@ -2972,6 +3017,10 @@ function syncMashupSettings() {
   state.mashup.mode = els.mashupMode.value || "auto";
   state.mashup.barsPerSegment = Number(els.mashupBars.value) || 16;
   state.mashup.useStems = els.mashupUseStems.checked;
+  state.mashup.transitionStrictness = els.mashupTransitionStrictness.value || "balanced";
+  state.mashup.stemUsage = els.mashupStemUsage.value || "auto";
+  state.mashup.vocalPriority = els.mashupVocalPriority.value || "auto";
+  state.mashup.energyCurve = els.mashupEnergyCurve.value || "smooth";
   state.mashup.error = "";
   renderMashupPanel();
 }
@@ -3028,6 +3077,11 @@ async function generateMashupPlan() {
         ...mashupRequestBase(),
         mode: state.mashup.mode,
         targetDurationSec: 180,
+        transitionStrictness: state.mashup.transitionStrictness,
+        stemUsage: state.mashup.stemUsage,
+        vocalPriority: state.mashup.vocalPriority,
+        energyCurve: state.mashup.energyCurve,
+        returnAlternatives: true,
       }),
     });
     setStatus(`Mashup 方案已生成：${state.mashup.plan.score}/100`);
@@ -3079,6 +3133,21 @@ function mashupRequestBase() {
   };
 }
 
+function mashupTimelineClick(event) {
+  const button = event.target.closest?.("[data-mashup-alt]");
+  if (!button) return;
+  const index = Number(button.dataset.mashupAlt);
+  const alternative = state.mashup.plan?.alternativePlans?.[index];
+  if (!alternative) return;
+  state.mashup.plan = {
+    ...state.mashup.plan,
+    ...alternative,
+    alternativePlans: state.mashup.plan.alternativePlans,
+  };
+  state.mashup.renderResult = null;
+  renderMashupPanel();
+}
+
 function ensureMashupSelection() {
   const ready = playableTracks();
   const ids = ready.map((track) => track.id);
@@ -3102,6 +3171,10 @@ function renderMashupPanel() {
   els.mashupMode.value = state.mashup.mode;
   els.mashupBars.value = String(state.mashup.barsPerSegment);
   els.mashupUseStems.checked = state.mashup.useStems;
+  els.mashupTransitionStrictness.value = state.mashup.transitionStrictness;
+  els.mashupStemUsage.value = state.mashup.stemUsage;
+  els.mashupVocalPriority.value = state.mashup.vocalPriority;
+  els.mashupEnergyCurve.value = state.mashup.energyCurve;
 
   const validPair = Boolean(state.mashup.trackAId && state.mashup.trackBId && state.mashup.trackAId !== state.mashup.trackBId);
   els.mashupAnalyzeButton.disabled = !validPair || state.mashup.analyzing;
@@ -3146,14 +3219,20 @@ function renderMashupSegmentColumn(title, segments) {
 function renderMashupSegmentBlock(segment) {
   const energy = Math.round((Number(segment.energy) || 0) * 100);
   const vocal = Math.round((Number(segment.vocalDensity) || 0) * 100);
+  const bass = Math.round((Number(segment.bassEnergy) || 0) * 100);
+  const cleanEntry = segment.isCleanEntry ? "clean in" : "risky in";
+  const cleanExit = segment.isCleanExit ? "clean out" : "risky out";
+  const risks = (segment.riskFlags || []).slice(0, 3);
   return `
     <article class="mashup-segment-block ${escapeHtml(segment.source || "")}">
       <div><strong>${escapeHtml(segment.label || "segment")}</strong><span>${formatTime(segment.start)}-${formatTime(segment.end)}</span></div>
       <div class="mashup-mini-meters">
         <span style="--value:${energy}%">E ${energy}</span>
         <span style="--value:${vocal}%">V ${vocal}</span>
+        <span style="--value:${bass}%">B ${bass}</span>
       </div>
-      <small>${escapeHtml(segment.camelot || "--")} · ${formatNumber(segment.bpm, 1)} BPM · in ${Math.round((segment.mixInScore || 0) * 100)} / out ${Math.round((segment.mixOutScore || 0) * 100)}</small>
+      <small>${escapeHtml(segment.camelot || "--")} · ${formatNumber(segment.bpm, 1)} BPM · ${cleanEntry} / ${cleanExit}</small>
+      ${risks.length ? `<div class="mashup-flags">${risks.map((risk) => `<span>${escapeHtml(risk)}</span>`).join("")}</div>` : ""}
     </article>
   `;
 }
@@ -3166,14 +3245,18 @@ function renderMashupTimeline() {
   }
   const plan = result.plan;
   const total = Math.max(1, ...plan.map((item) => Number(item.timelineEnd) || 0));
+  const report = result.qualityReport || {};
   els.mashupTimeline.innerHTML = `
     <div class="mashup-plan-head">
       <strong>Score ${result.score}/100</strong>
       <span>${escapeHtml(result.mode || state.mashup.mode)} · ${formatTime(total)}</span>
     </div>
+    ${report.summary ? `<p class="mashup-summary">${escapeHtml(report.summary)}</p>` : ""}
     <div class="mashup-plan-stage">
       ${plan.map((item) => renderMashupPlanItem(item, total)).join("")}
     </div>
+    ${renderMashupQualityReport(report)}
+    ${renderMashupAlternatives(result.alternativePlans || [])}
     ${(result.warnings || []).length ? `<div class="mashup-warnings">${result.warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
   `;
 }
@@ -3182,12 +3265,46 @@ function renderMashupPlanItem(item, total) {
   const left = clamp(((Number(item.timelineStart) || 0) / total) * 100, 0, 100);
   const width = clamp((((Number(item.timelineEnd) || 0) - (Number(item.timelineStart) || 0)) / total) * 100, 1, 100);
   const lane = item.layerMode === "vocals" ? 1 : item.layerMode === "instrumental" || item.layerMode === "drums_bass_other" ? 2 : item.source === "B" ? 1 : 0;
+  const transition = transitionName(item.transitionIn);
+  const score = Math.round(Number(item.quality?.score) || 0);
+  const warnings = (item.quality?.warnings || []).slice(0, 2);
   return `
     <div class="mashup-plan-item lane-${lane} ${escapeHtml(item.source || "")}" style="left:${left}%;width:${width}%">
-      <strong>${escapeHtml(item.source)} · ${escapeHtml(item.layerMode)}</strong>
-      <span>${formatTime(item.sourceStart)}-${formatTime(item.sourceEnd)} · ${escapeHtml(item.transitionIn || "none")}</span>
+      <strong>${escapeHtml(item.source)} · ${escapeHtml(item.segmentLabel || item.layerMode)}</strong>
+      <span>${escapeHtml(item.layerMode)} · ${escapeHtml(transition)} · ${score}/100</span>
+      ${warnings.length ? `<small>${warnings.map(escapeHtml).join(" · ")}</small>` : `<small>${formatTime(item.sourceStart)}-${formatTime(item.sourceEnd)}</small>`}
     </div>
   `;
+}
+
+function renderMashupQualityReport(report) {
+  if (!report || (!report.strengths?.length && !report.warnings?.length && !report.transitionReports?.length)) return "";
+  return `
+    <div class="mashup-quality-report">
+      ${report.strengths?.length ? `<div><strong>Strengths</strong>${report.strengths.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+      ${report.warnings?.length ? `<div><strong>Warnings</strong>${report.warnings.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+      ${report.transitionReports?.length ? `<div><strong>Transitions</strong>${report.transitionReports
+        .slice(0, 4)
+        .map((item) => `<span>${escapeHtml(item.from)} -> ${escapeHtml(item.to)} · ${escapeHtml(item.type)} · ${Math.round(item.score || 0)}/100</span>`)
+        .join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderMashupAlternatives(alternatives) {
+  if (!alternatives.length) return "";
+  return `
+    <div class="mashup-alternatives">
+      <strong>Alternative plans</strong>
+      ${alternatives.map((plan, index) => `<button type="button" data-mashup-alt="${index}">${escapeHtml(plan.mode || "alt")} · ${Math.round(plan.score || 0)}/100</button>`).join("")}
+    </div>
+  `;
+}
+
+function transitionName(transition) {
+  if (!transition) return "none";
+  if (typeof transition === "string") return transition;
+  return transition.type || "none";
 }
 
 function renderMashupResult() {
@@ -3197,12 +3314,16 @@ function renderMashupResult() {
     return;
   }
   const url = `${API}${result.downloadUrl}`;
+  const report = result.report || {};
+  const warnings = report.warnings || [];
   els.mashupResult.innerHTML = `
     <div class="mashup-rendered">
       <strong>已渲染 ${escapeHtml(result.report?.filename || "mashup.wav")}</strong>
       <audio controls preload="none" src="${url}"></audio>
       <a href="${url}" target="_blank" rel="noreferrer">下载 WAV</a>
+      <span>${formatNumber(report.finalLufs, 1)} LUFS · peak ${formatNumber(report.peak, 3)} · ${formatTime(report.duration || 0)}</span>
     </div>
+    ${warnings.length ? `<div class="mashup-warnings">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
   `;
 }
 

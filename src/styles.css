@@ -1034,7 +1034,7 @@ input[type="range"] {
 
 .mashup-mini-meters {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -1043,6 +1043,21 @@ input[type="range"] {
   background: linear-gradient(90deg, var(--accent-2) var(--value), rgba(255, 255, 255, 0.08) var(--value));
   color: var(--text);
   font-size: 11px;
+  font-weight: 800;
+  padding: 2px 5px;
+}
+
+.mashup-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mashup-flags span {
+  border: 1px solid rgba(240, 207, 90, 0.36);
+  background: rgba(240, 207, 90, 0.1);
+  color: var(--muted);
+  font-size: 10px;
   font-weight: 800;
   padding: 2px 5px;
 }
@@ -1057,6 +1072,12 @@ input[type="range"] {
 
 .mashup-plan-head strong {
   color: var(--accent);
+}
+
+.mashup-summary {
+  margin: 0 0 10px;
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .mashup-plan-stage {
@@ -1079,6 +1100,14 @@ input[type="range"] {
   border: 1px solid rgba(48, 213, 160, 0.6);
   background: rgba(48, 213, 160, 0.28);
   padding: 0 8px;
+}
+
+.mashup-plan-item small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mashup-plan-item.B {
@@ -1104,6 +1133,48 @@ input[type="range"] {
   display: grid;
   gap: 6px;
   margin-top: 8px;
+}
+
+.mashup-quality-report,
+.mashup-alternatives {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  padding: 10px;
+}
+
+.mashup-quality-report div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.mashup-quality-report strong,
+.mashup-alternatives strong {
+  color: var(--text);
+  margin-right: 4px;
+}
+
+.mashup-quality-report span {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  padding: 5px 7px;
+}
+
+.mashup-alternatives {
+  grid-template-columns: auto repeat(3, minmax(0, 1fr));
+  align-items: center;
+}
+
+.mashup-alternatives button {
+  min-height: 34px;
+  border-color: rgba(101, 215, 242, 0.36);
+  background: rgba(101, 215, 242, 0.12);
+  color: var(--text);
 }
 
 .mashup-warnings span,
@@ -1141,6 +1212,11 @@ input[type="range"] {
   border: 1px solid rgba(48, 213, 160, 0.4);
   background: rgba(48, 213, 160, 0.08);
   padding: 10px;
+}
+
+.mashup-rendered span {
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .mashup-rendered audio {

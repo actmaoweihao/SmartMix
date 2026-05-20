@@ -500,3 +500,27 @@ SmartMix 现在提供 “双曲重组 / Mashup Builder” 第一版，用于把�
 - `POST /api/mashup/analyze`
 - `POST /api/mashup/plan`
 - `POST /api/mashup/render`
+
+## 双曲重组 / Mashup Builder v2
+
+新版 Mashup Builder 不再只是固定长度段落拼接，而是一个音乐感知的双曲重组原型。系统会优先使用 `phrases`、`bars` 和 `transition_candidates` 寻找更自然的段落边界，并避免把切点放在强人声中间；如果结构信息不足，才回退到 8/16/32 小节候选段落。
+
+计划生成会根据 BPM stretch ratio、Camelot 兼容性、phrase/downbeat 对齐、energy flow、人声冲突、低频冲突和 brightness/timbre 差异进行可解释评分。系统会自动选择 `hard_cut`、`crossfade`、`bass_swap`、`filter_sweep`、`echo_out`、`reverb_tail`、`vocal_over_instrumental` 或 `breakdown_bridge` 等过渡策略，并在 quality report 里解释每个转场为什么这样处理。
+
+当 Demucs stems 可用时，`a_vocal_b_instrumental` 和 `b_vocal_a_instrumental` 会使用一首歌的 `vocals` stem 叠加另一首歌的 `drums + bass + other` instrumental，并对人声冲突和低频冲突做 duck / mute / bass swap。没有 stems 时不会假装能干净分离，会回退到 full mix 并返回 warning。
+
+渲染器现在使用 timeline buffer，而不是简单 append；支持 equal-power crossfade、downbeat hard cut micro fade、stem-aware vocal + instrumental、bass swap、简单 filter sweep、echo out / reverb tail、LUFS normalize 和最终 limiter。Rubber Band / Demucs 可提升效果；不可用时会使用现有 fallback。
+
+`POST /api/mashup/plan` 仍兼容旧参数，并新增可选项：
+
+```json
+{
+  "transitionStrictness": "balanced",
+  "stemUsage": "auto",
+  "vocalPriority": "auto",
+  "energyCurve": "smooth",
+  "returnAlternatives": true
+}
+```
+
+返回中会包含 `qualityReport` 和可选 `alternativePlans`。请注意：这仍然是规则系统 + DSP 的 re-edit/mashup 原型，不是专业人工 remix 的完全替代；它的目标是给出更可听、更可解释、可继续人工微调的第一版方案。
