@@ -120,11 +120,15 @@ class MashupPlanRequest(BaseModel):
     stemUsage: str = "auto"
     vocalPriority: str = "auto"
     energyCurve: str = "smooth"
+    bedPreference: str = "auto"
+    allowHybridBed: bool = True
+    allowVocalPitchShift: bool = False
+    maxVocalStretch: float = 1.06
     returnAlternatives: bool = True
 
 
 class MashupRenderRequest(BaseModel):
-    plan: list[dict]
+    plan: list[dict] | dict
     format: str = "wav"
     targetLufs: float = -14
     useStems: bool = True
@@ -417,6 +421,10 @@ def mashup_plan(request: MashupPlanRequest) -> dict:
             stem_usage=request.stemUsage,
             vocal_priority=request.vocalPriority,
             energy_curve=request.energyCurve,
+            bed_preference=request.bedPreference,
+            allow_hybrid_bed=request.allowHybridBed,
+            allow_vocal_pitch_shift=request.allowVocalPitchShift,
+            max_vocal_stretch=request.maxVocalStretch,
             return_alternatives=request.returnAlternatives,
         )
     except ValueError as exc:
@@ -427,7 +435,18 @@ def mashup_plan(request: MashupPlanRequest) -> dict:
 
 @app.post("/api/mashup/render")
 def mashup_render(request: MashupRenderRequest) -> dict:
-    track_ids = sorted({str(item.get("trackId") or "") for item in request.plan if item.get("trackId")})
+    plan_items = request.plan.get("layers", []) + request.plan.get("items", request.plan.get("plan", [])) if isinstance(request.plan, dict) else request.plan
+    track_ids = {str(item.get("trackId") or "") for item in plan_items if item.get("trackId")}
+    if isinstance(request.plan, dict) and request.plan.get("groovePlan"):
+        groove = request.plan["groovePlan"]
+        bed = groove.get("bed") or {}
+        for key in ("drumsTrackId", "bassTrackId", "otherTrackId"):
+            if bed.get(key):
+                track_ids.add(str(bed[key]))
+        for event in groove.get("vocalEvents", []):
+            if event.get("trackId"):
+                track_ids.add(str(event["trackId"]))
+    track_ids = sorted(track_id for track_id in track_ids if track_id)
     tracks_by_id = {track_id: _read_track_meta(track_id) for track_id in track_ids}
     try:
         return render_mashup_plan(

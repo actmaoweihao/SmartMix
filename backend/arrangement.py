@@ -36,6 +36,15 @@ def build_music_segments(
     if duration <= 0:
         return []
     source = source or str(track.get("source") or "A")
+    try:
+        from .segmentation import analyze_track_segmentation
+
+        report = analyze_track_segmentation(track, source, audio=audio, sr=sr)
+        sections = report.get("sections") or []
+        if sections:
+            return _segments_from_segmentation_report(track, source, sections, report)
+    except Exception:
+        pass
     bpm = _float(track.get("bpm"), 120.0)
     bars = normalized_bars(track, duration, bpm)
     phrases = normalized_phrases(track, bars, duration)
@@ -98,6 +107,65 @@ def build_music_segments(
     return segments
 
 
+def _segments_from_segmentation_report(track: dict[str, Any], source: str, sections: list[dict[str, Any]], report: dict[str, Any]) -> list[dict[str, Any]]:
+    bars = [float(item["start"]) for item in report.get("barFeatures", []) if _is_number(item.get("start"))]
+    if report.get("barFeatures"):
+        bars.append(float(report["barFeatures"][-1]["end"]))
+    phrases = [float(item.get("time")) for item in report.get("safeCutPoints", []) if item.get("type") in {"vocal_entry", "vocal_exit", "drop_entry", "breakdown_entry"} and _is_number(item.get("time"))]
+    segments = []
+    for section in sections:
+        if int(section.get("bars", 0)) < 4:
+            continue
+        start = float(section.get("start", 0.0))
+        end = float(section.get("end", start))
+        if end <= start:
+            continue
+        bar_start = int(section.get("barStart", nearest_index(bars, start)))
+        bar_end = int(section.get("barEnd", nearest_index(bars, end)))
+        bar_features = report.get("barFeatures", [])[bar_start:bar_end]
+        vocal_start = float(bar_features[0].get("vocalDensity", section.get("vocalDensity", 0.0))) if bar_features else float(section.get("vocalDensity", 0.0))
+        vocal_end = float(bar_features[-1].get("vocalDensity", section.get("vocalDensity", 0.0))) if bar_features else float(section.get("vocalDensity", 0.0))
+        energy_start = float(bar_features[0].get("energy", section.get("meanEnergy", 0.0))) if bar_features else float(section.get("meanEnergy", 0.0))
+        energy_end = float(bar_features[-1].get("energy", section.get("meanEnergy", 0.0))) if bar_features else float(section.get("meanEnergy", 0.0))
+        segment = {
+            "id": f"{source}_seg_{len(segments) + 1:03d}",
+            "sectionId": section.get("id"),
+            "trackId": track.get("id"),
+            "source": source,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "duration": round(end - start, 3),
+            "barStart": bar_start,
+            "barEnd": bar_end,
+            "phraseStart": nearest_index(phrases, start) if phrases else 0,
+            "phraseEnd": nearest_index(phrases, end) if phrases else 0,
+            "downbeatTime": round(start, 3),
+            "label": section.get("label", "unknown"),
+            "energy": round(float(section.get("meanEnergy", 0.0)), 4),
+            "energyStart": round(energy_start, 4),
+            "energyEnd": round(energy_end, 4),
+            "energyDelta": round(float(np.clip(energy_end - energy_start, -1, 1)), 4),
+            "vocalDensity": round(float(section.get("vocalDensity", 0.0)), 4),
+            "vocalStart": round(vocal_start, 4),
+            "vocalEnd": round(vocal_end, 4),
+            "bassEnergy": round(float(section.get("bassEnergy", 0.0)), 4),
+            "drumActivity": round(float(section.get("drumActivity", 0.0)), 4),
+            "brightness": round(float(section.get("brightness", 0.0)), 4),
+            "spectralChange": round(float(max((item.get("spectralFlux", 0.0) for item in bar_features), default=0.0)), 4),
+            "bpm": round(_float(track.get("bpm"), 120.0), 3),
+            "camelot": track.get("camelot"),
+            "key": track.get("key"),
+            "mixInScore": round(float(section.get("mixInScore", 0.0)), 4),
+            "mixOutScore": round(float(section.get("mixOutScore", 0.0)), 4),
+            "isCleanEntry": bool(section.get("entryClean", True)),
+            "isCleanExit": bool(section.get("exitClean", True)),
+            "riskFlags": list(section.get("riskFlags") or []),
+            "segmentationConfidence": section.get("confidence"),
+        }
+        segments.append(segment)
+    return segments
+
+
 def build_track_segments(
     track: dict[str, Any],
     source: str,
@@ -150,12 +218,14 @@ def segment_metrics(
     duration = max(0.1, end - start)
     head_end = min(end, start + min(2.0, duration * 0.28))
     tail_start = max(start, end - min(2.0, duration * 0.28))
-    energy = curve_average(track.get("energy_curve") or [], "energy", start, end, fallback=track.get("energy", 0.45))
-    energy_start = curve_average(track.get("energy_curve") or [], "energy", start, head_end, fallback=energy)
-    energy_end = curve_average(track.get("energy_curve") or [], "energy", tail_start, end, fallback=energy)
-    vocal = curve_average(track.get("vocal_density_curve") or [], "density", start, end, fallback=_section_vocal_hint(track, start, end))
-    vocal_start = curve_average(track.get("vocal_density_curve") or [], "density", start, head_end, fallback=vocal)
-    vocal_end = curve_average(track.get("vocal_density_curve") or [], "density", tail_start, end, fallback=vocal)
+    energy_curve = _energy_curve(track)
+    vocal_curve = _vocal_density_curve(track)
+    energy = curve_average(energy_curve, "energy", start, end, fallback=track.get("energy", 0.45))
+    energy_start = curve_average(energy_curve, "energy", start, head_end, fallback=energy)
+    energy_end = curve_average(energy_curve, "energy", tail_start, end, fallback=energy)
+    vocal = curve_average(vocal_curve, "density", start, end, fallback=_section_vocal_hint(track, start, end))
+    vocal_start = curve_average(vocal_curve, "density", start, head_end, fallback=vocal)
+    vocal_end = curve_average(vocal_curve, "density", tail_start, end, fallback=vocal)
     bass = 0.32 + energy * 0.36
     drums = 0.34 + energy * 0.38
     brightness = 0.45
@@ -394,6 +464,33 @@ def curve_average(points: list[dict[str, Any]], key: str, start: float, end: flo
     return _float(fallback, 0.5)
 
 
+def _energy_curve(track: dict[str, Any]) -> list[dict[str, Any]]:
+    curve = track.get("energy_curve")
+    if isinstance(curve, list) and curve:
+        return curve
+    profile = track.get("energy_profile")
+    if isinstance(profile, list):
+        return [item for item in profile if isinstance(item, dict) and _is_number(item.get("time")) and _is_number(item.get("energy"))]
+    candidates = track.get("transition_candidates") or {}
+    points = []
+    for key, time_key in (("intro_energy", "intro"), ("outro_energy", "outro")):
+        if _is_number(candidates.get(key)) and _is_number(candidates.get(time_key)):
+            points.append({"time": float(candidates[time_key]), "energy": float(candidates[key])})
+    return points
+
+
+def _vocal_density_curve(track: dict[str, Any]) -> list[dict[str, Any]]:
+    curve = track.get("vocal_density_curve")
+    if isinstance(curve, list) and curve:
+        return curve
+    candidates = track.get("transition_candidates") or {}
+    points = []
+    for key, time_key in (("intro_vocal_density", "intro"), ("outro_vocal_density", "outro")):
+        if _is_number(candidates.get(key)) and _is_number(candidates.get(time_key)):
+            points.append({"time": float(candidates[time_key]), "density": float(candidates[key])})
+    return points
+
+
 def mix_boundary_score(track: dict[str, Any], time_value: float, metrics: dict[str, float], direction: str = "in") -> float:
     candidates = track.get("transition_candidates") or {}
     anchors = []
@@ -438,25 +535,64 @@ def _candidate_boundaries(track: dict[str, Any], bars: list[float], phrases: lis
         boundaries.append(duration)
 
     candidates = track.get("transition_candidates") or {}
+    for key in ("intro", "outro"):
+        value = candidates.get(key)
+        if _is_number(value) and _candidate_anchor_is_useful(candidates, key) and _anchor_has_min_bar_room(float(value), boundaries, bars):
+            boundaries.append(float(value))
+    return _dedupe_times([0.0, *boundaries, duration])
+
+
+def _candidate_anchor_is_useful(candidates: dict[str, Any], key: str) -> bool:
     confidence = _float(candidates.get("confidence"), 0.0)
     if confidence >= 0.55:
-        for key in ("intro", "outro"):
-            value = candidates.get(key)
-            if _is_number(value):
-                boundaries.append(float(value))
-    return _dedupe_times([0.0, *boundaries, duration])
+        return True
+    vocal = candidates.get(f"{key}_vocal_density")
+    energy = candidates.get(f"{key}_energy")
+    if _is_number(vocal) and float(vocal) <= 0.48:
+        return True
+    if _is_number(energy) and float(energy) <= 0.45:
+        return True
+    return confidence >= 0.35
+
+
+def _anchor_has_min_bar_room(anchor: float, boundaries: list[float], bars: list[float], min_bars: int = 4) -> bool:
+    if not bars:
+        return True
+    anchor_index = nearest_index(bars, anchor)
+    existing = sorted(set(boundaries))
+    previous = max((value for value in existing if value < anchor - 0.05), default=None)
+    next_value = min((value for value in existing if value > anchor + 0.05), default=None)
+    if previous is not None and anchor_index - nearest_index(bars, previous) < min_bars:
+        return False
+    if next_value is not None and nearest_index(bars, next_value) - anchor_index < min_bars:
+        return False
+    return True
 
 
 def _move_boundary_off_vocals(track: dict[str, Any], bars: list[float], boundary: float) -> float:
     if boundary <= 0 or boundary >= bars[-1]:
         return boundary
-    local_vocal = curve_average(track.get("vocal_density_curve") or [], "density", boundary - 1.5, boundary + 1.5, fallback=0.0)
+    vocal_curve = _vocal_density_curve(track)
+    local_vocal = curve_average(vocal_curve, "density", boundary - 1.5, boundary + 1.5, fallback=_boundary_vocal_hint(track, boundary))
     if local_vocal < 0.62:
         return boundary
     nearby = [bar for bar in bars if abs(bar - boundary) <= 8.0]
     if not nearby:
         return boundary
-    return min(nearby, key=lambda bar: curve_average(track.get("vocal_density_curve") or [], "density", bar - 1.5, bar + 1.5, fallback=local_vocal) + abs(bar - boundary) * 0.02)
+    return min(nearby, key=lambda bar: curve_average(vocal_curve, "density", bar - 1.5, bar + 1.5, fallback=_boundary_vocal_hint(track, bar)) + abs(bar - boundary) * 0.02)
+
+
+def _boundary_vocal_hint(track: dict[str, Any], boundary: float) -> float:
+    candidates = track.get("transition_candidates") or {}
+    values = []
+    for key, density_key in (("intro", "intro_vocal_density"), ("outro", "outro_vocal_density")):
+        if _is_number(candidates.get(key)) and _is_number(candidates.get(density_key)):
+            distance = abs(float(candidates[key]) - boundary)
+            if distance <= 4.0:
+                values.append((distance, float(candidates[density_key])))
+    if values:
+        return min(values, key=lambda item: item[0])[1]
+    return _section_vocal_hint(track, max(0.0, boundary - 1.0), boundary + 1.0)
 
 
 def _snap_boundaries(boundaries: list[float], bars: list[float], phrases: list[float], duration: float) -> list[float]:

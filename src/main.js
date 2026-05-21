@@ -58,13 +58,17 @@ const state = {
   mashup: {
     trackAId: null,
     trackBId: null,
-    mode: "auto",
+    mode: "groove_vocal_handoff",
     barsPerSegment: 16,
     useStems: true,
     transitionStrictness: "balanced",
     stemUsage: "auto",
     vocalPriority: "auto",
     energyCurve: "smooth",
+    bedPreference: "auto",
+    allowHybridBed: true,
+    allowVocalPitchShift: false,
+    maxVocalStretch: 1.06,
     analysis: null,
     plan: null,
     renderResult: null,
@@ -302,7 +306,12 @@ app.innerHTML = `
             <label>
               <span>Mode</span>
               <select id="mashupMode">
-                <option value="auto">auto</option>
+                <option value="groove_vocal_handoff">Groove 人声接力</option>
+                <option value="a_vocal_on_b_groove">A 人声 + B Groove</option>
+                <option value="b_vocal_on_a_groove">B 人声 + A Groove</option>
+                <option value="call_response_groove">Call/Response Groove</option>
+                <option value="hook_exchange_groove">Hook 交换 Groove</option>
+                <option value="auto">auto (Groove first)</option>
                 <option value="smooth_join">smooth_join</option>
                 <option value="hook_swap">hook_swap</option>
                 <option value="a_vocal_b_instrumental">A vocals + B instrumental</option>
@@ -348,6 +357,24 @@ app.innerHTML = `
                 <option value="smooth" selected>smooth</option>
                 <option value="build">build</option>
                 <option value="drop_focused">drop-focused</option>
+              </select>
+            </label>
+            <label>
+              <span>Groove bed</span>
+              <select id="mashupBedPreference">
+                <option value="auto" selected>auto</option>
+                <option value="A">prefer A bed</option>
+                <option value="B">prefer B bed</option>
+              </select>
+            </label>
+            <label class="mashup-stems"><input id="mashupAllowHybridBed" type="checkbox" checked /><span>allow hybrid bed</span></label>
+            <label class="mashup-stems"><input id="mashupAllowVocalPitchShift" type="checkbox" /><span>allow vocal pitch</span></label>
+            <label>
+              <span>Max vocal stretch</span>
+              <select id="mashupMaxVocalStretch">
+                <option value="1.03">1.03 conservative</option>
+                <option value="1.06" selected>1.06 balanced</option>
+                <option value="1.10">1.10 creative</option>
               </select>
             </label>
           </div>
@@ -538,6 +565,10 @@ const els = {
   mashupStemUsage: document.querySelector("#mashupStemUsage"),
   mashupVocalPriority: document.querySelector("#mashupVocalPriority"),
   mashupEnergyCurve: document.querySelector("#mashupEnergyCurve"),
+  mashupBedPreference: document.querySelector("#mashupBedPreference"),
+  mashupAllowHybridBed: document.querySelector("#mashupAllowHybridBed"),
+  mashupAllowVocalPitchShift: document.querySelector("#mashupAllowVocalPitchShift"),
+  mashupMaxVocalStretch: document.querySelector("#mashupMaxVocalStretch"),
   mashupAnalyzeButton: document.querySelector("#mashupAnalyzeButton"),
   mashupPlanButton: document.querySelector("#mashupPlanButton"),
   mashupRenderButton: document.querySelector("#mashupRenderButton"),
@@ -613,6 +644,10 @@ function bindEvents() {
   els.mashupStemUsage.addEventListener("change", syncMashupSettings);
   els.mashupVocalPriority.addEventListener("change", syncMashupSettings);
   els.mashupEnergyCurve.addEventListener("change", syncMashupSettings);
+  els.mashupBedPreference.addEventListener("change", syncMashupSettings);
+  els.mashupAllowHybridBed.addEventListener("change", syncMashupSettings);
+  els.mashupAllowVocalPitchShift.addEventListener("change", syncMashupSettings);
+  els.mashupMaxVocalStretch.addEventListener("change", syncMashupSettings);
   els.mashupTimeline.addEventListener("click", mashupTimelineClick);
   els.mashupAnalyzeButton.addEventListener("click", analyzeMashupSegments);
   els.mashupPlanButton.addEventListener("click", generateMashupPlan);
@@ -3021,6 +3056,10 @@ function syncMashupSettings() {
   state.mashup.stemUsage = els.mashupStemUsage.value || "auto";
   state.mashup.vocalPriority = els.mashupVocalPriority.value || "auto";
   state.mashup.energyCurve = els.mashupEnergyCurve.value || "smooth";
+  state.mashup.bedPreference = els.mashupBedPreference.value || "auto";
+  state.mashup.allowHybridBed = els.mashupAllowHybridBed.checked;
+  state.mashup.allowVocalPitchShift = els.mashupAllowVocalPitchShift.checked;
+  state.mashup.maxVocalStretch = Number(els.mashupMaxVocalStretch.value) || 1.06;
   state.mashup.error = "";
   renderMashupPanel();
 }
@@ -3081,6 +3120,10 @@ async function generateMashupPlan() {
         stemUsage: state.mashup.stemUsage,
         vocalPriority: state.mashup.vocalPriority,
         energyCurve: state.mashup.energyCurve,
+        bedPreference: state.mashup.bedPreference,
+        allowHybridBed: state.mashup.allowHybridBed,
+        allowVocalPitchShift: state.mashup.allowVocalPitchShift,
+        maxVocalStretch: state.mashup.maxVocalStretch,
         returnAlternatives: true,
       }),
     });
@@ -3109,7 +3152,7 @@ async function renderMashupExport() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        plan: state.mashup.plan.plan,
+        plan: state.mashup.plan,
         format: "wav",
         targetLufs: -14,
         useStems: state.mashup.useStems,
@@ -3175,6 +3218,10 @@ function renderMashupPanel() {
   els.mashupStemUsage.value = state.mashup.stemUsage;
   els.mashupVocalPriority.value = state.mashup.vocalPriority;
   els.mashupEnergyCurve.value = state.mashup.energyCurve;
+  els.mashupBedPreference.value = state.mashup.bedPreference;
+  els.mashupAllowHybridBed.checked = state.mashup.allowHybridBed;
+  els.mashupAllowVocalPitchShift.checked = state.mashup.allowVocalPitchShift;
+  els.mashupMaxVocalStretch.value = String(state.mashup.maxVocalStretch);
 
   const validPair = Boolean(state.mashup.trackAId && state.mashup.trackBId && state.mashup.trackAId !== state.mashup.trackBId);
   els.mashupAnalyzeButton.disabled = !validPair || state.mashup.analyzing;
@@ -3202,6 +3249,45 @@ function renderMashupSegments() {
   els.mashupSegments.innerHTML = `
     ${renderMashupSegmentColumn("Song A", analysis.trackA?.segments || [])}
     ${renderMashupSegmentColumn("Song B", analysis.trackB?.segments || [])}
+    ${renderSegmentationDebug(analysis.segmentationReport)}
+  `;
+}
+
+function renderSegmentationDebug(report) {
+  if (!report || (!report.trackA && !report.trackB)) return "";
+  return `
+    <section class="mashup-seg-debug">
+      <header><strong>Segmentation Debug</strong><span>multi-scale SSM / novelty / stems</span></header>
+      ${renderSegmentationTrackDebug("Song A", report.trackA)}
+      ${renderSegmentationTrackDebug("Song B", report.trackB)}
+    </section>
+  `;
+}
+
+function renderSegmentationTrackDebug(title, report) {
+  if (!report) return "";
+  const sections = report.sections || [];
+  const minorSections = report.minorSections || [];
+  const phrases = report.vocalPhrases || [];
+  const beds = report.grooveBedCandidates || [];
+  const safe = report.safeCutPoints || [];
+  const warnings = report.warnings || [];
+  return `
+    <article class="mashup-seg-track">
+      <div class="mashup-plan-head">
+        <strong>${escapeHtml(title)}</strong>
+        <small>${sections.length} major / ${minorSections.length} minor / ${phrases.length} vocal phrases / ${beds.length} beds</small>
+        <span>${escapeHtml(report.method || "segmentation")} · ${sections.length} sections · ${phrases.length} vocal phrases · ${beds.length} beds</span>
+      </div>
+      ${warnings.length ? `<div class="mashup-warnings">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
+      <div class="mashup-quality-report">
+        <div><strong>Minor sections</strong>${minorSections.slice(0, 8).map((item) => `<span>${escapeHtml(item.label || "unknown")} / b${item.barStart}-${item.barEnd} / ${item.bars} bars / ${escapeHtml((item.riskFlags || []).join(", ") || "clean")}</span>`).join("")}</div>
+        <div><strong>Structural sections</strong>${sections.slice(0, 8).map((item) => `<span>${escapeHtml(item.label || "unknown")} · b${item.barStart}-${item.barEnd} · ${Math.round((Number(item.confidence) || 0) * 100)}% · ${escapeHtml((item.riskFlags || []).join(", ") || "clean")}</span>`).join("")}</div>
+        <div><strong>Vocal phrases</strong>${phrases.slice(0, 8).map((item) => `<span>${escapeHtml(item.id || "phrase")} · ${item.bars} bars · score ${Math.round(item.score || 0)} · ${item.hasPickup ? "pickup " : ""}${item.hasTail ? "tail " : ""}${escapeHtml((item.riskFlags || []).join(", "))}</span>`).join("")}</div>
+        <div><strong>Groove beds</strong>${beds.slice(0, 5).map((item) => `<span>${escapeHtml(item.id || "bed")} · ${item.bars} bars · loop ${Math.round((Number(item.loopability) || 0) * 100)} · leak ${Math.round((Number(item.vocalLeakage) || 0) * 100)} · ${Math.round(item.score || 0)}/100</span>`).join("")}</div>
+        <div><strong>Safe cut points</strong>${safe.slice(0, 6).map((item) => `<span>${formatTime(item.time)} · ${escapeHtml(item.type)} · ${Math.round((Number(item.score) || 0) * 100)} · ${escapeHtml((item.riskFlags || []).join(", ") || "safe")}</span>`).join("")}</div>
+      </div>
+    </article>
   `;
 }
 
@@ -3239,25 +3325,86 @@ function renderMashupSegmentBlock(segment) {
 
 function renderMashupTimeline() {
   const result = state.mashup.plan;
+  if (result?.groovePlan && !result?.plan?.length) {
+    const warnings = result.warnings || result.groovePlan.globalWarnings || [];
+    els.mashupTimeline.innerHTML = `
+      <div class="mashup-plan-head">
+        <strong>Groove 人声接力不可用</strong>
+        <span>${escapeHtml(result.groovePlan.status || "no_plan")}</span>
+      </div>
+      <div class="mashup-warnings">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>
+    `;
+    return;
+  }
   if (!result?.plan?.length) {
     els.mashupTimeline.innerHTML = `<div class="mashup-empty">生成方案后，这里会显示新的拼接时间线。</div>`;
+    return;
+  }
+  if (result.groovePlan?.bed) {
+    els.mashupTimeline.innerHTML = renderGrooveMashupTimeline(result);
     return;
   }
   const plan = result.plan;
   const total = Math.max(1, ...plan.map((item) => Number(item.timelineEnd) || 0));
   const report = result.qualityReport || {};
+  const transitions = result.transitions || [];
   els.mashupTimeline.innerHTML = `
     <div class="mashup-plan-head">
       <strong>Score ${result.score}/100</strong>
-      <span>${escapeHtml(result.mode || state.mashup.mode)} · ${formatTime(total)}</span>
+      <span>${escapeHtml(result.mode || state.mashup.mode)} · ${formatTime(total)} · ${formatNumber(result.targetBpm, 1)} BPM</span>
     </div>
     ${report.summary ? `<p class="mashup-summary">${escapeHtml(report.summary)}</p>` : ""}
     <div class="mashup-plan-stage">
       ${plan.map((item) => renderMashupPlanItem(item, total)).join("")}
     </div>
     ${renderMashupQualityReport(report)}
+    ${renderMashupTransitionDetails(transitions)}
     ${renderMashupAlternatives(result.alternativePlans || [])}
     ${(result.warnings || []).length ? `<div class="mashup-warnings">${result.warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
+  `;
+}
+
+function renderGrooveMashupTimeline(result) {
+  const groove = result.groovePlan || {};
+  const bed = groove.bed || {};
+  const events = groove.vocalEvents || [];
+  const total = Math.max(1, ...events.map((event) => Number(event.timelineEnd) || 0));
+  const report = groove.qualityReport || result.qualityReport || {};
+  return `
+    <div class="mashup-plan-head">
+      <strong>Groove 人声接力 · Score ${Math.round(result.score || report.score || 0)}/100</strong>
+      <span>${formatNumber(groove.targetBpm || result.targetBpm, 1)} BPM · ${escapeHtml(groove.targetCamelot || result.targetCamelot || "--")}</span>
+    </div>
+    <div class="mashup-quality-report">
+      <div><strong>GrooveBed</strong>
+        <span>drums ${escapeHtml(bed.drumsSource || "--")} · bass ${escapeHtml(bed.bassSource || "--")} · other ${escapeHtml(bed.otherSource || "--")}</span>
+        <span>loopability ${Math.round((Number(bed.loopability) || 0) * 100)} · vocal leakage ${Math.round((Number(bed.vocalLeakage) || 0) * 100)}</span>
+      </div>
+      <div><strong>Vocal handoff</strong>
+        ${events.slice(0, 8).map((event) => `<span>${escapeHtml(event.source)} ${escapeHtml(event.phraseId)} · x${formatNumber(event.stretchRatio, 3)} · pitch ${formatNumber(event.pitchShiftSemitones, 1)} · ${escapeHtml(event.tailTreatment || "natural")}</span>`).join("")}
+      </div>
+    </div>
+    ${report.summary ? `<p class="mashup-summary">${escapeHtml(report.summary)}</p>` : ""}
+    <div class="mashup-plan-stage">
+      ${events.map((event) => renderGrooveVocalEvent(event, total)).join("")}
+    </div>
+    ${renderMashupQualityReport(report)}
+    ${renderMashupAlternatives(result.alternativePlans || [])}
+    ${(result.warnings || groove.globalWarnings || []).length ? `<div class="mashup-warnings">${(result.warnings || groove.globalWarnings || []).map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
+  `;
+}
+
+function renderGrooveVocalEvent(event, total) {
+  const left = clamp(((Number(event.timelineStart) || 0) / total) * 100, 0, 100);
+  const width = clamp((((Number(event.timelineEnd) || 0) - (Number(event.timelineStart) || 0)) / total) * 100, 1, 100);
+  const lane = event.source === "B" ? 1 : 0;
+  const warnings = (event.warnings || []).slice(0, 2);
+  return `
+    <div class="mashup-plan-item lane-${lane} ${escapeHtml(event.source || "")}" style="left:${left}%;width:${width}%">
+      <strong>${escapeHtml(event.source)} vocal phrase</strong>
+      <span>${escapeHtml(event.handoffToNext || "handoff")} · duck ${formatNumber(event.duckBedDb, 1)} dB</span>
+      ${warnings.length ? `<small>${warnings.map(escapeHtml).join(" · ")}</small>` : `<small>${formatTime(event.sourceStart)}-${formatTime(event.sourceEnd)}</small>`}
+    </div>
   `;
 }
 
@@ -3291,6 +3438,18 @@ function renderMashupQualityReport(report) {
   `;
 }
 
+function renderMashupTransitionDetails(transitions) {
+  if (!transitions.length) return "";
+  return `
+    <div class="mashup-quality-report">
+      <div><strong>Layered transitions</strong>${transitions
+        .slice(0, 5)
+        .map((item) => `<span>${escapeHtml(item.type)} · ${escapeHtml(item.reason || "")}${item.fallbackType ? ` · fallback ${escapeHtml(item.fallbackType)}` : ""}</span>`)
+        .join("")}</div>
+    </div>
+  `;
+}
+
 function renderMashupAlternatives(alternatives) {
   if (!alternatives.length) return "";
   return `
@@ -3316,13 +3475,18 @@ function renderMashupResult() {
   const url = `${API}${result.downloadUrl}`;
   const report = result.report || {};
   const warnings = report.warnings || [];
+  const layerLines = report.layers?.slice(0, 6) || [];
+  const groove = report.groovePlan || {};
+  const renderDuration = report.duration || report.renderStats?.duration || 0;
   els.mashupResult.innerHTML = `
     <div class="mashup-rendered">
       <strong>已渲染 ${escapeHtml(result.report?.filename || "mashup.wav")}</strong>
       <audio controls preload="none" src="${url}"></audio>
       <a href="${url}" target="_blank" rel="noreferrer">下载 WAV</a>
-      <span>${formatNumber(report.finalLufs, 1)} LUFS · peak ${formatNumber(report.peak, 3)} · ${formatTime(report.duration || 0)}</span>
+      <span>${formatNumber(report.finalLufs, 1)} LUFS · peak ${formatNumber(report.peak, 3)} · ${formatTime(renderDuration)}</span>
     </div>
+    ${groove.bed ? `<div class="mashup-quality-report"><div><strong>Rendered groove</strong><span>bed ${escapeHtml(groove.bed.drumsSource || "--")}/${escapeHtml(groove.bed.bassSource || "--")}/${escapeHtml(groove.bed.otherSource || "--")} · ${groove.vocalEvents?.length || 0} vocal phrases · no full-mix crossfade bed</span></div></div>` : ""}
+    ${layerLines.length ? `<div class="mashup-quality-report"><div><strong>Rendered layers</strong>${layerLines.map((layer) => `<span>${escapeHtml(layer.source)} ${escapeHtml(layer.stem)} · ${escapeHtml(layer.role)} · x${formatNumber(layer.stretchRatio, 3)} · pitch ${formatNumber(layer.pitchShiftSemitones, 1)}</span>`).join("")}</div></div>` : ""}
     ${warnings.length ? `<div class="mashup-warnings">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
   `;
 }

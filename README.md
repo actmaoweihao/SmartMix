@@ -507,9 +507,11 @@ SmartMix 现在提供 “双曲重组 / Mashup Builder” 第一版，用于把�
 
 计划生成会根据 BPM stretch ratio、Camelot 兼容性、phrase/downbeat 对齐、energy flow、人声冲突、低频冲突和 brightness/timbre 差异进行可解释评分。系统会自动选择 `hard_cut`、`crossfade`、`bass_swap`、`filter_sweep`、`echo_out`、`reverb_tail`、`vocal_over_instrumental` 或 `breakdown_bridge` 等过渡策略，并在 quality report 里解释每个转场为什么这样处理。
 
+渲染层现在使用 layered timeline，而不是把旧 plan items 直接 append。`/api/mashup/plan` 会保留旧 `plan` 字段用于前端兼容，同时新增 `items`、`layers`、`transitions`、`targetBpm` 和 `targetCamelot`。`/api/mashup/render` 会优先渲染 `layers`：每个 layer 明确声明来源歌曲、stem、timeline 区间、stretch/pitch 策略和自动化包络。
+
 当 Demucs stems 可用时，`a_vocal_b_instrumental` 和 `b_vocal_a_instrumental` 会使用一首歌的 `vocals` stem 叠加另一首歌的 `drums + bass + other` instrumental，并对人声冲突和低频冲突做 duck / mute / bass swap。没有 stems 时不会假装能干净分离，会回退到 full mix 并返回 warning。
 
-渲染器现在使用 timeline buffer，而不是简单 append；支持 equal-power crossfade、downbeat hard cut micro fade、stem-aware vocal + instrumental、bass swap、简单 filter sweep、echo out / reverb tail、LUFS normalize 和最终 limiter。Rubber Band / Demucs 可提升效果；不可用时会使用现有 fallback。
+渲染器支持 equal-power crossfade、downbeat hard cut microfade、stem-aware vocal + instrumental、bass stem swap、filter sweep、echo out / reverb tail、sidechain-like duck、LUFS normalize 和最终 limiter。Rubber Band / Demucs 可提升效果；不可用时会使用现有 fallback 并在 report 中说明风险。
 
 `POST /api/mashup/plan` 仍兼容旧参数，并新增可选项：
 
@@ -524,3 +526,35 @@ SmartMix 现在提供 “双曲重组 / Mashup Builder” 第一版，用于把�
 ```
 
 返回中会包含 `qualityReport` 和可选 `alternativePlans`。请注意：这仍然是规则系统 + DSP 的 re-edit/mashup 原型，不是专业人工 remix 的完全替代；它的目标是给出更可听、更可解释、可继续人工微调的第一版方案。
+
+## Groove 人声接力 / Groove-Bed Mashup Engine
+
+新版还新增了 `groove_vocal_handoff`、`a_vocal_on_b_groove`、`b_vocal_on_a_groove`、`call_response_groove` 和 `hook_exchange_groove` 模式。这个路径不再以 “A 段淡出、B 段淡入” 为核心，而是先选一个连续稳定的 GrooveBed，再把 A/B 的 vocals phrase 放到同一个 groove 上做歌词接力。
+
+GrooveBed 来自 Demucs stems 的 `drums + bass + other`，可以是 A 伴奏、B 伴奏或 hybrid bed，例如 A drums + B bass + B other。系统会按 drum activity、bass stability、低 vocal leakage、loopability、Camelot 和 BPM 兼容性评分；在 `useStems=true` 时，GrooveBed 不包含 vocals stem。找不到完整 stems 时，接口会返回 `stems_required` 或 fallback warning，不会假装用两个 full mix 做干净 mashup。
+
+VocalPhrase 会从 vocals stem 中按 2/4/8 bars 提取短句，保留 pickup 和 tail，并尽量避免切在歌词中间。VocalArrangement 会把 A/B phrase 按 call-response、lead-hook 或 hook exchange 方式铺到同一个 bed 上；同一时间只允许一个 main vocal，上一句尾音可以低音量延续，但下一句进入时会被压低或用 echo/reverb tail 处理。
+
+`render_groove_vocal_mashup()` 的真实渲染流程是：循环或排列 drums/bass/other bed，loop 边界做 10-50ms microfade；把 vocals stem 逐句放入 timeline；对 vocal 做 highpass、轻压缩、响度匹配和少量 room；vocal 活跃时对 bed 做 sidechain-like duck；最后做 glue、LUFS normalize 和 limiter。前端会显示选中的 bed 来源、loopability、vocal leakage、每个 vocal event 的 stretchRatio / pitchShift 风险和 warnings。
+
+这个模式的目标是 bootleg mashup / vocal edit 的听感：统一鼓和低频底座，A/B 歌词在同一个 groove 上接力，而不是两首 full mix 长时间重叠 crossfade。Demucs stems 对该模式是核心依赖；Rubber Band 可进一步提升后续变速/调音质量。
+
+## Multi-Scale Music Segmentation
+
+Update: the segmentation engine now returns both `sections` and
+`minorSections`. `sections` are stable major structural blocks for the legacy
+segment API; `minorSections` are 2/4/8-bar micro blocks for vocal phrase and
+bed extraction. Vocal phrase extraction first detects vocal activity islands,
+then cuts short 2/4/8-bar phrases around those islands, preserving pickup and
+tail metadata instead of blindly scanning every fixed window. Groove bed
+extraction scans 4/8/16-bar subwindows inside each section and rejects clean-bed
+candidates when stems are unavailable, so a larger section with vocals in the
+middle can still yield a low-leakage instrumental bed from its intro/outro bars.
+
+Mashup Builder 的切段逻辑现在由 `backend/segmentation.py` 统一负责，不再把固定 8/16 bars 作为主逻辑。系统会先构建 bar-level timeline，并为每个 bar 提取 chroma、MFCC、spectral contrast/centroid/flux、RMS、onset strength、energy、vocalDensity、drumActivity、bassEnergy 和 otherEnergy；如果 Demucs stems 可用，vocal/drum/bass/other 活动直接来自 stems，否则会使用 full mix 和分析曲线 fallback，并降低 report confidence。
+
+分割引擎会构建 harmonic、timbre、rhythm、energy 四个 self-similarity matrices，融合后用多尺度 Foote-style novelty curve 找 4/8/16 bars 变化点，再和 phrase boundary、transition candidates、energy/vocal/drum/bass 变化融合成 boundary candidates。候选边界会吸附到 bar / phrase / transition candidate，并在切到持续人声时标记 `cuts_vocal_phrase`。
+
+`/api/mashup/analyze` 会返回 `segmentationReport`，包含 structural sections、vocal phrases、groove bed candidates、safe cut points、warnings 和 debug 信息。Groove 模式会优先使用 `extract_vocal_phrases_from_sections()` 和 `extract_groove_bed_candidates()` 的结果：vocal phrase 以 2/4/8 bars 为单位，支持 pickup/tail；groove bed 只使用 `drums + bass + other`，不包含 vocals stem，并按 vocal leakage、drum activity、bass stability、loopability、energy consistency 和 harmonic compatibility 评分。
+
+前端 Mashup Builder 的 “Segmentation Debug” 区块会展示每首歌的 sections、vocal phrases、groove beds 和 safe cut points，方便检查听感问题到底来自切段、bed 选择，还是后续编排/渲染。
