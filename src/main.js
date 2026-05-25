@@ -1,11 +1,8 @@
 import "./styles.css";
+import { API_BASE_URL as API, apiUrl, fetchJson } from "./api/client";
 import { explainTransition } from "./explain/explainTransition";
 import { normalizeStyle, scoreStyleCompatibility, styleDistance, styleFamily, styleLabel } from "./analysis/style";
 import { recommendNextTracks, recommendTransition } from "./transitions/recommend";
-
-const API_HOST = window.location.hostname || "127.0.0.1";
-const API_PROTOCOL = window.location.protocol === "https:" ? "https:" : "http:";
-const API = `${API_PROTOCOL}//${API_HOST}:8002`;
 
 const state = {
   tracks: [],
@@ -748,7 +745,7 @@ function syncSettings() {
 
 async function pingBackend() {
   try {
-    await fetchJson(`${API}/api/health`);
+    await fetchJson("/api/health");
     setStatus("后端已连接");
   } catch {
     setStatus("后端未启动，运行 pnpm dev");
@@ -828,7 +825,7 @@ async function calculatePairMatch() {
     const form = new FormData();
     form.append("file_a", state.match.fileA);
     form.append("file_b", state.match.fileB);
-    state.match.result = await fetchJson(`${API}/api/match`, { method: "POST", body: form });
+    state.match.result = await fetchJson("/api/match", { method: "POST", body: form });
     setStatus("两歌匹配评分完成");
   } catch (error) {
     state.match.error = error.message || "匹配评分失败";
@@ -860,7 +857,7 @@ async function repairPairMatch() {
     form.append("max_tempo_change_percent", "10");
     form.append("max_pitch_shift_semitones", "4");
     form.append("format", "wav");
-    state.match.repairResult = await fetchJson(`${API}/api/match/repair`, { method: "POST", body: form });
+    state.match.repairResult = await fetchJson("/api/match/repair", { method: "POST", body: form });
     state.match.result = state.match.repairResult.original_match || state.match.result;
     setStatus("已生成匹配修复版本");
   } catch (error) {
@@ -1049,7 +1046,7 @@ async function uploadAndAnalyze(track) {
     await assertBackendReachable();
     const form = new FormData();
     form.append("file", track.file);
-    const result = await fetchJson(`${API}/api/tracks`, { method: "POST", body: form });
+    const result = await fetchJson("/api/tracks", { method: "POST", body: form });
     track.id = result.id;
     track.status = "ready";
     track.duration = result.duration || track.duration;
@@ -1089,7 +1086,7 @@ async function uploadAndAnalyze(track) {
 
 async function assertBackendReachable() {
   try {
-    await fetchJson(`${API}/api/health`);
+    await fetchJson("/api/health");
   } catch (error) {
     throw new Error(`后端连接失败，请确认 ${API}/api/health 可访问。${error.message || ""}`.trim());
   }
@@ -1979,7 +1976,7 @@ async function exportMix() {
       settings: state.settings,
       format: state.settings.exportFormat,
     };
-    const result = await fetchJson(`${API}/api/export`, {
+    const result = await fetchJson("/api/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1999,7 +1996,7 @@ async function exportMix() {
 async function saveProject() {
   const name = els.projectName.value.trim() || `SmartMix ${new Date().toLocaleString()}`;
   try {
-    await fetchJson(`${API}/api/projects`, {
+    await fetchJson("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2017,7 +2014,7 @@ async function saveProject() {
 
 async function loadProjectList() {
   try {
-    const result = await fetchJson(`${API}/api/projects`);
+    const result = await fetchJson("/api/projects");
     state.projects = result.projects || [];
     els.projectList.innerHTML = `<option value="">选择已保存项目</option>${state.projects.map((project) => `<option value="${project.id}">${escapeHtml(project.name)}</option>`).join("")}`;
   } catch {
@@ -2028,7 +2025,7 @@ async function loadProjectList() {
 async function loadSelectedProject() {
   if (!els.projectList.value) return;
   try {
-    const project = await fetchJson(`${API}/api/projects/${els.projectList.value}`);
+    const project = await fetchJson(`/api/projects/${els.projectList.value}`);
     state.settings = { ...state.settings, ...project.settings };
     state.tracks = await Promise.all(project.tracks.map(rehydrateTrack));
     state.originalOrder = state.tracks.map((track) => track.localId);
@@ -2044,7 +2041,7 @@ async function loadSelectedProject() {
 
 async function rehydrateTrack(saved) {
   const context = await getAudioContext();
-  const response = await fetch(`${API}/api/tracks/${saved.id}/audio`);
+  const response = await fetch(apiUrl(`/api/tracks/${saved.id}/audio`));
   if (!response.ok) throw new Error("加载项目音频失败");
   const arrayBuffer = await response.arrayBuffer();
   const buffer = await context.decodeAudioData(arrayBuffer.slice(0));
@@ -2501,7 +2498,7 @@ async function runStemReferenceMix() {
   try {
     setStatus(`\u6b63\u5728\u7528 ${reference.name} \u751f\u6210\u53c2\u8003\u66f2\u81ea\u52a8\u6df7\u97f3`);
     await assertBackendReachable();
-    const result = await fetchJson(`${API}/api/tracks/${track.id}/reference-mix`, {
+    const result = await fetchJson(`/api/tracks/${track.id}/reference-mix`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2553,7 +2550,7 @@ async function runTrackStemSeparation(track, options = {}) {
   try {
     setStatus(`Demucs \u6b63\u5728\u5206\u79bb ${track.name}`);
     await assertBackendReachable();
-    const result = await fetchJson(`${API}/api/tracks/${track.id}/stems`, {
+    const result = await fetchJson(`/api/tracks/${track.id}/stems`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device: "auto", force: Boolean(options.force) }),
@@ -2582,7 +2579,7 @@ async function hydrateTrackStems(track, result) {
     STEMS.map(async (stem) => {
       const item = stems[stem.id];
       if (!item?.url) throw new Error(`Missing ${stem.id} stem`);
-      const response = await fetch(`${API}${item.url}`);
+      const response = await fetch(apiUrl(item.url));
       if (!response.ok) throw new Error(`${stem.label} stem download failed`);
       const arrayBuffer = await response.arrayBuffer();
       const buffer = await context.decodeAudioData(arrayBuffer.slice(0));
@@ -2885,7 +2882,7 @@ async function generateTeachingPreview(nextId) {
   state.teaching.loadingPreviewId = nextId;
   renderTeachingPanel();
   try {
-    const result = await fetchJson(`${API}/api/transition-preview`, {
+    const result = await fetchJson("/api/transition-preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3080,7 +3077,7 @@ async function analyzeMashupSegments() {
   renderMashupPanel();
   try {
     await assertBackendReachable();
-    state.mashup.analysis = await fetchJson(`${API}/api/mashup/analyze`, {
+    state.mashup.analysis = await fetchJson("/api/mashup/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(mashupRequestBase()),
@@ -3109,7 +3106,7 @@ async function generateMashupPlan() {
   renderMashupPanel();
   try {
     await assertBackendReachable();
-    state.mashup.plan = await fetchJson(`${API}/api/mashup/plan`, {
+    state.mashup.plan = await fetchJson("/api/mashup/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3148,7 +3145,7 @@ async function renderMashupExport() {
   renderMashupPanel();
   try {
     await assertBackendReachable();
-    state.mashup.renderResult = await fetchJson(`${API}/api/mashup/render`, {
+    state.mashup.renderResult = await fetchJson("/api/mashup/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -4059,7 +4056,7 @@ async function hydrateTeachingPreviewAudio(preview) {
   if (!preview?.url || preview.buffer) return;
   try {
     const context = await getAudioContext();
-    const response = await fetch(`${API}${preview.url}`);
+    const response = await fetch(apiUrl(preview.url));
     if (!response.ok) throw new Error("preview audio fetch failed");
     const arrayBuffer = await response.arrayBuffer();
     preview.buffer = await context.decodeAudioData(arrayBuffer.slice(0));
@@ -4558,26 +4555,6 @@ function drawHandle(ctx, x, height, color, label) {
   ctx.textAlign = "center";
   ctx.fillText(label, x, 27);
   ctx.textAlign = "left";
-}
-
-async function fetchJson(url, options = {}) {
-  let response;
-  try {
-    response = await fetch(url, options);
-  } catch (error) {
-    throw new Error(`无法连接后端 ${API}。请确认已运行 pnpm backend，或重新运行 pnpm dev。原始错误：${error.message}`);
-  }
-  if (!response.ok) {
-    let message = response.statusText;
-    try {
-      const error = await response.json();
-      message = error.detail || message;
-    } catch {
-      // Keep the status text.
-    }
-    throw new Error(message);
-  }
-  return response.json();
 }
 
 function setStatus(text) {

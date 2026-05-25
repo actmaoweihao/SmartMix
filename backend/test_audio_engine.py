@@ -136,10 +136,15 @@ class StemDebuggerApiTests(unittest.TestCase):
             for stem in ("vocals", "drums", "bass", "other"):
                 (stem_dir / f"{stem}.wav").write_bytes(f"{stem}-audio".encode("utf-8"))
 
-            original_upload_dir = api.UPLOAD_DIR
-            original_stem_dir = api.STEM_DIR
-            api.UPLOAD_DIR = uploads
-            api.STEM_DIR = stems
+            from backend.api import tracks as tracks_api
+            from backend.services import tracks as tracks_service
+
+            original_upload_dir = tracks_service.UPLOAD_DIR
+            original_service_stem_dir = tracks_service.STEM_DIR
+            original_api_stem_dir = tracks_api.STEM_DIR
+            tracks_service.UPLOAD_DIR = uploads
+            tracks_service.STEM_DIR = stems
+            tracks_api.STEM_DIR = stems
             try:
                 api.write_json(
                     uploads / "track-1.json",
@@ -158,8 +163,9 @@ class StemDebuggerApiTests(unittest.TestCase):
                 self.assertEqual(audio.status_code, 200)
                 self.assertIn(b"vocals-audio", audio.content)
             finally:
-                api.UPLOAD_DIR = original_upload_dir
-                api.STEM_DIR = original_stem_dir
+                tracks_service.UPLOAD_DIR = original_upload_dir
+                tracks_service.STEM_DIR = original_service_stem_dir
+                tracks_api.STEM_DIR = original_api_stem_dir
 
 
 class CrossfadePlanTests(unittest.TestCase):
