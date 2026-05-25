@@ -1,43 +1,95 @@
 # SmartMix
 
-SmartMix 是一个本地运行的智能混音工作台。它面向音乐爱好者、活动策划者和轻量 DJ 场景：上传多首歌曲后，系统会自动分析 BPM、调性、Camelot 编码、能量、响度、节拍网格和可过渡片段，帮助你生成更顺耳的播放顺序，预览两两重叠的混音效果，并导出 MP3 或 WAV。
+SmartMix 是一个本地运行的智能混音工作台。它把 Vite 前端、FastAPI 后端和 Python 音频处理管线组合在一起，帮助你上传歌曲、分析 BPM/调性/能量/响度/结构，生成更顺耳的排序和过渡方案，预览混音效果，并导出 MP3 或 WAV。
 
-项目由 Vite 前端和 FastAPI 后端组成，核心音频分析与导出在本地完成，不需要云端账号。
+适合这些场景：
 
-当前版本还包含两个偏 DJ 教学和调试的工作流：
+- 音乐爱好者快速把一组歌做成顺滑串烧。
+- 活动策划、店铺播放、派对暖场等轻量 DJ 工作流。
+- 学习 DJ 接歌：查看推荐接法、cue 点、EQ/滤波/交叉推子步骤，并生成真实无缝试听。
+- 调试音频分轨、节拍同步、Harmonic Mixing 和两首歌 Mashup。
 
-- “教学入口”会基于当前 Deck A 推荐下一首歌、接歌方法、操作步骤，并可调用后端生成真实无缝试听。
-- “分轨调试”会在歌曲上传分析完成后自动排队调用 Demucs，生成真实 vocals / drums / bass / other 分轨；等待期间用灰色模拟分轨和扫描态占位，完成后自动切到蓝色真实分轨。
+项目默认完全在本机运行，不需要云端账号。上传音频、分析结果、导出文件和项目存档都会保存在本地 `backend/data/` 目录。
 
-## 主要功能
+## 功能概览
 
-- 多音频上传：支持常见音频格式，包括 MP3、WAV、FLAC、M4A、OGG、AAC、AIFF、OPUS、WEBM 等。
-- 自动音频分析：识别时长、BPM、Key、Camelot、多指标能量、LUFS、真峰值、beat grid、bar、phrase、波形峰值和推荐过渡点。
-- 智能排序：支持综合推荐、谐和优先、BPM 升序、BPM 降序、能量弧线和原始顺序。
-- 两首歌衔接评分：上传任意两首歌，按 Camelot、BPM、能量和结构可过渡性计算 A 到 B / B 到 A 的匹配分。
-- 自动匹配修复：根据两歌差异自动生成调性、速度和能量处理方案，并输出修复后的音频版本。
-- Harmonic tuning 建议：当两首歌调性不够兼容时，给出可调到的 Camelot 目标、半音数和质量风险。
-- 实时混音预览：使用 Web Audio API 在浏览器里预览淡入淡出、EQ、滤波扫频和动态 EQ。
-- DJ 教学与无缝试听：推荐下一首歌、接法、步骤和风险提示，并可生成后端渲染的真实过渡试听。
-- Demucs 分轨调试：歌曲上传并完成基础分析后会自动排队生成 vocals、drums、bass、other 四个真实 stems；调试界面会在分轨未完成时显示灰色模拟波形和扫描态，完成后切换到蓝色真实分轨。
-- 可视化编辑：显示选中歌曲波形，可拖动 IN/OUT 手柄调整入点和出点；时间线展示整段混音结构。
-- 双 Deck 控制：对当前过渡的上一首和下一首分别调节增益、Low、Mid、High。
-- 精准过渡：按 4/8/16 小节计算重叠区间，结合 intro/outro 候选点和人声密度避让。
-- 后端导出：按当前排序、过渡点、EQ、响度归一化、节拍同步和混音策略导出 MP3/WAV。
-- 项目保存与加载：把曲目顺序、过渡点、设置和混音参数保存到本地后端数据目录。
-- 高质量调音：可选安装 Demucs 和 Rubber Band，对歌曲做 Camelot 调性转换。
+- 多音频上传：支持 MP3、WAV、FLAC、M4A、OGG、AAC、AIFF、OPUS、WEBM 等常见格式。
+- 自动音频分析：识别时长、BPM、Key、Camelot、LUFS、true peak、能量画像、beat grid、bar、phrase、波形峰值和过渡候选点。
+- 智能排序：综合推荐、谐和优先、BPM 升序、BPM 降序、能量弧线、原始顺序。
+- 浏览器混音预览：基于 Web Audio API 预览淡入淡出、EQ、滤波扫频、动态 EQ 和 Deck Mixer 参数。
+- 后端高质量导出：按当前排序、IN/OUT、过渡、EQ、响度归一化和节拍同步导出 MP3/WAV。
+- Pair Match：上传任意两首歌，计算 A 到 B / B 到 A 的衔接评分，并给出调性、BPM、能量、结构分项。
+- 自动匹配修复：自动选择处理 A 或 B，生成调性、速度、能量修复方案并渲染新音频。
+- DJ 教学入口：基于当前 Deck A 推荐下一首歌、接歌方法、操作步骤、风险提示和真实无缝试听。
+- Demucs 分轨调试：可选生成 vocals / drums / bass / other 四路真实 stems；未完成时提供浏览器模拟分轨占位。
+- 双曲 Mashup Builder：分析两首歌的 8/16 小节段落，生成拼接/叠加方案，支持 stems、groove bed、人声优先级、能量曲线和替代方案。
+- Reference Mix：以一首参考歌为目标风格，为分轨后的歌曲生成参考混音。
+- Harmonic Tuning：可选把歌曲调到指定 Camelot，优先使用 Demucs + Rubber Band，失败时回退到整曲移调。
+- 项目保存与加载：保存曲目、排序、设置、混音参数和过渡状态。
+
+## 技术栈
+
+- 前端：Vite、原生 JavaScript、TypeScript 业务模块、Web Audio API、Vitest。
+- 后端：FastAPI、Uvicorn、Pydantic。
+- 音频分析与渲染：librosa、soundfile、numpy、scipy、pyloudnorm、imageio-ffmpeg。
+- 可选高质量音频能力：Demucs、Torch/TorchCodec、Rubber Band CLI。
+
+## 项目结构
+
+```text
+SmartMix/
+  src/                         # 前端入口、UI、音频预览、TS 业务模块和测试
+    analysis/                  # BPM、Key、Energy、Phrase、Vocal 等前端分析辅助
+    audio/                     # 浏览器音频处理、crossfade、limiter、loudness
+    transitions/               # 接歌策略与推荐逻辑
+    seamless/                  # cue 对齐、tempo/pitch/stem automation
+    practice/                  # DJ 练习计划
+    explain/                   # 接歌解释文案
+    __tests__/                 # Vitest 单元测试
+  backend/                     # FastAPI 后端和 Python 音频管线
+    api/                       # tracks/projects 路由
+    services/                  # 曲目上传、读取、分轨响应等服务
+    analysis.py                # 后端音频分析
+    mixing.py                  # 歌单导出渲染
+    matching.py                # 两首歌匹配评分
+    repair.py                  # 匹配修复
+    seamless.py                # 真实无缝过渡试听
+    mashup.py                  # Mashup 分析、方案、渲染
+    tuning.py                  # Camelot 调音和 Demucs/Rubber Band 管线
+    reference_mix.py           # Reference Mix
+    data/                      # 本地运行时数据，自动创建
+  auto_mix/                    # 独立 auto mix 实验模块
+  docs/                        # 架构审查等补充文档
+  ref/                         # 论文和第三方参考实现
+  package.json                 # 前端、后端和测试命令
+```
+
+运行时数据目录：
+
+```text
+backend/data/uploads/          # 上传音频和分析 JSON
+backend/data/exports/          # 导出的 MP3/WAV/报告
+backend/data/projects/         # 保存的项目 JSON
+backend/data/stems/            # Demucs 分轨缓存
+```
 
 ## 快速开始
 
 ### 1. 准备环境
 
-建议使用：
+建议版本：
 
 - Node.js 20+
 - pnpm
 - Python 3.11+
 
-Windows、macOS、Linux 都可以运行。MP3 导出使用 `imageio-ffmpeg` 自带的 ffmpeg，通常不需要单独安装系统 ffmpeg。
+如果没有 pnpm：
+
+```bash
+npm install -g pnpm
+```
+
+MP3 导出默认使用 `imageio-ffmpeg` 自带的 ffmpeg，一般不需要额外安装系统 ffmpeg。
 
 ### 2. 安装依赖
 
@@ -46,13 +98,7 @@ pnpm install
 pnpm setup:backend
 ```
 
-如果还没有 pnpm，可以先安装：
-
-```bash
-npm install -g pnpm
-```
-
-### 3. 启动项目
+### 3. 启动开发服务
 
 ```bash
 pnpm dev
@@ -65,199 +111,32 @@ pnpm dev
 
 `pnpm dev` 会同时启动：
 
-- `pnpm frontend`：Vite 前端，默认端口 `3000`
-- `pnpm backend`：FastAPI 后端，默认端口 `8002`
+- `pnpm frontend`：Vite，固定监听 `127.0.0.1:3000`
+- `pnpm backend`：FastAPI/Uvicorn，固定监听 `127.0.0.1:8002`
 
-## 基础使用流程
+也可以单独启动：
 
-1. 打开 http://127.0.0.1:3000。
-2. 点击“选择音频”，或把音频文件拖进上传区域。
-3. 等待每首歌分析完成，列表中会显示时长、BPM、调性、风格、能量和过渡信息；如果已安装 Demucs 依赖，系统会在后台自动排队生成真实分轨。
-4. 在左侧选择排序策略，然后点击“应用排序”。
-5. 调整过渡时长、AI 精准小节混音、响度归一化、滤波和 EQ 设置。
-6. 点击“预览”，在浏览器里试听当前混音。
-7. 点击波形或时间线跳转播放位置；拖动 IN/OUT 手柄调整每首歌的入点和出点。
-8. 打开“分轨调试”，选择任意已上传歌曲；未分轨完成时先听模拟分轨，完成后自动切到真实 Demucs stems。
-9. 打开“教学入口”可查看推荐接法、操作步骤，并生成真实无缝试听；点击“使用这个接法”会把试听 cue 和过渡音频同步到时间线。
-10. 在 Deck Mixer 里微调当前过渡两首歌的增益和三段 EQ。
-11. 选择 MP3 或 WAV，点击“导出”。
-12. 导出完成后点击下载链接保存混音文件。
+```bash
+pnpm frontend
+pnpm backend
+```
 
-## 功能说明
+## 可选高质量依赖
 
-### 上传与分析
-
-每个上传文件都会先在浏览器中解码，生成本地预览波形；同时上传到后端，由 `librosa` 完成更稳定的分析。后端返回：
-
-- `duration`：歌曲时长
-- `bpm`：估算 BPM
-- `beats` / `bars` / `phrases`：节拍、小节和 phrase 时间点
-- `key` / `camelot`：调性和 Camelot 编码
-- `style` / `style_label` / `style_profile`：风格分类、显示名称和风格特征画像
-- `energy` / `energy_profile`：多指标能量画像，包括 LUFS、RMS 分位数、crest factor、低频比例、动态范围和 intro/outro 相对能量
-- `intro_low` / `outro_low`：首尾低能量时长
-- `loudness_lufs` / `true_peak_db`：响度指标
-- `transition_candidates`：推荐入点、出点、人声密度和置信度
-- `peaks`：用于波形绘制的峰值数组
-
-如果后端暂时不可用，前端会尝试用浏览器本地算法做 fallback 分析，但精度会低于后端。
-
-### 分轨调试
-
-分轨调试依赖可选的 Demucs 依赖。安装后：
+基础功能只需要 `pnpm setup:backend`。如果要使用 Demucs 真分轨、Harmonic Tuning、Reference Mix 或更高质量的 Mashup，安装可选依赖：
 
 ```bash
 pnpm setup:tuning
 ```
 
-上传歌曲并完成基础分析后，前端会自动把歌曲加入 Demucs 分轨队列，依次调用后端 `/api/tracks/{track_id}/stems` 生成四个 stem：
-
-- `vocals`：人声
-- `drums`：鼓
-- `bass`：贝斯/低频
-- `other`：其他乐器与伴奏
-
-生成结果会缓存在：
-
-```text
-backend/data/stems/{track_id}/demucs_api/
-```
-
-打开“分轨调试”时，选择哪首歌就会加载哪首歌的分轨状态：
-
-- `Demucs 等待分轨` / `Demucs 分轨中`：先显示灰色模拟分轨波形，并用扫描光提示后台仍在处理。
-- `Demucs 真分轨`：自动加载真实 stem 音频，波形切换为蓝色，M/S/音量控制直接作用在真实分轨上。
-- 如果用户在模拟分轨播放中等待，真实分轨加载完成后会从当前进度自动切换到真实 stems。
-
-如果未安装 Demucs，分轨调试仍可使用浏览器里的滤波模拟模式，但不会得到真正独立的人声、鼓、贝斯和其他声部。
-
-### 排序策略
-
-- 综合推荐：优先让相邻歌曲的 BPM 接近，同时考虑 Camelot 谐和与能量差。
-- 谐和优先：提高 Camelot 匹配权重，适合更重视调性顺滑的歌单。
-- BPM 升序：按速度从慢到快。
-- BPM 降序：按速度从快到慢。
-- 能量弧线：先逐步升能量，再在后段回落，适合活动暖场到高潮再收束。
-- 原始顺序：保留上传顺序。
-
-综合推荐和谐和优先都使用贪心最近邻算法：先从能量较低的歌开始，每一步选择与当前歌衔接成本最低的下一首。
-
-### 两首歌匹配评分
-
-Pair Match 面板可以单独上传两首歌，后端会分别分析它们，并计算：
-
-- A 到 B 的衔接分
-- B 到 A 的衔接分
-- 推荐方向
-- 总分等级
-- Camelot、BPM、Energy、Structure 四个分项
-- 可选 harmonic tuning 建议
-- 可选自动修复方案：点击“自动修复匹配”后，后端会选择处理 A 或 B，生成调性、速度、能量处理计划，并输出修复后的 WAV/MP3。
-
-评分满分为 100。总分权重为：
-
-```text
-total = 0.45 * Camelot
-      + 0.30 * BPM
-      + 0.15 * Energy
-      + 0.10 * Structure
-```
-
-### DJ 教学与无缝试听
-
-教学入口使用前端 TypeScript 业务模块把当前选中曲目作为 Deck A，并对候选曲目生成推荐：
-
-- `recommendNextTracks()`：综合 Camelot、BPM、风格、能量、phrase、vocal conflict 和新手难度给候选排序。
-- `explainTransition()`：把推荐接法解释成适合用户阅读的原因。
-- `stepByStep`：输出 cue、loop、EQ、filter、crossfader 等操作步骤。
-- `generateTeachingPreview()`：调用后端 `/api/transition-preview`，让后端按推荐 cue、节拍对齐、tempo/pitch 计划和 Demucs/Spleeter/full-mix fallback 生成一段真实过渡试听。
-
-点击“使用这个接法”时，前端会把试听返回的实际 `outgoingCue`、`incomingCue`、`renderOverlapDuration` 和 `appliedTransitionPreview` 写回时间线。后续浏览器预览和后端导出都会优先复用这段已渲染的过渡音频，避免“教学试听”和“最终导出”听起来不一致。
-
-### 过渡与预览
-
-SmartMix 会为相邻歌曲计算一个过渡计划：
-
-- 上一首从 `outro` 候选点开始淡出。
-- 下一首从 `intro - overlap` 处开始进入，使其 intro 锚点对齐到过渡结束附近。
-- 开启 AI 精准小节混音时，过渡时长会按 4/8/16 小节换算。
-- 开启自动过渡时，会结合首尾低能量区缩短或限制过渡时长。
-- 过短歌曲会把过渡时长限制在较短歌曲的 35% 以内。
-
-浏览器预览使用 Web Audio API，后端导出使用 Python 音频管线；两边都复用相近的时间线和过渡策略。
-
-### 混音策略
-
-可选策略包括：
-
-- AI 自动判断：根据人声密度、BPM 差和能量变化选择策略。
-- 保留人声清晰：在人声较密的过渡里减少中频冲突。
-- 低频交换切入：让旧歌低频更快退场，新歌低频更早建立。
-- 平滑氛围过渡：更温和的等功率淡化和中高频进入。
-- 快速切歌点：更短、更有 DJ 切换感的过渡。
-
-滤波模式包括：
-
-- AI 动态 EQ 避让
-- 低通扫频
-- 高通抬入
-- 关闭滤波
-
-### 导出
-
-导出会把当前所有就绪曲目、排序、IN/OUT 点、Deck Mixer、全局 EQ、过渡参数和格式发送给后端。
-
-支持：
-
-- MP3：默认 192 kbps，用于分享和快速试听。
-- WAV：PCM 16-bit，用于后期处理或保留更高质量。
-
-可选导出处理：
-
-- 节拍同步：把歌曲速度拉近到歌单 BPM 中位数，限制在 0.88x 到 1.12x。
-- 响度归一化：默认目标 `-16 LUFS`。
-- AI 精准过渡：使用小节长度、候选点和动态 EQ 生成重叠区。
-
-导出文件保存在：
-
-```text
-backend/data/exports/
-```
-
-如果某个过渡已经在教学入口里生成并应用了无缝试听，导出时会把 `appliedTransitionPreview` 嵌入对应的交叠区；否则使用后端 `render_mix()` 的常规 crossfade / dynamic EQ 渲染路径。
-
-### 项目保存与加载
-
-项目会保存到后端本地 JSON 文件：
-
-```text
-backend/data/projects/
-```
-
-保存内容包括：
-
-- 项目名称
-- 曲目列表和曲目分析结果
-- 当前排序
-- IN/OUT 点
-- 每首歌 mixer 设置
-- 全局混音设置
-
-加载项目时，前端会通过 `/api/tracks/{track_id}/audio` 重新取回后端保存的音频并恢复波形。
-
-加载完成后，前端也会为每首 ready 曲目重新检查并排队加载 Demucs 分轨。如果 `backend/data/stems/{track_id}/demucs_api/` 已存在完整缓存，会直接读取缓存。
-
-## 高质量 Camelot 调音
-
-SmartMix 提供可选的调性转换管线，适合把某首歌调到更容易与另一首歌谐和衔接的 Camelot 编码。
-
-安装可选依赖：
+NVIDIA GPU 用户可以先按 PyTorch 官方方式安装 CUDA 版 Torch，例如：
 
 ```bash
+python -m pip install --upgrade --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pnpm setup:tuning
 ```
 
-如果想获得更好的调音质量，建议额外安装 Rubber Band CLI，并让 `rubberband-r3` 或 `rubberband` 在 `PATH` 中可用。
+Rubber Band 不是 Python 包，需要单独安装 CLI，并确保 `rubberband-r3` 或 `rubberband` 在 `PATH` 中。
 
 Windows 可选安装方式：
 
@@ -271,19 +150,133 @@ winget install BreakfastQuay.RubberBand
 choco install rubberband
 ```
 
-CLI 示例：
+没有安装 Demucs 或 Rubber Band 时，相关功能会降级或返回明确错误；基础上传、分析、排序、预览、导出仍可运行。
 
-```bash
-python tune_quality.py "song.mp3" --source 9A --target 3A -o "song_3A.wav"
+## 基础使用流程
+
+1. 打开 http://127.0.0.1:3000。
+2. 点击“选择音频”，或把音频文件拖入上传区域。
+3. 等待歌曲分析完成，曲目会显示 BPM、调性、Camelot、能量、风格、响度和过渡候选点。
+4. 选择排序策略，点击“应用排序”。
+5. 调整过渡时长、AI 精准小节混音、响度归一化、滤波、EQ 和 Deck Mixer。
+6. 点击“预览”在浏览器试听。
+7. 拖动波形上的 IN/OUT 手柄，微调每首歌的入点和出点。
+8. 需要教学时打开“教学入口”，选择推荐接法并生成真实无缝试听。
+9. 需要 stems 时打开“分轨调试”，等待 Demucs 真分轨完成。
+10. 选择 MP3 或 WAV，点击“导出”，完成后下载结果。
+11. 点击“保存项目”可把当前曲目、排序和设置保存到本地。
+
+## 核心工作流
+
+### 上传与分析
+
+前端会先在浏览器中解码音频，生成本地波形和预览；同时上传到后端 `/api/tracks`，由 `librosa` 完成更稳定的分析。后端会返回：
+
+- `duration`：歌曲时长
+- `bpm`：估算 BPM
+- `beats` / `bars` / `phrases`：节拍、小节和 phrase 时间点
+- `key` / `camelot`：调性和 Camelot 编码
+- `style` / `style_label` / `style_profile`：风格分类和特征画像
+- `energy` / `energy_profile`：多指标能量画像
+- `loudness_lufs` / `true_peak_db`：响度和真峰值
+- `intro_low` / `outro_low`：首尾低能量时长
+- `transition_candidates`：推荐入点、出点、人声密度和置信度
+- `peaks`：前端波形绘制数据
+
+如果后端不可用，前端会提示连接错误；请确认 `pnpm backend` 或 `pnpm dev` 正在运行。
+
+### 排序与过渡
+
+SmartMix 会为相邻歌曲计算衔接成本。综合推荐会同时考虑 BPM、Camelot、能量和结构；谐和优先会提高 Camelot 权重；能量弧线会让歌单先升能量再回落。
+
+过渡计划会结合：
+
+- 上一首的 outro 候选点
+- 下一首的 intro 候选点
+- 4/8/16 小节长度
+- BPM 差和节拍同步设置
+- 人声密度和 vocal conflict
+- 动态 EQ、低通/高通滤波和等功率淡化
+
+### DJ 教学入口
+
+教学入口会把当前选中曲目作为 Deck A，对其他候选曲目生成推荐：
+
+- `recommendNextTracks()`：推荐下一首歌。
+- `explainTransition()`：解释推荐原因、难度和风险。
+- `stepByStep`：输出 cue、loop、EQ、filter、crossfader 操作步骤。
+- `/api/transition-preview`：后端渲染真实无缝过渡试听。
+
+点击“使用这个接法”后，前端会把返回的 cue 点、重叠时长和已渲染过渡音频写回时间线。后续浏览器预览和最终导出会优先复用这段过渡，避免教学试听和导出结果不一致。
+
+### Demucs 分轨调试
+
+安装 `pnpm setup:tuning` 后，上传歌曲并完成基础分析时，前端可以排队调用：
+
+```http
+POST /api/tracks/{track_id}/stems
 ```
 
-强制使用 CUDA Demucs 分轨：
+生成并缓存：
 
-```bash
-python tune_quality.py "song.mp3" --source 9A --target 3A --device cuda -o "song_3A.wav"
+- `vocals`
+- `drums`
+- `bass`
+- `other`
+
+缓存位置：
+
+```text
+backend/data/stems/{track_id}/demucs_api/
 ```
 
-API 示例：
+如果缓存已存在，默认直接复用；请求参数 `force: true` 可强制重新生成。
+
+### Pair Match 与自动修复
+
+Pair Match 用于单独比较两首歌：
+
+- 计算 A 到 B 和 B 到 A 的衔接分。
+- 分项展示 Camelot、BPM、Energy、Structure。
+- 给出推荐方向和 harmonic tuning 建议。
+- 可调用自动修复，把其中一首歌处理成更适合衔接的版本。
+
+评分公式：
+
+```text
+total = 0.45 * Camelot
+      + 0.30 * BPM
+      + 0.15 * Energy
+      + 0.10 * Structure
+```
+
+### Mashup Builder
+
+Mashup Builder 用于两首歌的段落级重组。典型流程：
+
+1. 上传并分析至少两首歌。
+2. 在 Mashup 面板选择 Track A 和 Track B。
+3. 选择 8 或 16 小节作为段落粒度。
+4. 点击“分析段落”，查看每首歌的可用片段、能量、风险和结构标签。
+5. 点击“生成拼接方案”，生成主方案和替代方案。
+6. 点击“渲染试听/导出”，后端生成可试听文件。
+
+可调参数包括：
+
+- `mode`：自动、交替、清唱叠加等策略。
+- `useStems`：是否优先使用 Demucs stems。
+- `transitionStrictness`：过渡严格度。
+- `stemUsage`：stem 使用偏好。
+- `vocalPriority`：人声优先级。
+- `energyCurve`：能量曲线。
+- `bedPreference`：伴奏 bed 偏好。
+- `allowHybridBed`：是否允许混合 bed。
+- `allowVocalPitchShift`：是否允许人声移调。
+- `maxVocalStretch`：最大人声拉伸比例。
+
+### Harmonic Tuning
+
+把某首歌调到指定 Camelot：
 
 ```http
 POST /api/tracks/{track_id}/tune
@@ -297,21 +290,25 @@ Content-Type: application/json
 }
 ```
 
-调音管线会优先尝试：
+离线脚本示例：
+
+```bash
+python tune_quality.py "song.mp3" --source 9A --target 3A -o "song_3A.wav"
+python tune_quality.py "song.mp3" --source 9A --target 3A --device cuda -o "song_3A.wav"
+```
+
+优先管线：
 
 ```text
-歌曲
+原曲
   -> Demucs 分离 vocals / drums / bass / other
-  -> vocals 用 Rubber Band R3 保留 formant 后移调
+  -> vocals 使用 Rubber Band R3 保留 formant 后移调
   -> bass 和 other 移调
   -> drums 尽量不移调
   -> 合成 stems
-  -> 轻微 EQ 修饰
-  -> 响度归一化
-  -> 保存成新的 SmartMix 曲目
+  -> EQ 修饰与响度归一化
+  -> 保存为新的 SmartMix 曲目
 ```
-
-如果 Demucs 或 Rubber Band 不可用，会 fallback 到整首歌移调或 `librosa` 移调，质量会下降但功能仍可运行。
 
 ## 常用命令
 
@@ -320,11 +317,11 @@ pnpm dev              # 同时启动前端和后端
 pnpm frontend         # 只启动 Vite 前端
 pnpm backend          # 只启动 FastAPI 后端
 pnpm setup:backend    # 安装后端基础依赖
-pnpm setup:tuning     # 安装可选调音依赖
-pnpm check            # 检查前端 JS 语法
+pnpm setup:tuning     # 安装可选 Demucs/TorchCodec 依赖
+pnpm check            # 检查 src/main.js 语法
 pnpm typecheck        # TypeScript 类型检查
 pnpm test             # 运行前端 Vitest 单元测试
-pnpm test:backend     # 运行后端单元测试
+pnpm test:backend     # 运行后端 unittest
 ```
 
 ## API 概览
@@ -334,227 +331,157 @@ pnpm test:backend     # 运行后端单元测试
 | `GET` | `/api/health` | 后端健康检查 |
 | `POST` | `/api/tracks` | 上传并分析单首歌 |
 | `GET` | `/api/tracks/{track_id}/audio` | 获取已上传音频 |
-| `POST` | `/api/tracks/{track_id}/stems` | 使用 Demucs 生成或读取缓存的真实分轨 |
-| `GET` | `/api/tracks/{track_id}/stems/{stem_name}/audio` | 获取单个 stem 音频，`stem_name` 为 `vocals`、`drums`、`bass` 或 `other` |
+| `POST` | `/api/tracks/{track_id}/stems` | 生成或读取 Demucs stems |
+| `GET` | `/api/tracks/{track_id}/stems/{stem_name}/audio` | 获取单个 stem 音频 |
+| `POST` | `/api/tracks/{track_id}/reference-mix` | 按参考曲目渲染参考混音 |
 | `POST` | `/api/tracks/{track_id}/tune` | 把曲目调到指定 Camelot |
-| `POST` | `/api/match` | 计算两首歌衔接匹配分 |
-| `POST` | `/api/match/repair` | 自动生成并渲染匹配修复版本 |
-| `POST` | `/api/transition-preview` | 生成教学入口使用的真实无缝过渡试听 |
-| `POST` | `/api/export` | 导出当前混音 |
+| `POST` | `/api/match` | 计算两首歌衔接评分 |
+| `POST` | `/api/match/repair` | 自动修复两首歌匹配 |
+| `POST` | `/api/transition-preview` | 生成真实无缝过渡试听 |
+| `POST` | `/api/mashup/analyze` | 分析两首歌的 Mashup 段落 |
+| `POST` | `/api/mashup/plan` | 生成 Mashup 拼接/叠加方案 |
+| `POST` | `/api/mashup/render` | 渲染 Mashup 方案 |
+| `POST` | `/api/export` | 导出当前歌单混音 |
 | `GET` | `/api/exports/{filename}` | 下载导出文件 |
 | `POST` | `/api/projects` | 保存项目 |
 | `GET` | `/api/projects` | 列出已保存项目 |
 | `GET` | `/api/projects/{project_id}` | 加载项目 |
 
-## 项目结构
+## 开发说明
 
-```text
-SmartMix/
-  index.html
-  package.json
-  src/
-    main.js                 # 前端状态、UI、上传、预览、排序、教学、分轨调试、导出
-    styles.css              # 工作台样式
-    analysis/               # BPM、调性、能量、风格、人声/乐句评分模型
-    transitions/            # fade、beatmix、bass swap、echo out 等推荐构建器
-    seamless/               # cue 对齐、tempo/pitch 计划、stem automation
-    audio/                  # crossfade、limiter、loudness、toolchain 类型
-    explain/                # 推荐解释文案
-    practice/               # DJ 练习计划
-  backend/
-    main.py                 # FastAPI 入口和 API 路由
-    analysis.py             # librosa 音频分析、节拍/调性/能量/过渡候选
-    matching.py             # 两歌匹配评分、Camelot 距离、调音建议
-    transition.py           # 过渡计划计算
-    mixing.py               # 后端混音、动态 EQ、节拍同步、MP3/WAV 导出
-    seamless.py             # 真实无缝过渡试听、cue 修正、stem 级过渡渲染
-    repair.py               # 两歌匹配自动修复计划与渲染
-    loudness.py             # LUFS 测量和响度归一化
-    tuning.py               # Camelot 调音、Demucs/Rubber Band/librosa fallback
-    storage.py              # 本地上传、导出、项目 JSON 和 stems 缓存路径
-    test_audio_engine.py    # 音频管线单元测试
-    requirements.txt
-    requirements-tuning.txt
-  tune_quality.py           # 高质量调音 CLI
-  tune_test.py              # 简化的 9A -> 3A 调音测试 CLI
-  TECHNICAL_DESIGN.md       # 技术方案文档
-```
+### 前端
 
-运行后会生成本地数据目录：
+- 入口文件是 `src/main.js`，负责界面渲染、状态管理、事件绑定和 API 调用。
+- API 基础地址在 `src/api/client.js`，前端会按当前页面 hostname 拼出 `http://{host}:8002`。
+- TypeScript 模块集中在 `src/analysis/`、`src/transitions/`、`src/seamless/`、`src/audio/` 等目录。
+- 单元测试在 `src/__tests__/`，使用 Vitest。
 
-```text
-backend/data/
-  uploads/                  # 上传音频和分析 JSON
-  exports/                  # 导出的 MP3/WAV
-  projects/                 # 保存的项目 JSON
-  stems/                    # Demucs 生成的 vocals/drums/bass/other 分轨缓存
-```
+### 后端
 
-## 新手常见问题
+- 入口是 `backend/main.py`。
+- `/api/tracks` 和 `/api/projects` 分别拆在 `backend/api/tracks.py`、`backend/api/projects.py`。
+- 音频分析、导出、匹配、修复、调音、Mashup 都是独立 Python 模块，便于单测和替换。
+- 后端启动时会自动创建 `backend/data/` 下的运行时目录。
 
-### 页面提示后端未启动
+### 数据和隐私
 
-确认已经运行：
+SmartMix 不会把音频上传到外部服务。运行时生成的数据都在本地：
+
+- 删除 `backend/data/uploads/` 可清理上传曲目和分析结果。
+- 删除 `backend/data/exports/` 可清理导出文件。
+- 删除 `backend/data/stems/` 可清理 Demucs 缓存。
+- 删除 `backend/data/projects/` 可清理保存的项目。
+
+## 测试与验证
+
+建议在提交前运行：
 
 ```bash
-pnpm dev
+pnpm check
+pnpm typecheck
+pnpm test
+pnpm test:backend
 ```
 
-再打开：
-
-```text
-http://127.0.0.1:8002/api/health
-```
-
-如果返回 `{"ok": true}`，说明后端正常。
-
-### Python 依赖安装失败
-
-先确认 Python 版本：
+如果只改前端 UI 或业务模块，至少运行：
 
 ```bash
-python --version
+pnpm check
+pnpm typecheck
+pnpm test
 ```
 
-建议使用 Python 3.11+。然后重新执行：
-
-```bash
-python -m pip install --upgrade pip
-pnpm setup:backend
-```
-
-### MP3/WAV 导出失败
-
-先运行后端测试确认基础音频管线可用：
+如果只改后端音频逻辑或 API，至少运行：
 
 ```bash
 pnpm test:backend
 ```
 
-如果只 MP3 失败，重点检查 `imageio-ffmpeg` 是否安装成功：
+## 常见问题
+
+### 前端提示无法连接后端
+
+确认后端已启动：
 
 ```bash
-python -m pip install imageio-ffmpeg
+pnpm backend
 ```
 
-### 调音质量不好
+然后打开：
 
-高质量调音依赖 Demucs 和 Rubber Band。只安装基础依赖时，系统会用整首歌或 `librosa` fallback，效果会更像原型验证。建议安装：
+```text
+http://127.0.0.1:8002/api/health
+```
+
+如果健康检查不可访问，优先检查 Python 依赖是否已安装：
+
+```bash
+pnpm setup:backend
+```
+
+### 端口被占用
+
+默认前端使用 `3000`，后端使用 `8002`。如果端口被占用，可以先停止占用进程，或临时修改 `package.json` 中的 `frontend` / `backend` 脚本和 `src/api/client.js` 中的 API 端口。
+
+### MP3/WAV 导出失败
+
+先确认后端日志中的具体错误。常见原因包括：
+
+- 某些上传音频解码失败。
+- Python 音频依赖未安装完整。
+- 导出目录没有写入权限。
+- 曲目数据已经被删除但项目仍引用旧 track id。
+
+可先重新运行：
+
+```bash
+pnpm setup:backend
+```
+
+### Demucs 分轨不可用
+
+如果 `/api/tracks/{track_id}/stems` 返回 `Demucs is not available`，说明可选依赖还没安装：
 
 ```bash
 pnpm setup:tuning
-winget install BreakfastQuay.RubberBand
 ```
 
-### 分轨调试一直是灰色模拟波形
+如果安装后仍失败，检查 Torch、torchaudio、TorchCodec 和本机 Python 环境是否一致。GPU 用户还需要确认 CUDA 版 Torch 与显卡驱动匹配。
 
-真实分轨依赖 Demucs。先安装可选依赖：
+### Rubber Band 不可用
+
+Harmonic Tuning 会优先找 `rubberband-r3` 或 `rubberband`。如果找不到，调音质量会降级。请安装 Rubber Band CLI，并确认命令在终端中可直接运行：
 
 ```bash
-pnpm setup:tuning
+rubberband-r3 --help
 ```
 
-然后重启后端或重新运行：
+或：
 
 ```bash
-pnpm dev
+rubberband --help
 ```
 
-上传歌曲后，SmartMix 会在基础分析完成时自动排队跑 Demucs。长歌或 CPU 模式可能需要较久；等待期间分轨调试界面会显示灰色模拟波形和扫描态。完成后会自动加载真实 stems，波形变为蓝色。已生成的结果会缓存在 `backend/data/stems/`，下次选择同一首歌会直接复用缓存。
+### 中文显示乱码
 
-### 分析结果不准
+README 和后端 JSON 都使用 UTF-8。Windows PowerShell 旧环境如果显示乱码，可以尝试：
 
-BPM、Key 和 Camelot 都是算法估计，复杂现场录音、弱节奏、古典音乐、强变速歌曲可能不稳定。可以通过手动调整 IN/OUT 点、排序策略、Deck EQ 和过渡策略来修正听感。
-
-## 技术文档
-
-更详细的技术方案、模块职责、API、算法原理和实现细节见：
-
-[TECHNICAL_DESIGN.md](./TECHNICAL_DESIGN.md)
-
-## 双曲重组 / Mashup Builder
-
-SmartMix 现在提供 “双曲重组 / Mashup Builder” 第一版，用于把两首已上传歌曲自动拆成 8/16 小节段落，并基于 BPM、Camelot、energy、vocal density、timbre 和 transition candidates 生成 mashup / re-edit 拼接方案。它不训练模型，使用规则系统复用现有 `backend/analysis.py` 的节拍、小节、乐句、能量、调性和过渡候选分析。
-
-工作流：
-
-1. 在前端上传并分析至少两首歌。
-2. 在 “双曲重组 / Mashup Builder” 面板选择 Song A / Song B、mode、8/16 bars 和 useStems。
-3. 点击 “分析段落” 查看两首歌的 segment blocks。
-4. 点击 “生成拼接方案” 查看新的 plan 时间线和兼容性警告。
-5. 点击 “渲染试听/导出” 生成新的 WAV，下载链接由 `/api/exports/{filename}` 提供。
-
-支持模式：
-
-- `smooth_join`：A 的 intro/verse/chorus 接 B 的兼容 chorus/outro。
-- `hook_swap`：A verse、B chorus、A breakdown、B chorus/outro。
-- `a_vocal_b_instrumental`：A vocals 叠加 B instrumental。
-- `b_vocal_a_instrumental`：B vocals 叠加 A instrumental。
-- `energy_build`：低能量到高能量排序组合，确保两首歌都出现。
-- `auto`：从以上模板中选择评分最高的方案。
-
-如果 Demucs stems 缓存可用，layered 模式会使用 `vocals` stem 与另一首歌的 `drums + bass + other` instrumental 组合；否则会降级到 full mix 并在 warnings 中提示。渲染阶段会做 BPM 对齐，time-stretch 限制在 0.88x 到 1.12x，并进行 LUFS normalize。Camelot 不强制移调，第一版只输出调性兼容性 warnings。
-
-新增 API：
-
-- `POST /api/mashup/analyze`
-- `POST /api/mashup/plan`
-- `POST /api/mashup/render`
-
-## 双曲重组 / Mashup Builder v2
-
-新版 Mashup Builder 不再只是固定长度段落拼接，而是一个音乐感知的双曲重组原型。系统会优先使用 `phrases`、`bars` 和 `transition_candidates` 寻找更自然的段落边界，并避免把切点放在强人声中间；如果结构信息不足，才回退到 8/16/32 小节候选段落。
-
-计划生成会根据 BPM stretch ratio、Camelot 兼容性、phrase/downbeat 对齐、energy flow、人声冲突、低频冲突和 brightness/timbre 差异进行可解释评分。系统会自动选择 `hard_cut`、`crossfade`、`bass_swap`、`filter_sweep`、`echo_out`、`reverb_tail`、`vocal_over_instrumental` 或 `breakdown_bridge` 等过渡策略，并在 quality report 里解释每个转场为什么这样处理。
-
-渲染层现在使用 layered timeline，而不是把旧 plan items 直接 append。`/api/mashup/plan` 会保留旧 `plan` 字段用于前端兼容，同时新增 `items`、`layers`、`transitions`、`targetBpm` 和 `targetCamelot`。`/api/mashup/render` 会优先渲染 `layers`：每个 layer 明确声明来源歌曲、stem、timeline 区间、stretch/pitch 策略和自动化包络。
-
-当 Demucs stems 可用时，`a_vocal_b_instrumental` 和 `b_vocal_a_instrumental` 会使用一首歌的 `vocals` stem 叠加另一首歌的 `drums + bass + other` instrumental，并对人声冲突和低频冲突做 duck / mute / bass swap。没有 stems 时不会假装能干净分离，会回退到 full mix 并返回 warning。
-
-渲染器支持 equal-power crossfade、downbeat hard cut microfade、stem-aware vocal + instrumental、bass stem swap、filter sweep、echo out / reverb tail、sidechain-like duck、LUFS normalize 和最终 limiter。Rubber Band / Demucs 可提升效果；不可用时会使用现有 fallback 并在 report 中说明风险。
-
-`POST /api/mashup/plan` 仍兼容旧参数，并新增可选项：
-
-```json
-{
-  "transitionStrictness": "balanced",
-  "stemUsage": "auto",
-  "vocalPriority": "auto",
-  "energyCurve": "smooth",
-  "returnAlternatives": true
-}
+```powershell
+chcp 65001
+Get-Content README.md -Encoding utf8
 ```
 
-返回中会包含 `qualityReport` 和可选 `alternativePlans`。请注意：这仍然是规则系统 + DSP 的 re-edit/mashup 原型，不是专业人工 remix 的完全替代；它的目标是给出更可听、更可解释、可继续人工微调的第一版方案。
+## 相关文档
 
-## Groove 人声接力 / Groove-Bed Mashup Engine
+- `SMARTMIX_PRODUCT_SPEC.md`：产品规格。
+- `TECHNICAL_DESIGN.md`：技术设计。
+- `SORTING_ALGORITHM.md`：排序算法说明。
+- `SONG_MATCHING_SCORING.md`：两首歌匹配评分。
+- `ENERGY_SCORING.md`：能量评分。
+- `DIFF_MST_INTEGRATION.md`：Diff-MST 集成记录。
+- `docs/ARCHITECTURE_REVIEW.md`：架构审查。
+- `auto_mix/README.md`：独立 auto mix 模块说明。
 
-新版还新增了 `groove_vocal_handoff`、`a_vocal_on_b_groove`、`b_vocal_on_a_groove`、`call_response_groove` 和 `hook_exchange_groove` 模式。这个路径不再以 “A 段淡出、B 段淡入” 为核心，而是先选一个连续稳定的 GrooveBed，再把 A/B 的 vocals phrase 放到同一个 groove 上做歌词接力。
+## 当前状态
 
-GrooveBed 来自 Demucs stems 的 `drums + bass + other`，可以是 A 伴奏、B 伴奏或 hybrid bed，例如 A drums + B bass + B other。系统会按 drum activity、bass stability、低 vocal leakage、loopability、Camelot 和 BPM 兼容性评分；在 `useStems=true` 时，GrooveBed 不包含 vocals stem。找不到完整 stems 时，接口会返回 `stems_required` 或 fallback warning，不会假装用两个 full mix 做干净 mashup。
-
-VocalPhrase 会从 vocals stem 中按 2/4/8 bars 提取短句，保留 pickup 和 tail，并尽量避免切在歌词中间。VocalArrangement 会把 A/B phrase 按 call-response、lead-hook 或 hook exchange 方式铺到同一个 bed 上；同一时间只允许一个 main vocal，上一句尾音可以低音量延续，但下一句进入时会被压低或用 echo/reverb tail 处理。
-
-`render_groove_vocal_mashup()` 的真实渲染流程是：循环或排列 drums/bass/other bed，loop 边界做 10-50ms microfade；把 vocals stem 逐句放入 timeline；对 vocal 做 highpass、轻压缩、响度匹配和少量 room；vocal 活跃时对 bed 做 sidechain-like duck；最后做 glue、LUFS normalize 和 limiter。前端会显示选中的 bed 来源、loopability、vocal leakage、每个 vocal event 的 stretchRatio / pitchShift 风险和 warnings。
-
-这个模式的目标是 bootleg mashup / vocal edit 的听感：统一鼓和低频底座，A/B 歌词在同一个 groove 上接力，而不是两首 full mix 长时间重叠 crossfade。Demucs stems 对该模式是核心依赖；Rubber Band 可进一步提升后续变速/调音质量。
-
-## Multi-Scale Music Segmentation
-
-Update: the segmentation engine now returns both `sections` and
-`minorSections`. `sections` are stable major structural blocks for the legacy
-segment API; `minorSections` are 2/4/8-bar micro blocks for vocal phrase and
-bed extraction. Vocal phrase extraction first detects vocal activity islands,
-then cuts short 2/4/8-bar phrases around those islands, preserving pickup and
-tail metadata instead of blindly scanning every fixed window. Groove bed
-extraction scans 4/8/16-bar subwindows inside each section and rejects clean-bed
-candidates when stems are unavailable, so a larger section with vocals in the
-middle can still yield a low-leakage instrumental bed from its intro/outro bars.
-
-Mashup Builder 的切段逻辑现在由 `backend/segmentation.py` 统一负责，不再把固定 8/16 bars 作为主逻辑。系统会先构建 bar-level timeline，并为每个 bar 提取 chroma、MFCC、spectral contrast/centroid/flux、RMS、onset strength、energy、vocalDensity、drumActivity、bassEnergy 和 otherEnergy；如果 Demucs stems 可用，vocal/drum/bass/other 活动直接来自 stems，否则会使用 full mix 和分析曲线 fallback，并降低 report confidence。
-
-分割引擎会构建 harmonic、timbre、rhythm、energy 四个 self-similarity matrices，融合后用多尺度 Foote-style novelty curve 找 4/8/16 bars 变化点，再和 phrase boundary、transition candidates、energy/vocal/drum/bass 变化融合成 boundary candidates。候选边界会吸附到 bar / phrase / transition candidate，并在切到持续人声时标记 `cuts_vocal_phrase`。
-
-`/api/mashup/analyze` 会返回 `segmentationReport`，包含 structural sections、vocal phrases、groove bed candidates、safe cut points、warnings 和 debug 信息。Groove 模式会优先使用 `extract_vocal_phrases_from_sections()` 和 `extract_groove_bed_candidates()` 的结果：vocal phrase 以 2/4/8 bars 为单位，支持 pickup/tail；groove bed 只使用 `drums + bass + other`，不包含 vocals stem，并按 vocal leakage、drum activity、bass stability、loopability、energy consistency 和 harmonic compatibility 评分。
-
-前端 Mashup Builder 的 “Segmentation Debug” 区块会展示每首歌的 sections、vocal phrases、groove beds 和 safe cut points，方便检查听感问题到底来自切段、bed 选择，还是后续编排/渲染。
+SmartMix 仍是本地优先的开发版本。核心上传、分析、排序、预览、导出、项目保存、Pair Match、教学试听、分轨调试、Mashup 和调音管线已经具备可运行路径；高质量 stems、GPU 加速和 Rubber Band 调音依赖本机环境，首次运行可能需要较长下载和处理时间。
