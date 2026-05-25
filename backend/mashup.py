@@ -546,6 +546,10 @@ def choose_transition_type_v2(
         if vocal_tail:
             return {"type": "vocal_drop", "confidence": 0.86, "reason": "Incoming hook/drop is aligned, but outgoing vocal must exit before impact.", "requiredStems": bool(use_stems), "fallbackType": "hard_cut", "warnings": []}
         return {"type": "hard_cut", "confidence": 0.9, "reason": "Clean downbeat and harmonic match supports a short hard cut into the hook/drop.", "requiredStems": False, "fallbackType": "equal_power_crossfade", "warnings": []}
+    if vocal_tail and incoming_vocal:
+        if use_stems:
+            return {"type": "vocal_drop", "confidence": 0.82, "reason": "Both sides contain active vocals; outgoing vocal must drop before incoming phrase to avoid lyric clash.", "requiredStems": True, "fallbackType": "echo_out", "warnings": []}
+        return {"type": "breakdown_bridge", "confidence": 0.54, "reason": "Both sides contain active vocals and stems are unavailable; avoid a full-mix vocal crossfade.", "requiredStems": False, "fallbackType": "echo_out", "warnings": ["High vocal conflict without stems; using bridge instead of vocal crossfade."]}
     if vocal_tail and not incoming_vocal:
         return {"type": "echo_out", "confidence": 0.78, "reason": "Outgoing vocal tail would sound chopped; echo tail masks the exit.", "requiredStems": False, "fallbackType": "reverb_tail", "warnings": []}
     if bass_conflict:
@@ -756,6 +760,12 @@ def _item_automation(item: dict[str, Any], stem: str, *, duck: bool = False) -> 
         if transition_out.get("type") == "bass_swap":
             start = max(0.0, 1.0 - out_dur)
             gain = _merge_env(gain, [[start, 0.0], [min(1.0, start + out_dur * 0.45), 0.0], [min(1.0, start + out_dur * 0.60), -24.0], [1.0, -60.0]])
+    if stem == "vocals":
+        if transition_in.get("type") == "bass_swap":
+            gain = _merge_env(gain, [[0.0, -60.0], [min(1.0, in_dur * 0.62), -60.0], [max(0.001, in_dur * 0.92), 0.0]])
+        if transition_out.get("type") in {"bass_swap", "vocal_drop"}:
+            start = max(0.0, 1.0 - out_dur)
+            gain = _merge_env(gain, [[start, 0.0], [min(1.0, start + out_dur * 0.38), -60.0], [1.0, -60.0]])
     if stem == "vocals" and (transition_in.get("automation", {}).get("vocal_duck") or transition_out.get("automation", {}).get("vocal_duck")):
         gain = _merge_env(gain, [[0.0, -12.0], [1.0, -12.0]])
     if transition_in.get("type") == "filter_sweep":
@@ -909,6 +919,8 @@ def _prepare_layer_audio(audio: np.ndarray, layer: dict[str, Any], sr: int) -> n
 
 def _fit_layer_audio(audio: np.ndarray, layer: dict[str, Any], sr: int) -> np.ndarray:
     target = max(1, int(round((float(layer.get("timelineEnd", 0)) - float(layer.get("timelineStart", 0))) * sr)))
+    if layer.get("role") == "main_vocal" and audio.shape[1] > target:
+        return audio.astype(np.float32)
     if layer.get("role") == "tail":
         target = max(target, min(audio.shape[1] + int(2.0 * sr), int(3.0 * sr)))
     if audio.shape[1] >= target:
@@ -1143,11 +1155,18 @@ def build_layered_transition(
     elif transition_type == "bass_swap":
         if use_stems:
             for stem in ("drums", "other", "vocals"):
-                layer_events.append(_layer_event(seg_a, stem, start, start + duration, "bed", target_bpm, {"gain": [[0, 0], [1, -8 if stem == "drums" else -60]], "gainCurve": "equal_power_out"}))
-                layer_events.append(_layer_event(seg_b, stem, start, start + duration, "bed", target_bpm, {"gain": [[0, -8 if stem == "drums" else -60], [1, 0]], "gainCurve": "equal_power_in"}))
+                if stem == "vocals":
+                    out_gain = [[0, 0], [0.32, -60], [1, -60]]
+                    in_gain = [[0, -60], [0.68, -60], [1, 0]]
+                else:
+                    out_gain = [[0, 0], [1, -8 if stem == "drums" else -60]]
+                    in_gain = [[0, -8 if stem == "drums" else -60], [1, 0]]
+                layer_events.append(_layer_event(seg_a, stem, start, start + duration, "bed", target_bpm, {"gain": out_gain, "gainCurve": "equal_power_out" if stem != "vocals" else None}))
+                layer_events.append(_layer_event(seg_b, stem, start, start + duration, "bed", target_bpm, {"gain": in_gain, "gainCurve": "equal_power_in" if stem != "vocals" else None}))
             layer_events.append(_layer_event(seg_a, "bass", start, start + duration, "bass_out", target_bpm, {"gain": [[0, 0], [0.45, 0], [0.6, -24], [1, -60]]}))
             layer_events.append(_layer_event(seg_b, "bass", start, start + duration, "bass_in", target_bpm, {"gain": [[0, -60], [0.45, -24], [0.6, 0], [1, 0]]}))
             fixes.append("bass conflict fixed by bass_swap")
+            fixes.append("vocal overlap prevented by dropping outgoing vocals before incoming vocals open")
             reason = "Both segments have high bass energy; outgoing bass exits before incoming bass reaches full level."
         else:
             layer_events.append(_layer_event(seg_a, "full", start, start + duration, "bed", target_bpm, {"gain": [[0, 0], [1, -60]], "lowGainDb": [[0, 0], [0.5, -12], [1, -24]], "gainCurve": "equal_power_out"}))

@@ -706,7 +706,7 @@ def _candidate_vocal_windows(section: dict[str, Any], bar_features: list[BarFeat
         cursor = run_start
         while cursor < run_end:
             remaining = run_end - cursor
-            size = 8 if remaining >= 8 and _has_soft_boundary(densities, cursor + 8, run_end) else 4 if remaining >= 4 else 2
+            size = 8 if remaining >= 8 and _has_soft_boundary(densities, cursor + 8, run_end) else 4 if remaining >= 3 else 2
             if remaining > 8:
                 size = 4
             if remaining == 3:

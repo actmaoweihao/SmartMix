@@ -179,6 +179,53 @@ class GrooveMashupTests(unittest.TestCase):
 
         self.assertLessEqual(max_overlap, 0.5)
 
+    def test_vocal_handoff_waits_for_full_phrase_duration(self) -> None:
+        bed = {
+            "id": "bed_test",
+            "source": "hybrid",
+            "drumsSource": "A",
+            "bassSource": "A",
+            "otherSource": "A",
+            "bpm": 120,
+            "camelot": "8A",
+            "score": 80,
+        }
+        phrase_a = {
+            "id": "A_long",
+            "source": "A",
+            "trackId": "a",
+            "sourceStart": 1.0,
+            "sourceEnd": 6.2,
+            "bars": 2,
+            "bpm": 120,
+            "camelot": "8A",
+            "score": 90,
+            "downbeatOffset": 0.0,
+            "hasTail": True,
+        }
+        phrase_b = {**phrase_a, "id": "B_long", "source": "B", "trackId": "b"}
+
+        arrangement = build_vocal_handoff_arrangement(bed, [phrase_a], [phrase_b], "groove_vocal_handoff", 20)
+        first, second = arrangement["vocalEvents"][:2]
+
+        self.assertGreaterEqual(first["timelineEnd"] - first["timelineStart"], 5.1)
+        self.assertGreaterEqual(second["timelineStart"], first["timelineEnd"] - 0.01)
+        self.assertGreater(second["timelineStart"], first["mainTimelineEnd"])
+
+    def test_render_vocal_event_does_not_truncate_full_phrase(self) -> None:
+        event = {
+            "trackId": "a",
+            "sourceStart": 1.0,
+            "sourceEnd": 4.4,
+            "timelineStart": 0.0,
+            "timelineEnd": 2.0,
+            "stretchRatio": 1.0,
+        }
+        vocal, warnings = groove._render_vocal_event(event, {"a": self.track_a}, SAMPLE_RATE)
+
+        self.assertFalse(warnings)
+        self.assertGreaterEqual(vocal.shape[1] / SAMPLE_RATE, 3.3)
+
     def test_vocal_stretch_policy(self) -> None:
         bed = find_candidate_groove_beds(self.track_a, self.track_b)[0]
         phrase = extract_vocal_phrases({**self.track_b, "bpm": 90}, self.stems / "b" / "demucs_api" / "vocals.wav")[0]

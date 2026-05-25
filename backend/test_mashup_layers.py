@@ -100,6 +100,38 @@ class MashupLayerRouterTests(unittest.TestCase):
         self.assertLess(b_bass["automation"]["gain"][0][1], b_bass["automation"]["gain"][-1][1])
         self.assertTrue(any("bass conflict fixed" in fix for fix in transition["fixes"]))
 
+    def test_bass_swap_drops_vocals_before_incoming_vocals_open(self) -> None:
+        a = item_segment(trackId="a", source="A", bassEnergy=0.9, vocalDensity=0.8, vocalEnd=0.85)
+        b = item_segment(trackId="b", source="B", bassEnergy=0.88, vocalDensity=0.8, vocalStart=0.85)
+
+        transition = build_layered_transition(a, b, "auto", "bass_swap", True, {"targetBpm": 120})
+        a_vocal = next(layer for layer in transition["layerEvents"] if layer["source"] == "A" and layer["stem"] == "vocals")
+        b_vocal = next(layer for layer in transition["layerEvents"] if layer["source"] == "B" and layer["stem"] == "vocals")
+
+        self.assertLessEqual(a_vocal["automation"]["gain"][1][0], 0.34)
+        self.assertLessEqual(a_vocal["automation"]["gain"][1][1], -50)
+        self.assertGreaterEqual(b_vocal["automation"]["gain"][1][0], 0.66)
+        self.assertLessEqual(b_vocal["automation"]["gain"][1][1], -50)
+        self.assertTrue(any("vocal overlap prevented" in fix for fix in transition["fixes"]))
+
+    def test_high_vocal_conflict_routes_to_vocal_drop_with_stems(self) -> None:
+        a = item_segment(vocalDensity=0.8, vocalEnd=0.9, isCleanExit=False)
+        b = item_segment(source="B", trackId="b", vocalDensity=0.85, vocalStart=0.9, isCleanEntry=False)
+        compatibility = score_segment_transition(a, b, "smooth_join", {"useStems": True})
+        decision = choose_transition_type_v2(a, b, compatibility, "smooth_join", True)
+
+        self.assertEqual(decision["type"], "vocal_drop")
+        self.assertIn("active vocals", decision["reason"])
+
+    def test_high_vocal_conflict_without_stems_avoids_crossfade(self) -> None:
+        a = item_segment(vocalDensity=0.8, vocalEnd=0.9, isCleanExit=False)
+        b = item_segment(source="B", trackId="b", vocalDensity=0.85, vocalStart=0.9, isCleanEntry=False)
+        compatibility = score_segment_transition(a, b, "smooth_join", {"useStems": False})
+        decision = choose_transition_type_v2(a, b, compatibility, "smooth_join", False)
+
+        self.assertNotEqual(decision["type"], "equal_power_crossfade")
+        self.assertTrue(decision["warnings"])
+
     def test_equal_power_crossfade(self) -> None:
         out = make_equal_power_fade_out(101).reshape(-1)
         inn = make_equal_power_fade_in(101).reshape(-1)
@@ -213,6 +245,44 @@ class MashupLayerAudioTests(unittest.TestCase):
         self.assertFalse(np.isinf(audio).any())
         self.assertLessEqual(float(np.max(np.abs(audio))), 1.0)
         self.assertFalse(any("fell back" in warning for warning in warnings))
+
+    def test_layered_main_vocal_is_not_truncated_to_short_timeline(self) -> None:
+        import backend.mashup as mashup
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            uploads = root / "uploads"
+            stems = root / "stems"
+            uploads.mkdir()
+            stems.mkdir()
+            track_a = make_test_track(uploads, "a", 220)
+            write_test_stems(stems, "a", 220)
+            original_stem_dir = mashup.STEM_DIR
+            mashup.STEM_DIR = stems
+            try:
+                layer = {
+                    "id": "vocal_layer",
+                    "trackId": "a",
+                    "source": "A",
+                    "segmentId": "A_phrase",
+                    "stem": "vocals",
+                    "sourceStart": 0.0,
+                    "sourceEnd": 3.0,
+                    "timelineStart": 0.0,
+                    "timelineEnd": 1.0,
+                    "gainDb": 0.0,
+                    "stretchRatio": 1.0,
+                    "pitchShiftSemitones": 0,
+                    "automation": {"gain": [[0, 0], [1, 0]]},
+                    "role": "main_vocal",
+                    "warnings": [],
+                }
+                audio, warnings = render_layered_mashup({"targetBpm": 120, "layers": [layer]}, {"a": track_a}, use_stems=True)
+            finally:
+                mashup.STEM_DIR = original_stem_dir
+
+        self.assertFalse(warnings)
+        self.assertGreater(audio.shape[1] / SAMPLE_RATE, 2.8)
 
 
 if __name__ == "__main__":

@@ -348,6 +348,7 @@ def build_vocal_handoff_arrangement(
     events = []
     cursor = 0.0
     bar_sec = 240.0 / max(target_bpm, 1.0)
+    handoff_gap = min(0.45, bar_sec * 0.25)
     warnings: list[str] = []
     for phrase in selected:
         if cursor >= target_duration:
@@ -358,8 +359,14 @@ def build_vocal_handoff_arrangement(
             continue
         pitch = choose_groove_pitch_policy(bed, phrase, allow_vocal_pitch_shift=allow_vocal_pitch_shift)
         warnings.extend(pitch["warnings"])
-        duration = min(float(phrase["bars"]) * bar_sec, target_duration - cursor)
+        main_duration = float(phrase["bars"]) * bar_sec
+        source_duration = max(0.1, float(phrase.get("sourceEnd", 0.0)) - float(phrase.get("sourceStart", 0.0)))
+        rendered_source_duration = source_duration / max(stretch, 1e-6)
         event_start = max(0.0, cursor - float(phrase.get("downbeatOffset") or 0.0))
+        event_end = event_start + max(main_duration + float(phrase.get("downbeatOffset") or 0.0), rendered_source_duration)
+        if event_end > target_duration and events:
+            warnings.append(f"{phrase['id']} skipped because the full vocal phrase would be cut at the target duration.")
+            continue
         tail = "echo" if phrase.get("hasTail") else "natural"
         events.append(
             {
@@ -371,18 +378,21 @@ def build_vocal_handoff_arrangement(
                 "sourceStart": phrase["sourceStart"],
                 "sourceEnd": phrase["sourceEnd"],
                 "timelineStart": round(event_start, 3),
-                "timelineEnd": round(cursor + duration, 3),
+                "timelineEnd": round(event_end, 3),
+                "mainTimelineStart": round(cursor, 3),
+                "mainTimelineEnd": round(cursor + main_duration, 3),
+                "protectedUntil": round(event_end + handoff_gap, 3),
                 "gainDb": 0.0,
                 "pitchShiftSemitones": 0 if not allow_vocal_pitch_shift else pitch.get("vocalPitchShiftSemitones", 0),
                 "bedPitchShiftSemitones": pitch.get("bedPitchShiftSemitones", 0),
                 "stretchRatio": round(stretch, 4),
                 "duckBedDb": -2.5,
                 "tailTreatment": tail,
-                "handoffToNext": "call_response" if len(events) % 2 == 0 else "overlap_tail",
+                "handoffToNext": "call_response",
                 "warnings": list(phrase.get("warnings") or []),
             }
         )
-        cursor += max(duration, bar_sec * 2)
+        cursor = _next_vocal_cursor(event_end + handoff_gap, bar_sec)
     score = _arrangement_score(bed, events, warnings)
     return {
         "status": "ok",
@@ -585,6 +595,8 @@ def _render_vocal_event(event: dict[str, Any], assets: dict[str, dict[str, Any]]
     target = max(1, int((float(event.get("timelineEnd", 0)) - float(event.get("timelineStart", 0))) * sr))
     if vocal.shape[1] < target:
         vocal = np.pad(vocal, ((0, 0), (0, target - vocal.shape[1])))
+    elif vocal.shape[1] > target:
+        target = vocal.shape[1]
     return _peak_limit(vocal[:, :target], 0.8), []
 
 
@@ -618,6 +630,11 @@ def _alternate(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[
         if index < len(right):
             result.append(right[index])
     return result
+
+
+def _next_vocal_cursor(time_value: float, bar_sec: float) -> float:
+    beat = max(0.1, bar_sec / 4.0)
+    return float(math.ceil(max(0.0, time_value) / beat) * beat)
 
 
 def _groove_ui_items(arrangement: dict[str, Any]) -> list[dict[str, Any]]:
