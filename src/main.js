@@ -58,10 +58,7 @@ const state = {
     mode: "groove_vocal_handoff",
     barsPerSegment: 16,
     useStems: true,
-    transitionStrictness: "balanced",
-    stemUsage: "auto",
     vocalPriority: "auto",
-    energyCurve: "smooth",
     bedPreference: "auto",
     allowHybridBed: true,
     allowVocalPitchShift: false,
@@ -291,6 +288,7 @@ app.innerHTML = `
               <button id="mashupRenderButton" type="button" class="export">渲染试听/导出</button>
             </div>
           </div>
+          <div id="mashupFlow" class="mashup-flow"></div>
           <div class="mashup-controls">
             <label>
               <span>Song A</span>
@@ -325,35 +323,11 @@ app.innerHTML = `
             </label>
             <label class="mashup-stems"><input id="mashupUseStems" type="checkbox" checked /><span>useStems</span></label>
             <label>
-              <span>Transition strictness</span>
-              <select id="mashupTransitionStrictness">
-                <option value="conservative">conservative</option>
-                <option value="balanced" selected>balanced</option>
-                <option value="creative">creative</option>
-              </select>
-            </label>
-            <label>
-              <span>Stem usage</span>
-              <select id="mashupStemUsage">
-                <option value="auto" selected>auto</option>
-                <option value="force_full_mix">force full mix</option>
-                <option value="prefer_stems">prefer stems</option>
-              </select>
-            </label>
-            <label>
               <span>Vocal priority</span>
               <select id="mashupVocalPriority">
                 <option value="auto" selected>auto</option>
                 <option value="prefer_a">prefer A vocal</option>
                 <option value="prefer_b">prefer B vocal</option>
-              </select>
-            </label>
-            <label>
-              <span>Energy curve</span>
-              <select id="mashupEnergyCurve">
-                <option value="smooth" selected>smooth</option>
-                <option value="build">build</option>
-                <option value="drop_focused">drop-focused</option>
               </select>
             </label>
             <label>
@@ -558,10 +532,7 @@ const els = {
   mashupMode: document.querySelector("#mashupMode"),
   mashupBars: document.querySelector("#mashupBars"),
   mashupUseStems: document.querySelector("#mashupUseStems"),
-  mashupTransitionStrictness: document.querySelector("#mashupTransitionStrictness"),
-  mashupStemUsage: document.querySelector("#mashupStemUsage"),
   mashupVocalPriority: document.querySelector("#mashupVocalPriority"),
-  mashupEnergyCurve: document.querySelector("#mashupEnergyCurve"),
   mashupBedPreference: document.querySelector("#mashupBedPreference"),
   mashupAllowHybridBed: document.querySelector("#mashupAllowHybridBed"),
   mashupAllowVocalPitchShift: document.querySelector("#mashupAllowVocalPitchShift"),
@@ -569,6 +540,7 @@ const els = {
   mashupAnalyzeButton: document.querySelector("#mashupAnalyzeButton"),
   mashupPlanButton: document.querySelector("#mashupPlanButton"),
   mashupRenderButton: document.querySelector("#mashupRenderButton"),
+  mashupFlow: document.querySelector("#mashupFlow"),
   mashupSegments: document.querySelector("#mashupSegments"),
   mashupTimeline: document.querySelector("#mashupTimeline"),
   mashupResult: document.querySelector("#mashupResult"),
@@ -637,10 +609,7 @@ function bindEvents() {
   els.mashupMode.addEventListener("change", syncMashupSettings);
   els.mashupBars.addEventListener("change", syncMashupSettings);
   els.mashupUseStems.addEventListener("change", syncMashupSettings);
-  els.mashupTransitionStrictness.addEventListener("change", syncMashupSettings);
-  els.mashupStemUsage.addEventListener("change", syncMashupSettings);
   els.mashupVocalPriority.addEventListener("change", syncMashupSettings);
-  els.mashupEnergyCurve.addEventListener("change", syncMashupSettings);
   els.mashupBedPreference.addEventListener("change", syncMashupSettings);
   els.mashupAllowHybridBed.addEventListener("change", syncMashupSettings);
   els.mashupAllowVocalPitchShift.addEventListener("change", syncMashupSettings);
@@ -3049,10 +3018,7 @@ function syncMashupSettings() {
   state.mashup.mode = els.mashupMode.value || "auto";
   state.mashup.barsPerSegment = Number(els.mashupBars.value) || 16;
   state.mashup.useStems = els.mashupUseStems.checked;
-  state.mashup.transitionStrictness = els.mashupTransitionStrictness.value || "balanced";
-  state.mashup.stemUsage = els.mashupStemUsage.value || "auto";
   state.mashup.vocalPriority = els.mashupVocalPriority.value || "auto";
-  state.mashup.energyCurve = els.mashupEnergyCurve.value || "smooth";
   state.mashup.bedPreference = els.mashupBedPreference.value || "auto";
   state.mashup.allowHybridBed = els.mashupAllowHybridBed.checked;
   state.mashup.allowVocalPitchShift = els.mashupAllowVocalPitchShift.checked;
@@ -3113,10 +3079,7 @@ async function generateMashupPlan() {
         ...mashupRequestBase(),
         mode: state.mashup.mode,
         targetDurationSec: 180,
-        transitionStrictness: state.mashup.transitionStrictness,
-        stemUsage: state.mashup.stemUsage,
         vocalPriority: state.mashup.vocalPriority,
-        energyCurve: state.mashup.energyCurve,
         bedPreference: state.mashup.bedPreference,
         allowHybridBed: state.mashup.allowHybridBed,
         allowVocalPitchShift: state.mashup.allowVocalPitchShift,
@@ -3211,10 +3174,7 @@ function renderMashupPanel() {
   els.mashupMode.value = state.mashup.mode;
   els.mashupBars.value = String(state.mashup.barsPerSegment);
   els.mashupUseStems.checked = state.mashup.useStems;
-  els.mashupTransitionStrictness.value = state.mashup.transitionStrictness;
-  els.mashupStemUsage.value = state.mashup.stemUsage;
   els.mashupVocalPriority.value = state.mashup.vocalPriority;
-  els.mashupEnergyCurve.value = state.mashup.energyCurve;
   els.mashupBedPreference.value = state.mashup.bedPreference;
   els.mashupAllowHybridBed.checked = state.mashup.allowHybridBed;
   els.mashupAllowVocalPitchShift.checked = state.mashup.allowVocalPitchShift;
@@ -3228,9 +3188,27 @@ function renderMashupPanel() {
   els.mashupPlanButton.textContent = state.mashup.planning ? "生成中..." : "生成拼接方案";
   els.mashupRenderButton.textContent = state.mashup.rendering ? "渲染中..." : "渲染试听/导出";
 
+  renderMashupFlow();
   renderMashupSegments();
   renderMashupTimeline();
   renderMashupResult();
+}
+
+function renderMashupFlow() {
+  if (!els.mashupFlow) return;
+  const hasPair = Boolean(state.mashup.trackAId && state.mashup.trackBId && state.mashup.trackAId !== state.mashup.trackBId);
+  const steps = [
+    { label: "1. Pick songs", detail: hasPair ? "Song A/B ready" : "Choose two analyzed tracks", state: hasPair ? "done" : "active" },
+    { label: "2. Analyze", detail: state.mashup.analysis ? "Sections, phrases, beds ready" : "Find sections and vocal phrases", state: state.mashup.analysis ? "done" : hasPair ? "active" : "pending" },
+    { label: "3. Build plan", detail: state.mashup.plan ? `${Math.round(state.mashup.plan.score || 0)}/100` : "Choose groove bed and handoff", state: state.mashup.plan ? "done" : state.mashup.analysis ? "active" : "pending" },
+    { label: "4. Render", detail: state.mashup.renderResult ? "Preview and download ready" : "Export WAV preview", state: state.mashup.renderResult ? "done" : state.mashup.plan ? "active" : "pending" },
+  ];
+  els.mashupFlow.innerHTML = steps.map((step) => `
+    <div class="mashup-flow-step ${step.state}">
+      <strong>${escapeHtml(step.label)}</strong>
+      <span>${escapeHtml(step.detail)}</span>
+    </div>
+  `).join("");
 }
 
 function renderMashupSegments() {

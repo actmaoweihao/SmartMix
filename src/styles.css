@@ -933,6 +933,46 @@ input[type="range"] {
   gap: 8px;
 }
 
+.mashup-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.mashup-flow-step {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  padding: 8px;
+}
+
+.mashup-flow-step strong,
+.mashup-flow-step span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mashup-flow-step span,
+.mashup-plan-head small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mashup-flow-step.active {
+  border-color: rgba(101, 215, 242, 0.5);
+  background: rgba(101, 215, 242, 0.09);
+}
+
+.mashup-flow-step.done {
+  border-color: rgba(48, 213, 160, 0.5);
+  background: rgba(48, 213, 160, 0.09);
+}
+
 .mashup-controls {
   align-items: end;
   flex-wrap: wrap;
@@ -2230,6 +2270,7 @@ tr.selected {
 
   .button-row,
   .match-inputs,
+  .mashup-flow,
   .mashup-segments,
   .component-grid,
   .match-score,

@@ -12,7 +12,6 @@ from scipy import signal
 
 from .arrangement import (
     build_music_segments,
-    choose_transition_type,
     score_segment_transition,
 )
 from .loudness import loudness_metrics, normalize_loudness
@@ -26,15 +25,6 @@ LAYER_MODES = {"full_mix", "vocals", "drums", "bass", "other", "drums_bass_other
 SEQUENTIAL_MODES = {"smooth_join", "hook_swap", "energy_build"}
 LAYERED_MODES = {"a_vocal_b_instrumental", "b_vocal_a_instrumental"}
 GROOVE_MODES = {"groove_vocal_handoff", "a_vocal_on_b_groove", "b_vocal_on_a_groove", "call_response_groove", "hook_exchange_groove"}
-
-RENDER_REVIEW_FINDINGS = [
-    "Before the layered renderer, Mashup render mostly consumed old segment items and could behave like full_mix append plus crossfade.",
-    "Stem policies were present in plan items but not consistently transformed into independent vocals/drums/bass/other layer events.",
-    "bass_swap and vocal duck fixes could be reported without enforcing per-stem bass/vocal gain envelopes in the timeline.",
-    "transition automation lived partly in JSON fields and partly in item fades; there was no unified layer automation engine.",
-    "time-stretch and pitch policy warnings were not attached to every rendered layer, making risky artifacts easy to miss.",
-]
-
 
 def analyze_mashup_tracks(track_a: dict[str, Any], track_b: dict[str, Any], bars_per_segment: int = 16, use_stems: bool = True) -> dict[str, Any]:
     audio_a = _load_mono(Path(track_a["path"]))
@@ -269,7 +259,6 @@ def render_mashup_plan_v2(
         "transitions": render_plan.get("transitions", []),
         "layers": _layer_report(render_plan.get("layers", [])),
         "globalWarnings": _dedupe([*render_plan.get("globalWarnings", []), *render_warnings]),
-        "reviewFindings": RENDER_REVIEW_FINDINGS,
         "warnings": _dedupe(render_warnings),
         "containsInvalid": bool(not np.all(np.isfinite(rendered))),
         "renderStats": {

@@ -485,3 +485,5 @@ Get-Content README.md -Encoding utf8
 ## 当前状态
 
 SmartMix 仍是本地优先的开发版本。核心上传、分析、排序、预览、导出、项目保存、Pair Match、教学试听、分轨调试、Mashup 和调音管线已经具备可运行路径；高质量 stems、GPU 加速和 Rubber Band 调音依赖本机环境，首次运行可能需要较长下载和处理时间。
+
+Mashup Builder 的推荐使用路径见 [docs/MASHUP_UX_FLOW.md](docs/MASHUP_UX_FLOW.md)。
