@@ -1,9 +1,0 @@
-fastapi==0.121.0
-uvicorn[standard]==0.38.0
-python-multipart==0.0.20
-librosa==0.11.0
-soundfile==0.13.1
-numpy==2.2.6
-scipy==1.16.3
-imageio-ffmpeg==0.6.0
-pyloudnorm==0.1.1

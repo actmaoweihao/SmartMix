@@ -1,0 +1,1022 @@
+# Windows 读取 DDJ-FLX4 控制自研 DJ 软件需求说明
+
+## 1. 项目定位
+
+本项目用于在 Windows 系统上，通过 Python 读取 Pioneer DDJ-FLX4 的 MIDI 数据，并将 FLX4 上的按钮、旋钮、推杆、转盘等操作统一转换成简洁的控制事件。
+
+该程序不是普通 MIDI 调试工具，而是作为后续自研 DJ 软件 / 音乐交互程序的输入层。
+
+整体数据流为：
+
+```text
+DDJ-FLX4
+  ↓ USB MIDI
+Windows Python 程序
+  ↓
+解析 MIDI 数据
+  ↓
+转换为统一控制事件
+  ↓
+输出：类型 编号 数据
+  ↓
+后续接入自研 DJ 软件 / 音乐程序
+```
+
+## 2. 当前版本目标
+
+第一版只做终端版本，不做 GUI。
+
+程序需要读取 DDJ-FLX4 的所有 MIDI 输入数据，并根据官方 MIDI Message List 完成映射。
+
+最终终端只输出统一格式：
+
+```text
+类型 编号 数据
+```
+
+不输出控件名称，不输出复杂说明，不默认输出原始 MIDI 数据。
+
+## 3. 运行环境需求
+
+### 3.1 硬件环境
+
+```text
+Windows 电脑
+Pioneer DDJ-FLX4
+USB Type-C 数据线
+```
+
+### 3.2 软件环境
+
+```text
+Python 3.x
+mido
+python-rtmidi
+```
+
+安装依赖：
+
+```bash
+pip install mido python-rtmidi
+```
+
+### 3.3 使用条件
+
+```text
+Windows 已经能识别 DDJ-FLX4
+运行程序时不打开 rekordbox / Serato
+FLX4 的 MIDI 输入端口只给 Python 程序使用
+```
+
+## 4. 核心功能需求
+
+程序需要实现以下功能：
+
+```text
+1. 自动扫描 Windows MIDI 输入设备
+2. 自动查找 DDJ-FLX4
+3. 打开 DDJ-FLX4 MIDI 输入端口
+4. 实时读取所有 MIDI 输入数据
+5. 根据官方 MIDI 表识别控件
+6. 将控件转换成统一事件
+7. 终端实时输出：类型 编号 数据
+8. 未映射的数据可以提示，但正式输出只保留统一格式
+9. 不保存数据
+10. 不做 GUI
+11. 代码结构方便后续接入自研 DJ 软件
+```
+
+## 5. 输出协议
+
+最终输出只有三类：
+
+```text
+B = Button，按钮
+C = Control，连续控制量，旋钮 / 推杆统一归为这一类
+J = Jog，转盘旋转
+```
+
+统一格式：
+
+```text
+类型 编号 数据
+```
+
+例如：
+
+```text
+B 1 1
+B 1 0
+C 3 50.393701
+J 1 1
+J 1 -1
+```
+
+## 6. 按钮输出规则
+
+按钮统一使用：
+
+```text
+B 编号 状态
+```
+
+状态定义：
+
+```text
+1 = 按下
+0 = 松开
+```
+
+示例：
+
+```text
+B 8 1
+B 8 0
+```
+
+含义：
+
+```text
+按钮 8 被按下
+按钮 8 被松开
+```
+
+按钮类 MIDI 数据通常来自：
+
+```text
+note_on
+note_off
+note_on velocity=0
+```
+
+程序需要把这些 MIDI 消息统一转换为按钮状态。
+
+## 7. 旋钮 / 推杆输出规则
+
+旋钮、推杆、音量推子、EQ 旋钮、滤波旋钮、Crossfader 等都属于连续控制量。
+
+它们统一使用：
+
+```text
+C 编号 百分比
+```
+
+百分比范围：
+
+```text
+0.000000 ~ 100.000000
+```
+
+保留小数点后 6 位。
+
+示例：
+
+```text
+C 3 50.393701
+C 3 51.181102
+C 12 72.440945
+```
+
+含义：
+
+```text
+连续控制量 3 当前值为 50.393701%
+连续控制量 12 当前值为 72.440945%
+```
+
+MIDI 原始值通常是：
+
+```text
+0 ~ 127
+```
+
+换算公式：
+
+```text
+percent = value / 127 * 100
+```
+
+输出时保留 6 位小数。
+
+## 8. 转盘输出规则
+
+Jog Wheel 转盘旋转统一使用：
+
+```text
+J 编号 方向
+```
+
+方向定义：
+
+```text
+1 = 顺时针旋转一格
+-1 = 逆时针旋转一格
+```
+
+示例：
+
+```text
+J 1 1
+J 1 -1
+J 2 1
+J 2 -1
+```
+
+含义：
+
+```text
+转盘 1 顺时针转一格
+转盘 1 逆时针转一格
+转盘 2 顺时针转一格
+转盘 2 逆时针转一格
+```
+
+FLX4 的 Jog Wheel 旋转数据不是绝对位置，而是相对变化量。
+
+程序需要根据 MIDI value 判断方向：
+
+```text
+value > 64  → 顺时针
+value < 64  → 逆时针
+```
+
+第一版只需要输出方向，不需要输出速度。
+
+## 9. 编号规则
+
+程序内部需要根据官方 MIDI Message List 建立映射表。
+
+但是终端输出时不输出控件名称，只输出编号。
+
+### 9.1 按钮编号
+
+按钮从 1 开始编号：
+
+```text
+B 1
+B 2
+B 3
+...
+```
+
+所有按钮类控件统一编号。
+
+例如：
+
+```text
+PLAY 按钮
+CUE 按钮
+PAD 按钮
+SYNC 按钮
+SHIFT 按钮
+LOOP 按钮
+```
+
+都归入 B 类。
+
+### 9.2 连续控制量编号
+
+旋钮和推杆统一从 1 开始编号：
+
+```text
+C 1
+C 2
+C 3
+...
+```
+
+以下控件都归入 C 类：
+
+```text
+EQ 旋钮
+FILTER 旋钮
+TRIM / GAIN 旋钮
+音量推杆
+Crossfader
+节奏推杆
+其他连续变化控件
+```
+
+### 9.3 转盘编号
+
+转盘按照 Deck 编号：
+
+```text
+J 1 = 左侧转盘 / Deck 1
+J 2 = 右侧转盘 / Deck 2
+```
+
+## 10. 程序内部事件格式
+
+虽然终端只输出三列，但程序内部建议统一为字典格式，方便后续接入自研 DJ 软件。
+
+按钮事件：
+
+```python
+{
+    "type": "B",
+    "id": 8,
+    "data": 1
+}
+```
+
+连续控制量事件：
+
+```python
+{
+    "type": "C",
+    "id": 3,
+    "data": 50.393701
+}
+```
+
+转盘事件：
+
+```python
+{
+    "type": "J",
+    "id": 1,
+    "data": 1
+}
+```
+
+最终打印时只输出：
+
+```python
+print(event["type"], event["id"], event["data"])
+```
+
+## 11. 软件架构需求
+
+建议程序分成以下几个模块：
+
+```text
+flx4_reader/
+│
+├─ main.py              # 程序入口
+├─ midi_device.py       # MIDI 设备扫描和连接
+├─ flx4_mapping.py      # FLX4 官方 MIDI 映射表
+├─ event_parser.py      # MIDI 数据转换成统一事件
+└─ event_handler.py     # 事件处理，目前只负责终端输出
+```
+
+## 12. 各模块职责
+
+### 12.1 main.py
+
+负责程序启动和主循环。
+
+功能：
+
+```text
+初始化 MIDI 设备
+打开 FLX4 输入端口
+持续接收 MIDI 数据
+调用解析器
+调用事件处理器输出
+```
+
+### 12.2 midi_device.py
+
+负责 MIDI 设备管理。
+
+功能：
+
+```text
+列出所有 MIDI 输入设备
+自动查找名称包含 DDJ-FLX4 / FLX4 的设备
+打开 MIDI 输入端口
+处理设备未找到或打开失败
+```
+
+### 12.3 flx4_mapping.py
+
+负责保存官方 MIDI 映射表。
+
+包含：
+
+```text
+NOTE 映射表
+CC 映射表
+Jog Wheel 映射表
+```
+
+映射结果不是控件名称，而是统一编号。
+
+示例：
+
+```python
+NOTE_MAP = {
+    54: ("B", 8)
+}
+
+CC_MAP = {
+    2: ("C", 3),
+    33: ("J", 1)
+}
+```
+
+### 12.4 event_parser.py
+
+负责把 MIDI 消息转换成统一事件。
+
+输入：
+
+```text
+note_on
+note_off
+control_change
+```
+
+输出：
+
+```text
+B 编号 状态
+C 编号 百分比
+J 编号 方向
+```
+
+### 12.5 event_handler.py
+
+当前版本只负责打印。
+
+输出格式：
+
+```text
+B 8 1
+C 3 50.393701
+J 1 -1
+```
+
+后续可以在这里接入自研 DJ 软件。
+
+## 13. 异常处理需求
+
+### 13.1 未找到 FLX4
+
+如果程序没有找到 DDJ-FLX4，需要输出：
+
+```text
+未找到 DDJ-FLX4，请检查 USB 连接和 Windows 设备识别状态。
+```
+
+同时打印当前检测到的 MIDI 输入设备列表。
+
+### 13.2 设备被占用
+
+如果 FLX4 被 rekordbox、Serato 或其他软件占用，需要提示：
+
+```text
+无法打开 DDJ-FLX4 MIDI 输入端口，可能设备已被其他软件占用。
+```
+
+### 13.3 未映射 MIDI 数据
+
+如果收到的数据不在映射表里，调试模式下可以输出：
+
+```text
+UNMAPPED note=54 velocity=127
+UNMAPPED control=2 value=64
+```
+
+但正式输出模式下不输出未映射数据，避免干扰上层 DJ 软件。
+
+## 14. 第一版不做的功能
+
+第一版暂时不做：
+
+```text
+1. 不做 GUI
+2. 不保存 TXT / CSV / JSON
+3. 不播放音乐
+4. 不控制 FLX4 灯光
+5. 不向 FLX4 发送 MIDI 数据
+6. 不接 rekordbox
+7. 不接 Serato
+8. 不做音频处理
+9. 不做波形显示
+10. 不做回放功能
+```
+
+第一版只做：
+
+```text
+读取 FLX4 → 解析控件 → 输出统一事件
+```
+
+## 15. 验收标准
+
+程序完成后，需要满足以下标准：
+
+### 15.1 设备连接
+
+```text
+程序可以自动扫描并连接 DDJ-FLX4。
+```
+
+### 15.2 按钮读取
+
+按下任意按钮时，终端输出：
+
+```text
+B 编号 1
+```
+
+松开按钮时，终端输出：
+
+```text
+B 编号 0
+```
+
+### 15.3 旋钮 / 推杆读取
+
+转动旋钮或推动推杆时，终端输出：
+
+```text
+C 编号 百分比
+```
+
+示例：
+
+```text
+C 3 50.393701
+```
+
+### 15.4 转盘读取
+
+转动 Jog Wheel 时，终端输出：
+
+```text
+J 编号 1
+J 编号 -1
+```
+
+示例：
+
+```text
+J 1 1
+J 1 -1
+```
+
+### 15.5 稳定性
+
+程序连续运行 5 分钟，不崩溃，不明显漏数据。
+
+### 15.6 输出简洁性
+
+终端输出只保留：
+
+```text
+类型 编号 数据
+```
+
+不输出多余解释，方便后续自研 DJ 软件直接读取。
+
+## 16. 最终输出示例
+
+实际运行时，终端可能显示：
+
+```text
+B 1 1
+B 1 0
+B 8 1
+B 8 0
+C 1 0.000000
+C 1 12.598425
+C 1 50.393701
+C 2 72.440945
+J 1 1
+J 1 1
+J 1 -1
+J 2 -1
+```
+
+## 17. 后续扩展方向
+
+第一版完成后，可以继续扩展：
+
+```text
+1. 接入自研 DJ 软件
+2. 控制播放 / 暂停 / Cue
+3. 控制音量 / EQ / 滤波
+4. 控制虚拟转盘
+5. 支持 MIDI OUT 控制灯光
+6. 增加 GUI 调试界面
+7. 支持配置文件自定义映射
+8. 支持多个 MIDI 控制器
+```
+
+## 18. 项目一句话总结
+
+使用 Python 在 Windows 上读取 DDJ-FLX4 的 MIDI 数据，根据官方 MIDI 表转换成统一事件，并以“类型 编号 数据”的格式输出，为后续自研 DJ 软件提供稳定输入层。
+
+
+
+
+对，这里应该按 MIDI OUT 指令 来定义每个灯。FLX4 的大部分灯光控制格式是：
+
+Status Data1 Data2
+
+其中：
+
+Data2 = 00  灭
+Data2 = 7F  亮
+
+官方 MIDI 表里 PLAY、CUE、IN、OUT、BEAT SYNC、CH CUE、Performance Pad 等大量灯光都是这个 OFF=0x00, ON=0x7F 规则。
+
+1. 基础发送规则
+
+例如：
+
+90 0B 7F
+
+含义：
+
+90 = Note On，MIDI 通道 1
+0B = 灯光编号 / Note 编号
+7F = 亮
+
+关闭就是：
+
+90 0B 00
+
+在 Python mido 里：
+
+out.send(mido.Message("note_on", channel=0, note=0x0B, velocity=127))  # 亮
+out.send(mido.Message("note_on", channel=0, note=0x0B, velocity=0))    # 灭
+
+注意：
+
+90 → mido channel=0
+91 → mido channel=1
+96 → mido channel=6
+97 → mido channel=7
+98 → mido channel=8
+99 → mido channel=9
+9A → mido channel=10
+B0 → control_change channel=0
+B1 → control_change channel=1
+2. 核心按钮灯控制表
+
+下面我按你的 L 编号 状态 来定义。
+
+hh 表示灯光状态：
+
+hh = 00  灭
+hh = 7F  亮
+灯编号	物理灯	MIDI OUT 指令
+L1	Deck 1 PLAY/PAUSE	90 0B hh
+L2	Deck 1 CUE	90 0C hh
+L3	Deck 2 PLAY/PAUSE	91 0B hh
+L4	Deck 2 CUE	91 0C hh
+L5	Deck 1 IN	90 10 hh
+L6	Deck 1 OUT	90 11 hh
+L7	Deck 2 IN	91 10 hh
+L8	Deck 2 OUT	91 11 hh
+L9	Deck 1 BEAT SYNC	90 58 hh
+L10	Deck 2 BEAT SYNC	91 58 hh
+L11	CH1 CUE	90 54 hh
+L12	CH2 CUE	91 54 hh
+L13	SMART CFX	96 00 hh
+L14	SMART FADER	96 01 hh
+
+所以：
+
+L1 1 → 90 0B 7F
+L1 0 → 90 0B 00
+
+L2 1 → 90 0C 7F
+L2 0 → 90 0C 00
+3. Pad Mode 模式按钮灯
+
+这 8 个是左右 Deck 上方的模式按钮：
+
+HOT CUE
+PAD FX1
+BEAT JUMP
+SAMPLER
+灯编号	物理灯	MIDI OUT 指令
+L15	Deck 1 HOT CUE 模式灯	90 1B hh
+L16	Deck 1 PAD FX1 模式灯	90 1E hh
+L17	Deck 1 BEAT JUMP 模式灯	90 20 hh
+L18	Deck 1 SAMPLER 模式灯	90 22 hh
+L19	Deck 2 HOT CUE 模式灯	91 1B hh
+L20	Deck 2 PAD FX1 模式灯	91 1E hh
+L21	Deck 2 BEAT JUMP 模式灯	91 20 hh
+L22	Deck 2 SAMPLER 模式灯	91 22 hh
+
+按住 SHIFT 后的副模式也有 MIDI OUT：
+
+副模式	Deck 1	Deck 2
+KEYBOARD	90 69 hh	91 69 hh
+PAD FX2	90 6B hh	91 6B hh
+BEAT LOOP	90 6D hh	91 6D hh
+KEY SHIFT	90 6F hh	91 6F hh
+4. Performance Pad 灯
+
+这个是最容易搞混的地方。
+
+FLX4 物理上是：
+
+Deck 1：8 个 Pad
+Deck 2：8 个 Pad
+
+但是每个 Pad 在不同模式下 MIDI OUT 地址不同。官方表里 Performance Pad 使用 97 / 98 / 99 / 9A 这些 Status，并且同样是 OFF=0x00, ON=0x7F。
+
+4.1 Status 定义
+情况	Status
+Deck 1 普通 Pad	97
+Deck 1 按住 SHIFT 的 Pad	98
+Deck 2 普通 Pad	99
+Deck 2 按住 SHIFT 的 Pad	9A
+4.2 模式偏移量
+Pad 模式	mode_base
+HOT CUE	00
+PAD FX1	10
+BEAT JUMP	20
+SAMPLER	30
+KEYBOARD	40
+PAD FX2	50
+BEAT LOOP	60
+KEY SHIFT	70
+4.3 Pad 编号偏移量
+Pad	pad_offset
+Pad 1	00
+Pad 2	01
+Pad 3	02
+Pad 4	03
+Pad 5	04
+Pad 6	05
+Pad 7	06
+Pad 8	07
+
+所以：
+
+Data1 = mode_base + pad_offset
+4.4 举例
+
+Deck 1，HOT CUE 模式，Pad 1 亮：
+
+97 00 7F
+
+Deck 1，HOT CUE 模式，Pad 1 灭：
+
+97 00 00
+
+Deck 1，HOT CUE 模式，Pad 8 亮：
+
+97 07 7F
+
+Deck 2，HOT CUE 模式，Pad 1 亮：
+
+99 00 7F
+
+Deck 2，PAD FX1 模式，Pad 3 亮：
+
+99 12 7F
+
+因为：
+
+PAD FX1 mode_base = 10
+Pad 3 offset = 02
+Data1 = 12
+
+Deck 1，SAMPLER 模式，Pad 6 亮：
+
+97 35 7F
+
+因为：
+
+SAMPLER mode_base = 30
+Pad 6 offset = 05
+Data1 = 35
+5. 按 L 编号定义 16 个 Pad 灯
+
+你可以这样定义：
+
+灯编号	物理灯	Status	Data1 计算
+L23	Deck 1 Pad 1	97	mode_base + 00
+L24	Deck 1 Pad 2	97	mode_base + 01
+L25	Deck 1 Pad 3	97	mode_base + 02
+L26	Deck 1 Pad 4	97	mode_base + 03
+L27	Deck 1 Pad 5	97	mode_base + 04
+L28	Deck 1 Pad 6	97	mode_base + 05
+L29	Deck 1 Pad 7	97	mode_base + 06
+L30	Deck 1 Pad 8	97	mode_base + 07
+L31	Deck 2 Pad 1	99	mode_base + 00
+L32	Deck 2 Pad 2	99	mode_base + 01
+L33	Deck 2 Pad 3	99	mode_base + 02
+L34	Deck 2 Pad 4	99	mode_base + 03
+L35	Deck 2 Pad 5	99	mode_base + 04
+L36	Deck 2 Pad 6	99	mode_base + 05
+L37	Deck 2 Pad 7	99	mode_base + 06
+L38	Deck 2 Pad 8	99	mode_base + 07
+
+如果当前模式是 HOT CUE，那么 mode_base = 00。
+
+例如：
+
+L23 1 → 97 00 7F
+L24 1 → 97 01 7F
+L25 1 → 97 02 7F
+
+L31 1 → 99 00 7F
+L32 1 → 99 01 7F
+L33 1 → 99 02 7F
+
+如果当前模式是 SAMPLER，那么 mode_base = 30。
+
+L23 1 → 97 30 7F
+L24 1 → 97 31 7F
+L31 1 → 99 30 7F
+L32 1 → 99 31 7F
+6. CH LEVEL METER 电平灯
+
+这个不是 10 个独立 Note 灯，而是两个 CC 控制：
+
+物理区域	MIDI OUT
+CH1 LEVEL METER	B0 02 hh
+CH2 LEVEL METER	B1 02 hh
+
+官方表里写的是从下往上点亮，并给了范围：绿色 1、绿色 2、橙色 1、橙色 2、红色分别对应不同 hh 范围。
+
+建议你在程序里这样定义：
+
+逻辑等级	CH1 指令	CH2 指令	效果
+0	B0 02 00	B1 02 00	全灭
+1	B0 02 40	B1 02 40	亮 1 格
+2	B0 02 56	B1 02 56	亮 2 格
+3	B0 02 64	B1 02 64	亮 3 格
+4	B0 02 76	B1 02 76	亮 4 格
+5	B0 02 7F	B1 02 7F	亮到红色
+
+所以你的 L 编号可以这样定义：
+
+灯编号	含义
+L39	CH1 Level Meter，数据 0~5
+L40	CH2 Level Meter，数据 0~5
+
+这里不要做成：
+
+L39 1
+L40 1
+L41 1
+...
+
+而应该做成：
+
+M 1 0~5
+M 2 0~5
+
+或者仍然用 L：
+
+L39 5   # CH1 电平亮到 5 格
+L40 3   # CH2 电平亮到 3 格
+7. Vinyl Mode 灯 / 状态
+
+Vinyl Mode 是特殊项，官方备注里说它不能从设备本体直接改变，需要 DJ 软件通过 MIDI OUT 发给 FLX4。
+
+灯编号	含义	MIDI OUT
+L41	Deck 1 Vinyl Mode	90 17 hh
+L42	Deck 2 Vinyl Mode	91 17 hh
+
+例如：
+
+L41 1 → 90 17 7F
+L41 0 → 90 17 00
+L42 1 → 91 17 7F
+L42 0 → 91 17 00
+8. LOAD 载入指示灯
+
+官方表里还有 LOAD illumination：
+
+灯编号	含义	MIDI OUT
+L43	Deck 1 LOAD illumination	9F 00 7F
+L44	Deck 2 LOAD illumination	9F 01 7F
+
+这两个在表里更像“触发式/状态式”灯，不是普通的 hh 可变亮灭项。你可以先保留，不作为第一版核心灯。
+
+9. FX ON/OFF 特殊灯
+
+FX ON/OFF 比较特殊。官方备注里写到：
+
+FX ON/OFF 接收到 NOTE ON 时，按钮闪烁
+FX ON/OFF 接收到 NOTE OFF 时，按钮点亮
+
+所以它不是普通的：
+
+00 = 灭
+7F = 亮
+
+而更适合单独定义：
+
+F 1 0 = FX 灯灭 / 或恢复
+F 1 1 = FX 灯亮
+F 1 2 = FX 灯闪烁
+
+这一个我建议你后面实测，因为它和普通灯不完全一样。
+
+10. 最终建议的控制协议
+
+你现在可以定义两套输出：
+
+普通灯
+L 编号 状态
+
+状态：
+
+0 = 灭
+1 = 亮
+
+例如：
+
+L1 1   # Deck1 PLAY 灯亮
+L1 0   # Deck1 PLAY 灯灭
+L23 1  # Deck1 Pad1 灯亮，实际地址根据当前 Pad 模式决定
+电平灯
+M 编号 等级
+
+例如：
+
+M1 5   # CH1 电平亮 5 格
+M2 3   # CH2 电平亮 3 格
+11. 你程序里的核心映射可以这样写
+LIGHT_MAP = {
+    1:  ("note", 0x90, 0x0B),  # Deck1 PLAY
+    2:  ("note", 0x90, 0x0C),  # Deck1 CUE
+    3:  ("note", 0x91, 0x0B),  # Deck2 PLAY
+    4:  ("note", 0x91, 0x0C),  # Deck2 CUE
+
+    5:  ("note", 0x90, 0x10),  # Deck1 IN
+    6:  ("note", 0x90, 0x11),  # Deck1 OUT
+    7:  ("note", 0x91, 0x10),  # Deck2 IN
+    8:  ("note", 0x91, 0x11),  # Deck2 OUT
+
+    9:  ("note", 0x90, 0x58),  # Deck1 BEAT SYNC
+    10: ("note", 0x91, 0x58),  # Deck2 BEAT SYNC
+
+    11: ("note", 0x90, 0x54),  # CH1 CUE
+    12: ("note", 0x91, 0x54),  # CH2 CUE
+
+    13: ("note", 0x96, 0x00),  # SMART CFX
+    14: ("note", 0x96, 0x01),  # SMART FADER
+
+    15: ("note", 0x90, 0x1B),  # Deck1 HOT CUE mode
+    16: ("note", 0x90, 0x1E),  # Deck1 PAD FX1 mode
+    17: ("note", 0x90, 0x20),  # Deck1 BEAT JUMP mode
+    18: ("note", 0x90, 0x22),  # Deck1 SAMPLER mode
+
+    19: ("note", 0x91, 0x1B),  # Deck2 HOT CUE mode
+    20: ("note", 0x91, 0x1E),  # Deck2 PAD FX1 mode
+    21: ("note", 0x91, 0x20),  # Deck2 BEAT JUMP mode
+    22: ("note", 0x91, 0x22),  # Deck2 SAMPLER mode
+
+    41: ("note", 0x90, 0x17),  # Deck1 Vinyl
+    42: ("note", 0x91, 0x17),  # Deck2 Vinyl
+}
+
+Performance Pad 单独用函数算：
+
+PAD_MODE_BASE = {
+    "HOT_CUE":   0x00,
+    "PAD_FX1":   0x10,
+    "BEAT_JUMP": 0x20,
+    "SAMPLER":   0x30,
+    "KEYBOARD":  0x40,
+    "PAD_FX2":   0x50,
+    "BEAT_LOOP": 0x60,
+    "KEY_SHIFT": 0x70,
+}
+
+def get_pad_light_msg(deck, pad, mode, state):
+    status = 0x97 if deck == 1 else 0x99
+    data1 = PAD_MODE_BASE[mode] + (pad - 1)
+    data2 = 0x7F if state else 0x00
+    return [status, data1, data2]
+
+电平灯：
+
+LEVEL_VALUE = {
+    0: 0x00,
+    1: 0x40,
+    2: 0x56,
+    3: 0x64,
+    4: 0x76,
+    5: 0x7F,
+}
+
+def get_level_meter_msg(channel, level):
+    status = 0xB0 if channel == 1 else 0xB1
+    return [status, 0x02, LEVEL_VALUE[level]]
+
+这样你就能完整控制：
+
+普通按钮灯
+Pad Mode 灯
+Performance Pad 灯
+CH Level Meter 电平灯
+Vinyl Mode 状态灯
+
+第一版建议先实现：L1~L22 + L23~L38 + M1/M2，也就是核心可见灯光。FX ON/OFF 和 LOAD illumination 放到第二版单独实测。
+
+

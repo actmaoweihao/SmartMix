@@ -1,8 +1,0 @@
-node_modules/
-.venv/
-__pycache__/
-*.pyc
-backend/data/
-dist/
-.vite/
-.tools/
