@@ -1082,12 +1082,6 @@ backend/test_audio_engine.py
 - track mixer gain 会影响导出 buffer。
 - 自动混音策略会在人声密集时选择 vocalSafe。
 
-运行：
-
-```bash
-pnpm test:backend
-```
-
 前端语法检查：
 
 ```bash

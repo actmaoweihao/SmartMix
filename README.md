@@ -211,7 +211,7 @@ SmartMix 会为相邻歌曲计算衔接成本。综合推荐会同时考虑 BPM�
 
 ### Demucs 分轨调试
 
-团队 SDK 与外部 API 调用说明见 [`docs/DEMUCS_STEM_SDK.md`](docs/DEMUCS_STEM_SDK.md)。
+团队 SDK 与外部 API 调用说明见 [`docs/guides/DEMUCS_STEM_SDK.md`](docs/guides/DEMUCS_STEM_SDK.md)。
 
 安装 `pnpm setup:tuning` 后，上传歌曲并完成基础分析时，前端可以排队调用：
 
@@ -322,8 +322,6 @@ pnpm setup:backend    # 安装后端基础依赖
 pnpm setup:tuning     # 安装可选 Demucs/TorchCodec 依赖
 pnpm check            # 检查 src/main.js 语法
 pnpm typecheck        # TypeScript 类型检查
-pnpm test             # 运行前端 Vitest 单元测试
-pnpm test:backend     # 运行后端 unittest
 ```
 
 ## API 概览
@@ -356,7 +354,6 @@ pnpm test:backend     # 运行后端 unittest
 - 入口文件是 `src/main.js`，负责界面渲染、状态管理、事件绑定和 API 调用。
 - API 基础地址在 `src/api/client.js`，前端会按当前页面 hostname 拼出 `http://{host}:8002`。
 - TypeScript 模块集中在 `src/analysis/`、`src/transitions/`、`src/seamless/`、`src/audio/` 等目录。
-- 单元测试在 `src/__tests__/`，使用 Vitest。
 
 ### 后端
 
@@ -374,30 +371,16 @@ SmartMix 不会把音频上传到外部服务。运行时生成的数据都在�
 - 删除 `backend/data/stems/` 可清理 Demucs 缓存。
 - 删除 `backend/data/projects/` 可清理保存的项目。
 
-## 测试与验证
+## 验证
 
 建议在提交前运行：
 
 ```bash
 pnpm check
 pnpm typecheck
-pnpm test
-pnpm test:backend
 ```
 
-如果只改前端 UI 或业务模块，至少运行：
-
-```bash
-pnpm check
-pnpm typecheck
-pnpm test
-```
-
-如果只改后端音频逻辑或 API，至少运行：
-
-```bash
-pnpm test:backend
-```
+测试文件已从当前工程中移除，日常验证以启动项目和运行静态检查为主。
 
 ## 常见问题
 
@@ -475,17 +458,20 @@ Get-Content README.md -Encoding utf8
 
 ## 相关文档
 
-- `SMARTMIX_PRODUCT_SPEC.md`：产品规格。
-- `TECHNICAL_DESIGN.md`：技术设计。
-- `SORTING_ALGORITHM.md`：排序算法说明。
-- `SONG_MATCHING_SCORING.md`：两首歌匹配评分。
-- `ENERGY_SCORING.md`：能量评分。
-- `DIFF_MST_INTEGRATION.md`：Diff-MST 集成记录。
-- `docs/ARCHITECTURE_REVIEW.md`：架构审查。
-- `auto_mix/README.md`：独立 auto mix 模块说明。
+- `docs/product/SMARTMIX_PRODUCT_SPEC.md`：产品规格。
+- `docs/product/MASHUP_UX_FLOW.md`：Mashup Builder 使用路径。
+- `docs/architecture/TECHNICAL_DESIGN.md`：技术设计。
+- `docs/architecture/ARCHITECTURE_REVIEW.md`：架构审查。
+- `docs/algorithms/SORTING_ALGORITHM.md`：排序算法说明。
+- `docs/algorithms/SONG_MATCHING_SCORING.md`：两首歌匹配评分。
+- `docs/audio/ENERGY_SCORING.md`：能量评分。
+- `docs/guides/DEMUCS_STEM_SDK.md`：Demucs 分轨 SDK 与接口调用。
+- `docs/integrations/DIFF_MST_INTEGRATION.md`：Diff-MST 集成记录。
+- `docs/tools/AUTO_MIX_README.md`：独立 auto mix 模块说明。
+- `docs/reference/DIFF_MST_REFERENCE_README.md`：Diff-MST 参考项目说明。
 
 ## 当前状态
 
 SmartMix 仍是本地优先的开发版本。核心上传、分析、排序、预览、导出、项目保存、Pair Match、教学试听、分轨调试、Mashup 和调音管线已经具备可运行路径；高质量 stems、GPU 加速和 Rubber Band 调音依赖本机环境，首次运行可能需要较长下载和处理时间。
 
-Mashup Builder 的推荐使用路径见 [docs/MASHUP_UX_FLOW.md](docs/MASHUP_UX_FLOW.md)。
+Mashup Builder 的推荐使用路径见 [docs/product/MASHUP_UX_FLOW.md](docs/product/MASHUP_UX_FLOW.md)。

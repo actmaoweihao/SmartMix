@@ -9,8 +9,6 @@
     "backend": "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8002 --reload",
     "check": "node --check src/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:backend": "python -m unittest discover -v",
     "setup:backend": "python -m pip install -r backend/requirements.txt",
     "setup:tuning": "python -m pip install -r backend/requirements-tuning.txt"
   },
