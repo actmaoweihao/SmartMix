@@ -211,6 +211,8 @@ SmartMix 会为相邻歌曲计算衔接成本。综合推荐会同时考虑 BPM�
 
 ### Demucs 分轨调试
 
+团队 SDK 与外部 API 调用说明见 [`docs/DEMUCS_STEM_SDK.md`](docs/DEMUCS_STEM_SDK.md)。
+
 安装 `pnpm setup:tuning` 后，上传歌曲并完成基础分析时，前端可以排队调用：
 
 ```http

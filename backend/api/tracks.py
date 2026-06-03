@@ -17,11 +17,8 @@ from ..services.tracks import (
     stem_response,
 )
 from ..storage import EXPORT_DIR, STEM_DIR, UPLOAD_DIR, read_json, write_json
+from ..services.stem_separation import demucs_available, separate_demucs_stems
 from ..tuning import (
-    _demucs_available,
-    _prepare_demucs_input,
-    _resolve_torch_device,
-    _separate_stems_with_demucs_api,
     analyze_tuned_output,
     normalize_camelot,
     render_harmonic_tune,
@@ -73,7 +70,7 @@ def separate_track_stems(track_id: str, request: StemSeparationRequest) -> dict:
     if cached and not request.force:
         return stem_response(track_id, cached, device="cached", cached=True)
 
-    if not _demucs_available():
+    if not demucs_available():
         raise HTTPException(status_code=503, detail="Demucs is not available. Install backend/requirements-tuning.txt first.")
 
     source_path = Path(meta["path"])
@@ -83,9 +80,7 @@ def separate_track_stems(track_id: str, request: StemSeparationRequest) -> dict:
     workspace = STEM_DIR / track_id
     workspace.mkdir(parents=True, exist_ok=True)
     try:
-        device = _resolve_torch_device(request.device)
-        demucs_input = _prepare_demucs_input(source_path, workspace)
-        stems = _separate_stems_with_demucs_api(demucs_input, workspace, device)
+        result = separate_demucs_stems(source_path, workspace, request.device)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -93,7 +88,7 @@ def separate_track_stems(track_id: str, request: StemSeparationRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Demucs separation failed: {exc}") from exc
 
-    return stem_response(track_id, stems, device=device, cached=False)
+    return stem_response(track_id, result.stems, device=result.device, cached=False)
 
 
 @router.get("/{track_id}/stems/{stem_name}/audio")

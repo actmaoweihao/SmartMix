@@ -15,6 +15,13 @@ import soundfile as sf
 from scipy import signal
 
 from .loudness import normalize_loudness
+from .services.stem_separation import (
+    demucs_available as sdk_demucs_available,
+    load_stereo as sdk_load_stereo,
+    prepare_demucs_input as sdk_prepare_demucs_input,
+    resolve_torch_device as sdk_resolve_torch_device,
+    separate_prepared_demucs_input as sdk_separate_prepared_demucs_input,
+)
 from .storage import EXPORT_DIR
 
 
@@ -272,87 +279,15 @@ def _separate_stems(
 
 
 def _separate_stems_with_demucs_api(input_path: Path, workspace: Path, device: str) -> dict[str, Path]:
-    import torch
-    from demucs.apply import apply_model
-    from demucs.pretrained import get_model
-
-    model = get_model("htdemucs")
-    model.cpu()
-    model.eval()
-
-    audio = _load_stereo(input_path)
-    wav = torch.from_numpy(audio)
-    ref = wav.mean(0)
-    ref_std = ref.std().clamp_min(1e-8)
-    wav = (wav - ref.mean()) / ref_std
-
-    with torch.no_grad():
-        sources = apply_model(
-            model,
-            wav[None],
-            device=device,
-            shifts=1,
-            split=True,
-            overlap=0.25,
-            progress=False,
-            num_workers=0,
-        )[0]
-    if device == "cuda":
-        torch.cuda.empty_cache()
-    sources = sources * ref_std + ref.mean()
-
-    out_dir = workspace / "demucs_api"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stems = {}
-    for source, name in zip(sources, model.sources):
-        stem_path = out_dir / f"{name}.wav"
-        stem_audio = source.detach().cpu().numpy().astype(np.float32)
-        sf.write(stem_path, stem_audio.T, SAMPLE_RATE, subtype="PCM_16")
-        stems[name] = stem_path
-
-    if {"vocals", "drums", "bass", "other"}.issubset(stems):
-        return stems
-    raise RuntimeError("Demucs did not produce all four stems.")
+    return sdk_separate_prepared_demucs_input(input_path, workspace, device)
 
 
 def _resolve_torch_device(requested_device: str) -> str:
-    import torch
-
-    requested = (requested_device or "auto").lower()
-    if requested not in {"auto", "cuda", "cpu"}:
-        raise ValueError("device must be auto, cuda, or cpu")
-    if requested == "cpu":
-        return "cpu"
-    if requested == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA was requested, but PyTorch cannot see a CUDA GPU.")
-        return "cuda"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return sdk_resolve_torch_device(requested_device)
 
 
 def _prepare_demucs_input(input_path: Path, workspace: Path) -> Path:
-    demucs_input = workspace / "demucs_input.wav"
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    subprocess.run(
-        [
-            ffmpeg,
-            "-y",
-            "-i",
-            str(input_path),
-            "-vn",
-            "-ac",
-            "2",
-            "-ar",
-            str(SAMPLE_RATE),
-            "-f",
-            "wav",
-            str(demucs_input),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    return demucs_input
+    return sdk_prepare_demucs_input(input_path, workspace)
 
 
 def _render_from_stems(stems: dict[str, Path], workspace: Path, semitones: int, warnings: list[str]) -> np.ndarray:
@@ -422,18 +357,7 @@ def _gentle_presence(buffer: np.ndarray) -> np.ndarray:
 
 
 def _load_stereo(path: Path) -> np.ndarray:
-    try:
-        audio, source_sr = sf.read(path, always_2d=True, dtype="float32")
-        if source_sr != SAMPLE_RATE:
-            audio = librosa.resample(audio.T, orig_sr=source_sr, target_sr=SAMPLE_RATE).T
-        y = audio.T
-    except Exception:
-        y, _ = librosa.load(path, sr=SAMPLE_RATE, mono=False)
-    if y.ndim == 1:
-        y = np.vstack([y, y])
-    if y.shape[0] > 2:
-        y = y[:2]
-    return np.ascontiguousarray(y, dtype=np.float32)
+    return sdk_load_stereo(path)
 
 
 def _pad_to_length(buffer: np.ndarray, length: int) -> np.ndarray:
@@ -459,13 +383,7 @@ def _convert_to_mp3(wav_path: Path, mp3_path: Path) -> Path:
 
 
 def _demucs_available() -> bool:
-    if shutil.which("demucs"):
-        return True
-    try:
-        import demucs  # noqa: F401
-    except Exception:
-        return False
-    return True
+    return sdk_demucs_available()
 
 
 def _rubberband_command() -> str | None:
