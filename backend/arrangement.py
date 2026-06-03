@@ -161,6 +161,10 @@ def _segments_from_segmentation_report(track: dict[str, Any], source: str, secti
             "isCleanExit": bool(section.get("exitClean", True)),
             "riskFlags": list(section.get("riskFlags") or []),
             "segmentationConfidence": section.get("confidence"),
+            "sectionGroup": section.get("sectionGroup"),
+            "groupConfidence": section.get("groupConfidence", 0.0),
+            "repetitionScore": section.get("repetitionScore", 0.0),
+            "similarSectionIds": list(section.get("similarSectionIds") or []),
         }
         segments.append(segment)
     return segments

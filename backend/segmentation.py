@@ -81,6 +81,9 @@ class StructuralSection:
     grooveBedScore: float
     vocalPhraseScore: float
     similarSectionIds: list[str] = field(default_factory=list)
+    sectionGroup: str | None = None
+    groupConfidence: float = 0.0
+    repetitionScore: float = 0.0
     riskFlags: list[str] = field(default_factory=list)
     level: str = "major"
 
@@ -153,9 +156,13 @@ def analyze_track_segmentation(
     bar_features = extract_bar_features(audio, sr, track, stem_audio or None)
     matrices = compute_similarity_matrices(bar_features)
     novelty = compute_novelty_curve(matrices["fused"], [4, 8, 16])
+    msaf = compute_msaf_structure(bar_features, matrices, novelty)
     boundaries = generate_boundary_candidates(bar_features, novelty, track)
+    boundaries = fuse_msaf_boundaries(boundaries, msaf.get("boundaryCandidates", []))
     sections = build_hierarchical_sections(boundaries, bar_features, matrices, track=track, source=source)
+    sections = annotate_structural_groups(sections, matrices)
     minor_sections = build_minor_sections(boundaries, bar_features, matrices, track=track, source=source)
+    minor_sections = annotate_structural_groups(minor_sections, matrices)
     phrase_sections = minor_sections or sections
     vocal_phrases = extract_vocal_phrases_from_sections(phrase_sections, bar_features, stem_audio.get("vocals") if stem_audio else None, track)
     groove_beds = extract_groove_bed_candidates(sections, bar_features, stem_audio or None, track)
@@ -171,9 +178,11 @@ def analyze_track_segmentation(
         "vocalPhrases": vocal_phrases,
         "grooveBedCandidates": groove_beds,
         "safeCutPoints": safe_points,
+        "structuralGroups": summarize_structural_groups(sections),
         "warnings": warnings,
         "debug": {
             "noveltyPeaks": _novelty_peaks(novelty.get("fused_novelty", [])),
+            "msaf": msaf,
             "boundaryCandidates": boundaries[:24],
             "ssmShape": list(matrices["fused"].shape),
             "majorSectionCount": len(sections),
@@ -296,6 +305,99 @@ def compute_novelty_curve(fused_ssm: np.ndarray, kernel_sizes: list[int] | None 
     fused = _normalize_1d(np.mean(curves, axis=0)) if curves else np.zeros(n, dtype=np.float32)
     result["fused_novelty"] = [round(float(v), 5) for v in fused]
     return result
+
+
+def compute_msaf_structure(bar_features: list[BarFeature], matrices: dict[str, np.ndarray], novelty: dict[str, list[float]]) -> dict[str, Any]:
+    """MSAF-style structural grouping from a recurrence graph.
+
+    This keeps the dependency footprint small while adding the key MSAF idea:
+    use a self-similarity graph to infer repeated structural states, then use
+    state changes as extra boundary evidence.
+    """
+    n = len(bar_features)
+    fused = np.asarray(matrices.get("fused"), dtype=np.float32)
+    if n < 8 or fused.shape != (n, n):
+        return {"enabled": False, "reason": "not_enough_bars", "boundaryCandidates": [], "barGroups": []}
+
+    affinity = _recurrence_affinity(fused)
+    max_groups = int(np.clip(round(n / 8), 2, min(8, n)))
+    embedding, group_count, eigengap = _spectral_embedding(affinity, max_groups)
+    if embedding.size == 0 or group_count < 2:
+        return {"enabled": False, "reason": "spectral_embedding_failed", "boundaryCandidates": [], "barGroups": []}
+
+    labels = _kmeans_labels(embedding, group_count)
+    labels = _smooth_labels(labels, min_run=2)
+    boundaries = _msaf_boundary_candidates(labels, bar_features, novelty)
+    return {
+        "enabled": True,
+        "method": "msaf_style_laplacian_spectral_grouping",
+        "groupCount": int(group_count),
+        "eigengap": round(float(eigengap), 5),
+        "barGroups": [int(value) for value in labels],
+        "boundaryCandidates": boundaries,
+    }
+
+
+def fuse_msaf_boundaries(boundaries: list[dict[str, Any]], msaf_boundaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not msaf_boundaries:
+        return boundaries
+    merged = [
+        BoundaryCandidate(
+            time=float(item.get("time", 0.0)),
+            barIndex=int(item.get("barIndex", 0)),
+            score=float(item.get("score", 0.0)),
+            sourceScores=dict(item.get("sourceScores") or {}),
+            boundaryType=str(item.get("boundaryType") or "minor"),
+            riskFlags=list(item.get("riskFlags") or []),
+            snapReason=str(item.get("snapReason") or "bar"),
+        )
+        for item in boundaries + msaf_boundaries
+    ]
+    return [asdict(item) for item in _nms_boundaries(merged, min_distance_bars=2)]
+
+
+def annotate_structural_groups(sections: list[dict[str, Any]], matrices: dict[str, np.ndarray]) -> list[dict[str, Any]]:
+    if len(sections) < 2:
+        return sections
+    affinity = _section_affinity(sections, matrices.get("fused"))
+    if affinity.size == 0:
+        return sections
+    embedding, group_count, _ = _spectral_embedding(affinity, int(np.clip(len(sections) // 2, 2, min(6, len(sections)))))
+    labels = _kmeans_labels(embedding, group_count) if embedding.size and group_count >= 2 else np.arange(len(sections))
+    label_names = _ordered_group_names(labels)
+    for index, section in enumerate(sections):
+        row = affinity[index].copy()
+        row[index] = 0.0
+        similar = [i for i in np.argsort(row)[::-1] if row[i] >= 0.58][:4]
+        same_group = [i for i, value in enumerate(labels) if value == labels[index] and i != index]
+        confidence = float(np.clip(np.mean(row[same_group]) if same_group else np.max(row), 0, 1)) if row.size else 0.0
+        repetition = float(np.clip(max([row[i] for i in same_group], default=np.max(row) if row.size else 0.0), 0, 1))
+        section["sectionGroup"] = label_names[int(labels[index])]
+        section["groupConfidence"] = round(confidence, 4)
+        section["repetitionScore"] = round(repetition, 4)
+        section["similarSectionIds"] = [str(sections[i].get("id")) for i in similar]
+    return sections
+
+
+def summarize_structural_groups(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for section in sections:
+        group = section.get("sectionGroup")
+        if not group:
+            continue
+        groups.setdefault(str(group), []).append(section)
+    summary = []
+    for group, items in groups.items():
+        summary.append(
+            {
+                "group": group,
+                "count": len(items),
+                "sectionIds": [item.get("id") for item in items],
+                "labels": sorted({str(item.get("label")) for item in items if item.get("label")}),
+                "meanRepetition": round(float(np.mean([float(item.get("repetitionScore", 0.0)) for item in items])), 4),
+            }
+        )
+    return sorted(summary, key=lambda item: str(item["group"]))
 
 
 def generate_boundary_candidates(bar_features: list[BarFeature], novelty: dict[str, list[float]], analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1159,6 +1261,157 @@ def _normalize_features(features: np.ndarray) -> np.ndarray:
     x = (x - mean) / std
     norm = np.linalg.norm(x, axis=1, keepdims=True) + 1e-6
     return x / norm
+
+
+def _recurrence_affinity(matrix: np.ndarray) -> np.ndarray:
+    if matrix.size == 0:
+        return matrix.astype(np.float32)
+    affinity = np.clip(np.nan_to_num(matrix.astype(np.float32), nan=0.0), 0, 1)
+    n = affinity.shape[0]
+    keep = max(3, min(n, int(round(np.sqrt(n) * 2))))
+    sparse = np.zeros_like(affinity)
+    for index in range(n):
+        row = affinity[index].copy()
+        row[index] = 1.0
+        selected = np.argsort(row)[-keep:]
+        sparse[index, selected] = row[selected]
+    sparse = np.maximum(sparse, sparse.T)
+    np.fill_diagonal(sparse, 1.0)
+    return _smooth_matrix(sparse)
+
+
+def _spectral_embedding(affinity: np.ndarray, max_groups: int) -> tuple[np.ndarray, int, float]:
+    if affinity.size == 0 or affinity.shape[0] < 2:
+        return np.zeros((0, 0), dtype=np.float32), 0, 0.0
+    a = np.clip(np.nan_to_num(affinity.astype(np.float32), nan=0.0), 0, 1)
+    a = (a + a.T) * 0.5
+    degree = np.sum(a, axis=1)
+    inv_sqrt = 1.0 / np.sqrt(np.maximum(degree, 1e-6))
+    laplacian = np.eye(a.shape[0], dtype=np.float32) - (inv_sqrt[:, None] * a * inv_sqrt[None, :])
+    try:
+        values, vectors = np.linalg.eigh(laplacian)
+    except np.linalg.LinAlgError:
+        return np.zeros((0, 0), dtype=np.float32), 0, 0.0
+    values = np.asarray(values, dtype=np.float32)
+    limit = max(2, min(int(max_groups), a.shape[0] - 1, values.size - 1))
+    gaps = np.diff(values[: limit + 1])
+    best = int(np.argmax(gaps[1:] if gaps.size > 1 else gaps) + (2 if gaps.size > 1 else 1))
+    group_count = int(np.clip(best, 2, limit))
+    embedding = np.asarray(vectors[:, 1:group_count], dtype=np.float32)
+    if embedding.shape[1] == 0:
+        embedding = np.asarray(vectors[:, :1], dtype=np.float32)
+    embedding = _normalize_features(embedding)
+    eigengap = float(gaps[group_count - 1]) if group_count - 1 < gaps.size else 0.0
+    return embedding, group_count, eigengap
+
+
+def _kmeans_labels(features: np.ndarray, groups: int, iterations: int = 24) -> np.ndarray:
+    x = np.asarray(features, dtype=np.float32)
+    n = x.shape[0]
+    k = int(np.clip(groups, 1, max(n, 1)))
+    if n == 0 or k <= 1:
+        return np.zeros(n, dtype=np.int32)
+    seeds = np.linspace(0, n - 1, k, dtype=int)
+    centers = x[seeds].copy()
+    labels = np.zeros(n, dtype=np.int32)
+    for _ in range(iterations):
+        distances = np.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        next_labels = np.argmin(distances, axis=1).astype(np.int32)
+        if np.array_equal(next_labels, labels):
+            break
+        labels = next_labels
+        for group in range(k):
+            members = x[labels == group]
+            if members.size:
+                centers[group] = np.mean(members, axis=0)
+    return labels
+
+
+def _smooth_labels(labels: np.ndarray, min_run: int) -> np.ndarray:
+    if labels.size == 0 or min_run <= 1:
+        return labels.astype(np.int32)
+    out = labels.astype(np.int32).copy()
+    start = 0
+    while start < out.size:
+        end = start + 1
+        while end < out.size and out[end] == out[start]:
+            end += 1
+        if end - start < min_run:
+            replacement = out[start - 1] if start > 0 else out[end] if end < out.size else out[start]
+            out[start:end] = replacement
+        start = end
+    return out
+
+
+def _msaf_boundary_candidates(labels: np.ndarray, bar_features: list[BarFeature], novelty: dict[str, list[float]]) -> list[dict[str, Any]]:
+    fused = novelty.get("fused_novelty", [])
+    candidates = []
+    for index in range(1, min(labels.size, len(bar_features))):
+        if labels[index] == labels[index - 1]:
+            continue
+        current = bar_features[index]
+        previous = bar_features[index - 1]
+        novelty_score = float(fused[index]) if index < len(fused) else 0.0
+        energy_change = abs(current.energy - previous.energy)
+        vocal_change = abs(current.vocalDensity - previous.vocalDensity)
+        rhythm_change = 0.5 * abs(current.drumActivity - previous.drumActivity) + 0.5 * abs(current.bassEnergy - previous.bassEnergy)
+        downbeat = 1.0 if current.isDownbeatStrong or index % 4 == 0 else 0.55
+        score = float(np.clip(0.34 + novelty_score * 0.24 + energy_change * 0.18 + vocal_change * 0.14 + rhythm_change * 0.10 + downbeat * 0.08, 0, 1))
+        if score < 0.42:
+            continue
+        risks = [] if downbeat >= 1.0 else ["weak_downbeat"]
+        candidates.append(
+            asdict(
+                BoundaryCandidate(
+                    time=round(float(current.start), 3),
+                    barIndex=index,
+                    score=round(score, 4),
+                    sourceScores={
+                        "msafClusterChange": 1.0,
+                        "novelty": round(novelty_score, 4),
+                        "energyChange": round(float(energy_change), 4),
+                        "vocalEntryExit": round(float(vocal_change), 4),
+                        "drumBassChange": round(float(rhythm_change), 4),
+                    },
+                    boundaryType="msaf_cluster",
+                    riskFlags=risks,
+                    snapReason="msaf_cluster",
+                )
+            )
+        )
+    return candidates
+
+
+def _section_affinity(sections: list[dict[str, Any]], matrix: np.ndarray | None) -> np.ndarray:
+    if matrix is None or matrix.size == 0 or not sections:
+        return np.zeros((0, 0), dtype=np.float32)
+    n = len(sections)
+    result = np.eye(n, dtype=np.float32)
+    for i, left in enumerate(sections):
+        a0, a1 = int(left.get("barStart", 0)), int(left.get("barEnd", 0))
+        for j in range(i + 1, n):
+            right = sections[j]
+            b0, b1 = int(right.get("barStart", 0)), int(right.get("barEnd", 0))
+            block = matrix[max(0, a0):max(0, a1), max(0, b0):max(0, b1)]
+            ssm = float(np.mean(block)) if block.size else 0.0
+            label_bonus = 0.08 if left.get("label") == right.get("label") else 0.0
+            energy_close = 1.0 - abs(float(left.get("meanEnergy", left.get("energy", 0.0))) - float(right.get("meanEnergy", right.get("energy", 0.0))))
+            vocal_close = 1.0 - abs(float(left.get("vocalDensity", 0.0)) - float(right.get("vocalDensity", 0.0)))
+            value = float(np.clip(ssm * 0.78 + energy_close * 0.08 + vocal_close * 0.06 + label_bonus, 0, 1))
+            result[i, j] = value
+            result[j, i] = value
+    return result
+
+
+def _ordered_group_names(labels: np.ndarray) -> dict[int, str]:
+    names: dict[int, str] = {}
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for label in labels:
+        value = int(label)
+        if value not in names:
+            index = len(names)
+            names[value] = alphabet[index] if index < len(alphabet) else f"G{index + 1}"
+    return names
 
 
 def _smooth_matrix(matrix: np.ndarray) -> np.ndarray:

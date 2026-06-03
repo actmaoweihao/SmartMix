@@ -258,8 +258,8 @@ Mashup Builder 用于两首歌的段落级重组。典型流程：
 
 1. 上传并分析至少两首歌。
 2. 在 Mashup 面板选择 Track A 和 Track B。
-3. 选择 8 或 16 小节作为段落粒度。
-4. 点击“分析段落”，查看每首歌的可用片段、能量、风险和结构标签。
+3. 选择 8 或 16 小节作为偏好粒度。
+4. 点击“分析段落”，查看每首歌的可用片段、能量、风险、结构标签和重复段落分组。
 5. 点击“生成拼接方案”，生成主方案和替代方案。
 6. 点击“渲染试听/导出”，后端生成可试听文件。
 
@@ -275,6 +275,8 @@ Mashup Builder 用于两首歌的段落级重组。典型流程：
 - `allowHybridBed`：是否允许混合 bed。
 - `allowVocalPitchShift`：是否允许人声移调。
 - `maxVocalStretch`：最大人声拉伸比例。
+
+段落分析使用小节级特征、自相似矩阵、多尺度 novelty 和 MSAF-style spectral grouping。若已有 Demucs stems，会进一步用 vocals / drums / bass / other 修正人声入口、groove bed 和安全切点。
 
 ### Harmonic Tuning
 
@@ -462,6 +464,7 @@ Get-Content README.md -Encoding utf8
 - `docs/product/MASHUP_UX_FLOW.md`：Mashup Builder 使用路径。
 - `docs/architecture/TECHNICAL_DESIGN.md`：技术设计。
 - `docs/architecture/ARCHITECTURE_REVIEW.md`：架构审查。
+- `docs/architecture/MSAF_SEGMENTATION.md`：MSAF-style 双曲重组段落分析。
 - `docs/algorithms/SORTING_ALGORITHM.md`：排序算法说明。
 - `docs/algorithms/SONG_MATCHING_SCORING.md`：两首歌匹配评分。
 - `docs/audio/ENERGY_SCORING.md`：能量评分。

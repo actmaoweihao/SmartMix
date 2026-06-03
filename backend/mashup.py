@@ -60,6 +60,7 @@ def _compact_segmentation_report(report: dict[str, Any]) -> dict[str, Any]:
         "vocalPhrases": report.get("vocalPhrases", []),
         "grooveBedCandidates": report.get("grooveBedCandidates", []),
         "safeCutPoints": report.get("safeCutPoints", []),
+        "structuralGroups": report.get("structuralGroups", []),
         "warnings": report.get("warnings", []),
         "debug": report.get("debug", {}),
     }
