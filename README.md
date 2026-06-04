@@ -344,6 +344,7 @@ pnpm typecheck        # TypeScript 类型检查
 | `GET` | `/api/tracks/{track_id}/stems/{stem_name}/audio` | 获取单个 stem 音频 |
 | `GET` | `/api/segmentation/msaf/algorithms` | 获取 MSAF 算法列表 |
 | `POST` | `/api/segmentation/tracks/{track_id}` | 独立单曲段落识别 |
+| `POST` | `/api/segmentation/tracks/{track_id}/sections` | 团队 SDK 版段落分析/标注/拆分输出 |
 | `POST` | `/api/tracks/{track_id}/reference-mix` | 按参考曲目渲染参考混音 |
 | `POST` | `/api/tracks/{track_id}/tune` | 把曲目调到指定 Camelot |
 | `POST` | `/api/match` | 计算两首歌衔接评分 |
