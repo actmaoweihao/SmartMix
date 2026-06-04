@@ -172,4 +172,4 @@ Outro
 - Build 更看重当前段内部能量/张力上升，以及下一段是否明显更强。
 - Break 更看重从前一段抽空、鼓/贝斯减少、能量下降。
 - Verse 会区分 `Verse - Sparse` 和 `Verse - Full`。
-- 过长段落会按内部 layer change 再拆分，避免一个大 section 覆盖多个编曲层次。
+- 当前不会把同一类型的段落按内部 layer change 再切成小片段；边界只来自 MSAF/SmartMix 段落识别结果，标签器会在标注后合并相邻同类段落。

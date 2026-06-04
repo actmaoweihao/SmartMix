@@ -15,7 +15,6 @@ from ..segmentation import (
     analyze_track_segmentation,
     compute_similarity_matrices,
     extract_bar_features,
-    split_sections_by_layer_changes,
     summarize_structural_groups,
     _load_stems,
     _make_section,
@@ -120,7 +119,6 @@ def analyze_with_msaf_package(
     bar_features = extract_bar_features(audio, SAMPLE_RATE, track, stem_audio or None)
     matrices = compute_similarity_matrices(bar_features)
     sections = _sections_from_msaf_boundaries(track, source, boundaries, labels, bar_features, matrices)
-    sections = split_sections_by_layer_changes(sections, bar_features, matrices, track=track, source=source, level="msaf")
     sections = annotate_structural_groups(sections, matrices)
     sections = refine_section_labels(sections, bar_features)
     return {

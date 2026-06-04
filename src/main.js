@@ -3256,8 +3256,8 @@ function renderSegmentationTrackDebug(title, report) {
       </div>
       ${warnings.length ? `<div class="mashup-warnings">${warnings.map((warning) => `<span>${escapeHtml(warning)}</span>`).join("")}</div>` : ""}
       <div class="mashup-quality-report">
-        <div><strong>Minor sections</strong>${minorSections.slice(0, 8).map((item) => `<span>${escapeHtml(item.label || "unknown")} / b${item.barStart}-${item.barEnd} / ${item.bars} bars / ${escapeHtml((item.riskFlags || []).join(", ") || "clean")}</span>`).join("")}</div>
-        <div><strong>Structural sections</strong>${sections.slice(0, 8).map((item) => `<span>${escapeHtml(item.label || "unknown")} · b${item.barStart}-${item.barEnd} · ${Math.round((Number(item.confidence) || 0) * 100)}% · ${escapeHtml((item.riskFlags || []).join(", ") || "clean")}</span>`).join("")}</div>
+        <div><strong>Minor sections</strong>${minorSections.slice(0, 8).map((item) => `<span>${escapeHtml(item.sectionSubLabel || item.sectionLabel || item.label || "unknown")} / b${item.barStart}-${item.barEnd} / ${item.bars} bars / ${escapeHtml(item.arrangementLevel || "layer")} / ${escapeHtml((item.riskFlags || []).join(", ") || "clean")}</span>`).join("")}</div>
+        <div><strong>Structural sections</strong>${sections.slice(0, 8).map((item) => `<span>${escapeHtml(item.sectionSubLabel || item.sectionLabel || item.label || "unknown")} · b${item.barStart}-${item.barEnd} · ${Math.round((Number(item.labelConfidence || item.confidence) || 0) * 100)}% · ${escapeHtml((item.labelReasons || item.riskFlags || []).join(", ") || "clean")}</span>`).join("")}</div>
         <div><strong>Vocal phrases</strong>${phrases.slice(0, 8).map((item) => `<span>${escapeHtml(item.id || "phrase")} · ${item.bars} bars · score ${Math.round(item.score || 0)} · ${item.hasPickup ? "pickup " : ""}${item.hasTail ? "tail " : ""}${escapeHtml((item.riskFlags || []).join(", "))}</span>`).join("")}</div>
         <div><strong>Groove beds</strong>${beds.slice(0, 5).map((item) => `<span>${escapeHtml(item.id || "bed")} · ${item.bars} bars · loop ${Math.round((Number(item.loopability) || 0) * 100)} · leak ${Math.round((Number(item.vocalLeakage) || 0) * 100)} · ${Math.round(item.score || 0)}/100</span>`).join("")}</div>
         <div><strong>Safe cut points</strong>${safe.slice(0, 6).map((item) => `<span>${formatTime(item.time)} · ${escapeHtml(item.type)} · ${Math.round((Number(item.score) || 0) * 100)} · ${escapeHtml((item.riskFlags || []).join(", ") || "safe")}</span>`).join("")}</div>
@@ -3284,15 +3284,21 @@ function renderMashupSegmentBlock(segment) {
   const cleanEntry = segment.isCleanEntry ? "clean in" : "risky in";
   const cleanExit = segment.isCleanExit ? "clean out" : "risky out";
   const risks = (segment.riskFlags || []).slice(0, 3);
+  const title = segment.sectionSubLabel || segment.sectionLabel || segment.label || "segment";
+  const raw = segment.rawLabel && segment.rawLabel !== segment.label ? ` · ${segment.rawLabel}` : "";
+  const level = segment.arrangementLevel ? ` · ${segment.arrangementLevel}` : "";
+  const reasons = (segment.labelReasons || []).slice(0, 2);
   return `
     <article class="mashup-segment-block ${escapeHtml(segment.source || "")}">
-      <div><strong>${escapeHtml(segment.label || "segment")}</strong><span>${formatTime(segment.start)}-${formatTime(segment.end)}</span></div>
+      <div><strong>${escapeHtml(title)}</strong><span>${formatTime(segment.start)}-${formatTime(segment.end)}</span></div>
+      <small>${escapeHtml(segment.sectionLabel || segment.label || "segment")}${escapeHtml(level)}${escapeHtml(raw)}</small>
       <div class="mashup-mini-meters">
         <span style="--value:${energy}%">E ${energy}</span>
         <span style="--value:${vocal}%">V ${vocal}</span>
         <span style="--value:${bass}%">B ${bass}</span>
       </div>
       <small>${escapeHtml(segment.camelot || "--")} · ${formatNumber(segment.bpm, 1)} BPM · ${cleanEntry} / ${cleanExit}</small>
+      ${reasons.length ? `<div class="mashup-flags">${reasons.map((reason) => `<span>${escapeHtml(reason)}</span>`).join("")}</div>` : ""}
       ${risks.length ? `<div class="mashup-flags">${risks.map((risk) => `<span>${escapeHtml(risk)}</span>`).join("")}</div>` : ""}
     </article>
   `;

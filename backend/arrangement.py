@@ -114,8 +114,6 @@ def segments_from_segmentation_report(track: dict[str, Any], source: str, sectio
     phrases = [float(item.get("time")) for item in report.get("safeCutPoints", []) if item.get("type") in {"vocal_entry", "vocal_exit", "drop_entry", "breakdown_entry"} and _is_number(item.get("time"))]
     segments = []
     for section in sections:
-        if int(section.get("bars", 0)) < 4:
-            continue
         start = float(section.get("start", 0.0))
         end = float(section.get("end", start))
         if end <= start:
@@ -140,7 +138,8 @@ def segments_from_segmentation_report(track: dict[str, Any], source: str, sectio
             "phraseStart": nearest_index(phrases, start) if phrases else 0,
             "phraseEnd": nearest_index(phrases, end) if phrases else 0,
             "downbeatTime": round(start, 3),
-            "label": section.get("label", "unknown"),
+            "label": section.get("sectionLabel") or section.get("label", "unknown"),
+            "rawLabel": section.get("rawLabel") or section.get("label", "unknown"),
             "sectionType": section.get("sectionType"),
             "sectionLabel": section.get("sectionLabel"),
             "sectionSubLabel": section.get("sectionSubLabel"),
@@ -173,8 +172,89 @@ def segments_from_segmentation_report(track: dict[str, Any], source: str, sectio
             "repetitionScore": section.get("repetitionScore", 0.0),
             "similarSectionIds": list(section.get("similarSectionIds") or []),
         }
+        if int(section.get("bars", 0)) < 4:
+            segment["riskFlags"].append("short_section")
         segments.append(segment)
-    return segments
+    return _repair_segment_timeline(segments, track, source, bars)
+
+
+def _repair_segment_timeline(segments: list[dict[str, Any]], track: dict[str, Any], source: str, bars: list[float]) -> list[dict[str, Any]]:
+    if not segments:
+        return segments
+    duration = _float(track.get("duration"), bars[-1] if bars else segments[-1].get("end", 0.0))
+    duration = max(duration, float(segments[-1].get("end", 0.0) or 0.0))
+    repaired: list[dict[str, Any]] = []
+    cursor = 0.0
+    for segment in sorted(segments, key=lambda item: float(item.get("start", 0.0) or 0.0)):
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", start) or start)
+        if start - cursor > 0.2:
+            repaired.append(_gap_segment(track, source, cursor, start, len(repaired) + 1))
+        if repaired and start < float(repaired[-1].get("end", 0.0) or 0.0):
+            start = float(repaired[-1].get("end", 0.0) or 0.0)
+            segment = dict(segment)
+            segment["start"] = round(start, 3)
+            segment["duration"] = round(max(0.0, end - start), 3)
+        if end - start > 0.05:
+            segment = dict(segment)
+            segment["id"] = f"{source}_seg_{len(repaired) + 1:03d}"
+            repaired.append(segment)
+            cursor = max(cursor, end)
+    if duration - cursor > 0.2:
+        repaired.append(_gap_segment(track, source, cursor, duration, len(repaired) + 1))
+    return repaired
+
+
+def _gap_segment(track: dict[str, Any], source: str, start: float, end: float, number: int) -> dict[str, Any]:
+    section_type = "intro" if start <= 0.2 else "transition"
+    section_label = "Intro" if section_type == "intro" else "Transition"
+    return {
+        "id": f"{source}_seg_{number:03d}",
+        "sectionId": None,
+        "trackId": track.get("id"),
+        "source": source,
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "duration": round(end - start, 3),
+        "barStart": 0,
+        "barEnd": 0,
+        "phraseStart": 0,
+        "phraseEnd": 0,
+        "downbeatTime": round(start, 3),
+        "label": section_label,
+        "rawLabel": "coverage_gap",
+        "sectionType": section_type,
+        "sectionLabel": section_label,
+        "sectionSubLabel": section_label,
+        "arrangementLevel": "unknown",
+        "layerProfile": None,
+        "labelConfidence": 0.0,
+        "labelReasons": ["filled missing time coverage"],
+        "energy": 0.0,
+        "energyStart": 0.0,
+        "energyEnd": 0.0,
+        "energyDelta": 0.0,
+        "vocalDensity": 0.0,
+        "vocalStart": 0.0,
+        "vocalEnd": 0.0,
+        "bassEnergy": 0.0,
+        "drumActivity": 0.0,
+        "brightness": 0.0,
+        "spectralChange": 0.0,
+        "bpm": round(_float(track.get("bpm"), 120.0), 3),
+        "camelot": track.get("camelot"),
+        "key": track.get("key"),
+        "mixInScore": 0.0,
+        "mixOutScore": 0.0,
+        "isCleanEntry": True,
+        "isCleanExit": True,
+        "riskFlags": ["coverage_gap"],
+        "segmentationConfidence": 0.0,
+        "sectionGroup": None,
+        "groupConfidence": 0.0,
+        "repetitionScore": 0.0,
+        "similarSectionIds": [],
+    }
 
 
 def build_track_segments(

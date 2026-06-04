@@ -162,13 +162,11 @@ def analyze_track_segmentation(
     boundaries = generate_boundary_candidates(bar_features, novelty, track)
     boundaries = fuse_msaf_boundaries(boundaries, msaf.get("boundaryCandidates", []))
     sections = build_hierarchical_sections(boundaries, bar_features, matrices, track=track, source=source)
-    sections = split_sections_by_layer_changes(sections, bar_features, matrices, track=track, source=source, level="major")
     sections = annotate_structural_groups(sections, matrices)
     from .services.section_labeler import refine_section_labels
 
     sections = refine_section_labels(sections, bar_features)
     minor_sections = build_minor_sections(boundaries, bar_features, matrices, track=track, source=source)
-    minor_sections = split_sections_by_layer_changes(minor_sections, bar_features, matrices, track=track, source=source, level="minor", max_bars=6, min_bars=2)
     minor_sections = annotate_structural_groups(minor_sections, matrices)
     minor_sections = refine_section_labels(minor_sections, bar_features)
     phrase_sections = minor_sections or sections
@@ -571,79 +569,6 @@ def build_minor_sections(
             continue
         sections.append(_make_section(track, source, bar_features, similarity_matrices, start_idx, end_idx, len(sections) + 1, "minor"))
     return sections
-
-
-def split_sections_by_layer_changes(
-    sections: list[dict[str, Any]],
-    bar_features: list[BarFeature],
-    similarity_matrices: dict[str, np.ndarray],
-    *,
-    track: dict[str, Any] | None = None,
-    source: str = "A",
-    level: str = "major",
-    max_bars: int = 8,
-    min_bars: int = 4,
-) -> list[dict[str, Any]]:
-    if not sections or not bar_features:
-        return sections
-    track = track or {}
-    refined: list[dict[str, Any]] = []
-    for section in sections:
-        start = int(section.get("barStart", 0))
-        end = int(section.get("barEnd", start))
-        points = _layer_split_points(bar_features, start, end, max_bars=max_bars, min_bars=min_bars)
-        for left, right in zip(points, points[1:]):
-            if right - left < min_bars:
-                continue
-            refined.append(_make_section(track, source, bar_features, similarity_matrices, left, right, len(refined) + 1, level))
-    return refined or sections
-
-
-def _layer_split_points(bar_features: list[BarFeature], start: int, end: int, *, max_bars: int, min_bars: int) -> list[int]:
-    length = end - start
-    if length <= max_bars:
-        return [start, end]
-    points = [start, end]
-    while True:
-        points = sorted(set(points))
-        longest = max(zip(points, points[1:]), key=lambda item: item[1] - item[0])
-        if longest[1] - longest[0] <= max_bars:
-            break
-        split = _best_layer_split(bar_features, longest[0], longest[1], min_bars=min_bars)
-        if split <= longest[0] or split >= longest[1] or split in points:
-            split = _nearest_grid_split(longest[0], longest[1])
-        if split <= longest[0] or split >= longest[1] or split in points:
-            break
-        points.append(split)
-    return sorted(set(points))
-
-
-def _best_layer_split(bar_features: list[BarFeature], start: int, end: int, *, min_bars: int) -> int:
-    best_index = -1
-    best_score = -1.0
-    for index in range(start + min_bars, end - min_bars + 1):
-        prev = bar_features[index - 1]
-        cur = bar_features[index]
-        score = (
-            abs(cur.energy - prev.energy) * 0.28
-            + abs(cur.vocalDensity - prev.vocalDensity) * 0.20
-            + abs(cur.drumActivity - prev.drumActivity) * 0.20
-            + abs(cur.bassEnergy - prev.bassEnergy) * 0.18
-            + abs(cur.spectralCentroid - prev.spectralCentroid) / 8000.0 * 0.08
-            + (0.06 if cur.isDownbeatStrong or index % 4 == 0 else 0.0)
-        )
-        if score > best_score:
-            best_score = float(score)
-            best_index = index
-    if best_score < 0.12:
-        return -1
-    return best_index
-
-
-def _nearest_grid_split(start: int, end: int) -> int:
-    middle = (start + end) // 2
-    grid = round(middle / 4) * 4
-    return int(np.clip(grid, start + 2, end - 2))
 
 
 def detect_vocal_activity_curve(vocals_stem: Any, sr: int = SAMPLE_RATE) -> dict[str, Any]:
