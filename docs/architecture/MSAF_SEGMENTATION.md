@@ -1,38 +1,78 @@
-# MSAF-style 双曲重组段落分析
+# 真实 MSAF 双曲重组段落分析
 
-SmartMix 的 Mashup 段落分析现在在原有 novelty / stem-aware 逻辑上增加了 MSAF-style 结构分组。
+SmartMix 的段落识别已经封装为独立功能，并支持真实 `msaf` Python 包。默认推荐使用 `hybrid` 模式：MSAF 负责专业结构边界，SmartMix 负责人声、鼓、贝斯、groove bed 和安全切点等制作侧指标。
+
+## 安装
+
+```bash
+pnpm setup:segmentation
+```
+
+`msaf==0.1.80` 在新版 SciPy 环境中会访问旧的 `scipy.inf`。SmartMix 会在导入 MSAF 前自动做运行时兼容补丁，不需要修改 site-packages。
 
 ## 入口
 
-- API：`POST /api/mashup/analyze`
-- 后端入口：`backend/mashup.py::analyze_mashup_tracks`
-- 核心分析：`backend/segmentation.py::analyze_track_segmentation`
+- 独立单曲 API：`POST /api/segmentation/tracks/{track_id}`
+- MSAF 算法列表：`GET /api/segmentation/msaf/algorithms`
+- Mashup API：`POST /api/mashup/analyze`
+- 服务封装：`backend/services/segment_analysis.py`
+- SmartMix stem-aware 细化：`backend/segmentation.py`
+
+## 单曲调用
+
+```http
+POST /api/segmentation/tracks/{track_id}
+Content-Type: application/json
+```
+
+```json
+{
+  "analyzer": "hybrid",
+  "boundariesId": "scluster",
+  "labelsId": "scluster",
+  "feature": "pcp",
+  "useStems": true,
+  "nJobs": 1
+}
+```
+
+字段说明：
+
+- `analyzer`：`smartmix`、`msaf`、`hybrid`。
+- `boundariesId`：MSAF 边界算法，支持 `cnmf`、`foote`、`olda`、`scluster`、`sf`、`vmo` 等。
+- `labelsId`：MSAF 标签算法，支持 `cnmf`、`fmc2d`、`scluster`、`vmo`，也可以为 `null`。
+- `feature`：MSAF 特征，支持 `pcp`、`mfcc`、`tonnetz`。
+- `useStems`：是否读取 Demucs stems 修正人声和 groove 判断。
+- `nJobs`：传给 MSAF 的并行任务数。
+
+## Mashup 调用
+
+`/api/mashup/analyze` 支持：
+
+```json
+{
+  "trackAId": "A",
+  "trackBId": "B",
+  "barsPerSegment": 16,
+  "useStems": true,
+  "segmentationAnalyzer": "hybrid"
+}
+```
+
+`segmentationAnalyzer` 可选：
+
+- `hybrid`：默认，真实 MSAF + SmartMix stem-aware 指标。
+- `msaf`：只使用真实 MSAF 包生成结构段落。
+- `smartmix`：只使用 SmartMix 原有 novelty / stem-aware 逻辑。
 
 ## 分析流程
 
-1. 按小节切分整曲。
-2. 为每个小节提取特征：
-   - chroma
-   - MFCC
-   - spectral contrast
-   - spectral centroid
-   - onset strength
-   - energy
-   - vocal density
-   - drum activity
-   - bass energy
-3. 构建四类自相似矩阵：
-   - harmonic
-   - timbre
-   - rhythm
-   - energy
-4. 融合为 `fused` self-similarity matrix。
-5. 在 fused SSM 上做 4/8/16 小节多尺度 novelty 检测。
-6. 构建 recurrence affinity。
-7. 使用 normalized graph Laplacian 做 spectral embedding。
-8. 用轻量 k-means 得到 bar-level 结构状态。
-9. 将 spectral cluster change 融入边界候选，边界类型为 `msaf_cluster`。
-10. 对最终 `sections` 和 `minorSections` 做结构分组。
+1. 调用真实 `msaf.process(audio_file, boundaries_id=..., labels_id=..., feature=...)`。
+2. 清洗 MSAF 输出的 boundaries 和 labels。
+3. 将 MSAF boundary 映射到 SmartMix 小节网格。
+4. 使用 SmartMix bar features 计算每个 MSAF section 的能量、人声、鼓、贝斯、loopability、mix-in/out。
+5. 使用 SmartMix structural grouping 补充 `sectionGroup`、`repetitionScore` 和 `similarSectionIds`。
+6. 在 `hybrid` 模式下，保留 SmartMix 的 vocal phrases、groove bed candidates 和 safe cut points。
 
 ## 新增输出字段
 
@@ -40,6 +80,21 @@ SmartMix 的 Mashup 段落分析现在在原有 novelty / stem-aware 逻辑上�
 
 ```json
 {
+  "sectionType": "drop_chorus",
+  "sectionLabel": "Drop / Chorus",
+  "sectionSubLabel": "Chorus / Hook",
+  "arrangementLevel": "peak",
+  "layerProfile": {
+    "energy": 0.82,
+    "vocal": 0.63,
+    "drums": 0.76,
+    "bass": 0.71,
+    "brightness": 0.42,
+    "density": 0.67,
+    "tension": 0.31,
+    "repetition": 0.88
+  },
+  "labelReasons": ["repeated high-energy hook"],
   "sectionGroup": "A",
   "groupConfidence": 0.82,
   "repetitionScore": 0.91,
@@ -49,10 +104,28 @@ SmartMix 的 Mashup 段落分析现在在原有 novelty / stem-aware 逻辑上�
 
 字段含义：
 
+- `sectionType`：标准段落类型，供程序筛选和排序。
+- `sectionLabel`：标准展示标签，供 UI 和团队标注使用。
+- `sectionSubLabel`：更细的层次标签，例如 `Verse - Sparse`、`Verse - Full`、`Build - Rising`、`Chorus / Hook`。
+- `arrangementLevel`：编曲层次，可能是 `sparse`、`medium`、`rising`、`falling`、`peak`。
+- `layerProfile`：当前段的人声、鼓、贝斯、能量、亮度、密度和张力画像。
+- `labelReasons`：标签判定原因，方便调试“为什么这里是 Build / Break / Chorus”。
 - `sectionGroup`：结构重复分组，按首次出现顺序命名为 `A`、`B`、`C` 等。
 - `groupConfidence`：该 section 与同组 section 的相似置信度。
 - `repetitionScore`：重复结构强度，用于判断副歌/主歌复现。
 - `similarSectionIds`：最相似的其他段落 ID。
+
+标准展示标签包括：
+
+```text
+Intro
+Verse
+Build
+Drop / Chorus
+Break
+Transition
+Outro
+```
 
 分析报告还会返回：
 
@@ -83,10 +156,20 @@ SmartMix 的 Mashup 段落分析现在在原有 novelty / stem-aware 逻辑上�
 
 ## 与原有逻辑的关系
 
-MSAF-style 分析不是替代原有逻辑，而是补强：
+真实 MSAF 分析不是完全替代原有逻辑，而是补强：
 
-- 原有 novelty 检测擅长找变化点。
-- MSAF-style spectral grouping 擅长识别重复结构。
+- MSAF 擅长结构边界和重复结构。
 - Demucs stems 擅长修正人声安全边界和伴奏 bed。
+- SmartMix 原有逻辑擅长给 Mashup 渲染提供制作侧指标。
 
-最终段落边界由 novelty、transition candidate、phrase boundary、vocal entry/exit、drum/bass change 和 `msaf_cluster` 共同决定。
+默认 `hybrid` 模式会优先使用 MSAF sections 作为段落，同时保留 SmartMix 的 stems 语义和风险提示。
+
+## 标签精修
+
+为避免“高能段全部被标成 Chorus”，SmartMix 在 MSAF 边界之后增加 `section_labeler`：
+
+- Chorus / Drop 不再只看高能量，而是结合重复分组、hook 复现、是否接在 Build 后、鼓和贝斯是否同时进入。
+- Build 更看重当前段内部能量/张力上升，以及下一段是否明显更强。
+- Break 更看重从前一段抽空、鼓/贝斯减少、能量下降。
+- Verse 会区分 `Verse - Sparse` 和 `Verse - Full`。
+- 过长段落会按内部 layer change 再拆分，避免一个大 section 覆盖多个编曲层次。

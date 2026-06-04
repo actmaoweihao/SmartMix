@@ -10,6 +10,7 @@
     "check": "node --check src/main.js",
     "typecheck": "tsc --noEmit",
     "setup:backend": "python -m pip install -r backend/requirements.txt",
+    "setup:segmentation": "python -m pip install -r backend/requirements-segmentation.txt",
     "setup:tuning": "python -m pip install -r backend/requirements-tuning.txt"
   },
   "devDependencies": {

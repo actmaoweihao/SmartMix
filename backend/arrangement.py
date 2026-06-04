@@ -42,7 +42,7 @@ def build_music_segments(
         report = analyze_track_segmentation(track, source, audio=audio, sr=sr)
         sections = report.get("sections") or []
         if sections:
-            return _segments_from_segmentation_report(track, source, sections, report)
+            return segments_from_segmentation_report(track, source, sections, report)
     except Exception:
         pass
     bpm = _float(track.get("bpm"), 120.0)
@@ -107,7 +107,7 @@ def build_music_segments(
     return segments
 
 
-def _segments_from_segmentation_report(track: dict[str, Any], source: str, sections: list[dict[str, Any]], report: dict[str, Any]) -> list[dict[str, Any]]:
+def segments_from_segmentation_report(track: dict[str, Any], source: str, sections: list[dict[str, Any]], report: dict[str, Any]) -> list[dict[str, Any]]:
     bars = [float(item["start"]) for item in report.get("barFeatures", []) if _is_number(item.get("start"))]
     if report.get("barFeatures"):
         bars.append(float(report["barFeatures"][-1]["end"]))
@@ -141,6 +141,13 @@ def _segments_from_segmentation_report(track: dict[str, Any], source: str, secti
             "phraseEnd": nearest_index(phrases, end) if phrases else 0,
             "downbeatTime": round(start, 3),
             "label": section.get("label", "unknown"),
+            "sectionType": section.get("sectionType"),
+            "sectionLabel": section.get("sectionLabel"),
+            "sectionSubLabel": section.get("sectionSubLabel"),
+            "arrangementLevel": section.get("arrangementLevel"),
+            "layerProfile": section.get("layerProfile"),
+            "labelConfidence": section.get("labelConfidence"),
+            "labelReasons": list(section.get("labelReasons") or []),
             "energy": round(float(section.get("meanEnergy", 0.0)), 4),
             "energyStart": round(energy_start, 4),
             "energyEnd": round(energy_end, 4),

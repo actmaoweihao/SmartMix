@@ -1,0 +1,9 @@
+# Optional professional music structure analysis pipeline.
+# MSAF is used by backend/services/segment_analysis.py.
+#
+# Install with:
+#   python -m pip install -r backend/requirements-segmentation.txt
+#
+# Note: MSAF 0.1.80 expects scipy.inf. SmartMix applies a small runtime
+# compatibility patch before importing msaf, so no site-packages edit is needed.
+msaf==0.1.80

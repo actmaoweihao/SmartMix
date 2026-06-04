@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .api.projects import router as projects_router
+from .api.segmentation import router as segmentation_router
 from .api.tracks import router as tracks_router
 from .matching import evaluate_track_match
 from .mashup import analyze_mashup_tracks, build_mashup_plan, render_mashup_plan
@@ -35,6 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(projects_router)
+app.include_router(segmentation_router)
 app.include_router(tracks_router)
 
 
@@ -57,6 +59,7 @@ class MashupAnalyzeRequest(BaseModel):
     trackBId: str
     barsPerSegment: int = 16
     useStems: bool = True
+    segmentationAnalyzer: str = "hybrid"
 
 
 class MashupPlanRequest(BaseModel):
@@ -185,7 +188,7 @@ def mashup_analyze(request: MashupAnalyzeRequest) -> dict:
     track_a = read_track_meta(request.trackAId)
     track_b = read_track_meta(request.trackBId)
     try:
-        return analyze_mashup_tracks(track_a, track_b, request.barsPerSegment, request.useStems)
+        return analyze_mashup_tracks(track_a, track_b, request.barsPerSegment, request.useStems, request.segmentationAnalyzer)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -259,4 +262,3 @@ def download_export(filename: str) -> FileResponse:
     else:
         media_type = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
     return FileResponse(path, media_type=media_type, filename=filename)
-

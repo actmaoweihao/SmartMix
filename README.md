@@ -123,7 +123,13 @@ pnpm backend
 
 ## 可选高质量依赖
 
-基础功能只需要 `pnpm setup:backend`。如果要使用 Demucs 真分轨、Harmonic Tuning、Reference Mix 或更高质量的 Mashup，安装可选依赖：
+基础功能只需要 `pnpm setup:backend`。如果要使用真实 MSAF 段落识别，安装：
+
+```bash
+pnpm setup:segmentation
+```
+
+如果要使用 Demucs 真分轨、Harmonic Tuning、Reference Mix 或更高质量的 Mashup，安装可选调音/分轨依赖：
 
 ```bash
 pnpm setup:tuning
@@ -276,7 +282,7 @@ Mashup Builder 用于两首歌的段落级重组。典型流程：
 - `allowVocalPitchShift`：是否允许人声移调。
 - `maxVocalStretch`：最大人声拉伸比例。
 
-段落分析使用小节级特征、自相似矩阵、多尺度 novelty 和 MSAF-style spectral grouping。若已有 Demucs stems，会进一步用 vocals / drums / bass / other 修正人声入口、groove bed 和安全切点。
+段落分析使用真实 MSAF、SmartMix 小节级特征、自相似矩阵和 stems 修正。输出会保留算法标签，并额外提供标准标注：Intro、Verse、Build、Drop / Chorus、Break、Transition、Outro。
 
 ### Harmonic Tuning
 
@@ -321,6 +327,7 @@ pnpm dev              # 同时启动前端和后端
 pnpm frontend         # 只启动 Vite 前端
 pnpm backend          # 只启动 FastAPI 后端
 pnpm setup:backend    # 安装后端基础依赖
+pnpm setup:segmentation # 安装真实 MSAF 段落识别依赖
 pnpm setup:tuning     # 安装可选 Demucs/TorchCodec 依赖
 pnpm check            # 检查 src/main.js 语法
 pnpm typecheck        # TypeScript 类型检查
@@ -335,6 +342,8 @@ pnpm typecheck        # TypeScript 类型检查
 | `GET` | `/api/tracks/{track_id}/audio` | 获取已上传音频 |
 | `POST` | `/api/tracks/{track_id}/stems` | 生成或读取 Demucs stems |
 | `GET` | `/api/tracks/{track_id}/stems/{stem_name}/audio` | 获取单个 stem 音频 |
+| `GET` | `/api/segmentation/msaf/algorithms` | 获取 MSAF 算法列表 |
+| `POST` | `/api/segmentation/tracks/{track_id}` | 独立单曲段落识别 |
 | `POST` | `/api/tracks/{track_id}/reference-mix` | 按参考曲目渲染参考混音 |
 | `POST` | `/api/tracks/{track_id}/tune` | 把曲目调到指定 Camelot |
 | `POST` | `/api/match` | 计算两首歌衔接评分 |

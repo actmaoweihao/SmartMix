@@ -12,6 +12,7 @@ from scipy import signal
 
 from .arrangement import (
     build_music_segments,
+    segments_from_segmentation_report,
     score_segment_transition,
 )
 from .loudness import loudness_metrics, normalize_loudness
@@ -26,32 +27,48 @@ SEQUENTIAL_MODES = {"smooth_join", "hook_swap", "energy_build"}
 LAYERED_MODES = {"a_vocal_b_instrumental", "b_vocal_a_instrumental"}
 GROOVE_MODES = {"groove_vocal_handoff", "a_vocal_on_b_groove", "b_vocal_on_a_groove", "call_response_groove", "hook_exchange_groove"}
 
-def analyze_mashup_tracks(track_a: dict[str, Any], track_b: dict[str, Any], bars_per_segment: int = 16, use_stems: bool = True) -> dict[str, Any]:
+def analyze_mashup_tracks(
+    track_a: dict[str, Any],
+    track_b: dict[str, Any],
+    bars_per_segment: int = 16,
+    use_stems: bool = True,
+    segmentation_analyzer: str = "hybrid",
+) -> dict[str, Any]:
     audio_a = _load_mono(Path(track_a["path"]))
     audio_b = _load_mono(Path(track_b["path"]))
     segmentation_report = {}
+    segments_a = None
+    segments_b = None
     try:
-        from .segmentation import analyze_track_segmentation
+        from .services.segment_analysis import SegmentAnalysisOptions, analyze_track_segments
 
         stems_a = _cached_stem_paths(str(track_a.get("id"))) if use_stems else None
         stems_b = _cached_stem_paths(str(track_b.get("id"))) if use_stems else None
+        options = SegmentAnalysisOptions(analyzer=segmentation_analyzer, use_stems=use_stems)
+        report_a = analyze_track_segments({**track_a, "source": "A"}, "A", stems=stems_a, options=options)
+        report_b = analyze_track_segments({**track_b, "source": "B"}, "B", stems=stems_b, options=options)
         segmentation_report = {
-            "trackA": _compact_segmentation_report(analyze_track_segmentation({**track_a, "source": "A"}, "A", audio=audio_a, sr=SAMPLE_RATE, stems=stems_a)),
-            "trackB": _compact_segmentation_report(analyze_track_segmentation({**track_b, "source": "B"}, "B", audio=audio_b, sr=SAMPLE_RATE, stems=stems_b)),
+            "trackA": _compact_segmentation_report(report_a),
+            "trackB": _compact_segmentation_report(report_b),
         }
+        segments_a = segments_from_segmentation_report(track_a, "A", report_a.get("sections") or [], report_a)
+        segments_b = segments_from_segmentation_report(track_b, "B", report_b.get("sections") or [], report_b)
     except Exception as exc:
         segmentation_report = {"warnings": [f"Segmentation report failed: {exc}"]}
     return {
-        "trackA": {"segments": build_music_segments(track_a, "A", bars_per_segment, audio=audio_a, sr=SAMPLE_RATE)},
-        "trackB": {"segments": build_music_segments(track_b, "B", bars_per_segment, audio=audio_b, sr=SAMPLE_RATE)},
+        "trackA": {"segments": segments_a or build_music_segments(track_a, "A", bars_per_segment, audio=audio_a, sr=SAMPLE_RATE)},
+        "trackB": {"segments": segments_b or build_music_segments(track_b, "B", bars_per_segment, audio=audio_b, sr=SAMPLE_RATE)},
         "segmentationReport": segmentation_report,
         "useStems": bool(use_stems),
+        "segmentationAnalyzer": segmentation_analyzer,
     }
 
 
 def _compact_segmentation_report(report: dict[str, Any]) -> dict[str, Any]:
     return {
         "method": report.get("method"),
+        "analyzer": report.get("analyzer"),
+        "msaf": report.get("msaf", {}),
         "barsDetected": report.get("barsDetected"),
         "stemsUsed": report.get("stemsUsed"),
         "boundaryCount": report.get("boundaryCount"),
@@ -380,6 +397,13 @@ def _plan_item(
         "trackId": segment["trackId"],
         "segmentId": segment["id"],
         "segmentLabel": segment.get("label"),
+        "sectionType": segment.get("sectionType"),
+        "sectionLabel": segment.get("sectionLabel"),
+        "sectionSubLabel": segment.get("sectionSubLabel"),
+        "arrangementLevel": segment.get("arrangementLevel"),
+        "layerProfile": segment.get("layerProfile"),
+        "labelConfidence": segment.get("labelConfidence"),
+        "labelReasons": segment.get("labelReasons", []),
         "sourceStart": float(segment["start"]),
         "sourceEnd": float(segment["end"]),
         "timelineStart": round(float(start), 3),
