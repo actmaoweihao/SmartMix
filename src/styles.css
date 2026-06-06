@@ -174,6 +174,7 @@ button:disabled {
 .field,
 .toggle,
 .eq-bank,
+.auto-handoff-card,
 .project-box {
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -187,8 +188,80 @@ button:disabled {
 .button-row,
 .export-row,
 .download-link,
+.auto-handoff-panel,
 .project-box {
   grid-column: 1 / -1;
+}
+
+.auto-handoff-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.auto-handoff-card {
+  display: grid;
+  gap: 8px;
+}
+
+.auto-handoff-card.muted span,
+.auto-handoff-card.error {
+  color: var(--muted);
+}
+
+.auto-handoff-card.error {
+  border-color: rgba(255, 107, 107, 0.55);
+  color: var(--danger);
+}
+
+.auto-handoff-head {
+  display: grid;
+  gap: 4px;
+}
+
+.auto-handoff-head span,
+.auto-handoff-transition p,
+.auto-handoff-transition small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.auto-handoff-list {
+  display: grid;
+  gap: 8px;
+}
+
+.auto-handoff-transition {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.auto-handoff-transition > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.auto-handoff-transition > div:first-child span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-handoff-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.auto-handoff-metrics span {
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 11px;
+  padding: 4px 6px;
 }
 
 .meter-block span,

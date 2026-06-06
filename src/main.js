@@ -43,6 +43,13 @@ const state = {
     previews: {},
     loadingPreviewId: null,
   },
+  autoHandoff: {
+    loading: false,
+    rendering: false,
+    renderedCount: 0,
+    plan: null,
+    error: "",
+  },
   match: {
     fileA: null,
     fileB: null,
@@ -199,9 +206,12 @@ app.innerHTML = `
 
         <div class="button-row">
           <button id="sortButton" type="button">应用排序</button>
+          <button id="autoHandoffButton" type="button" class="secondary">Smart Beat Handoff</button>
           <button id="playButton" type="button">预览</button>
           <button id="stopButton" type="button" class="secondary">停止</button>
         </div>
+
+        <div id="autoHandoffPanel" class="auto-handoff-panel"></div>
 
         <div class="export-row">
           <select id="exportFormat" aria-label="导出格式">
@@ -496,6 +506,8 @@ const els = {
   eqMid: document.querySelector("#eqMid"),
   eqHigh: document.querySelector("#eqHigh"),
   sortButton: document.querySelector("#sortButton"),
+  autoHandoffButton: document.querySelector("#autoHandoffButton"),
+  autoHandoffPanel: document.querySelector("#autoHandoffPanel"),
   playButton: document.querySelector("#playButton"),
   stopButton: document.querySelector("#stopButton"),
   restartButton: document.querySelector("#restartButton"),
@@ -591,6 +603,8 @@ function bindEvents() {
     if (state.stemDebugger.isPlaying) playStemDebugger(Number(els.stemProgress.value));
   });
   els.sortButton.addEventListener("click", applySort);
+  els.autoHandoffButton.addEventListener("click", generateAutoHandoffPlan);
+  els.autoHandoffPanel.addEventListener("click", autoHandoffPanelClick);
   els.playButton.addEventListener("click", () => previewMix(state.playbackOffset));
   els.restartButton.addEventListener("click", () => previewMix(0));
   els.stopButton.addEventListener("click", stopPreview);
@@ -1418,6 +1432,194 @@ function applySort() {
   render();
 }
 
+async function generateAutoHandoffPlan() {
+  const ready = playableTracks();
+  if (ready.length < 2) return;
+  state.autoHandoff.loading = true;
+  state.autoHandoff.error = "";
+  render();
+  try {
+    await assertBackendReachable();
+    const plan = await fetchJson("/api/auto-handoff/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        trackIds: ready.map((track) => track.id),
+        tracks: ready.map((track) => serializableTrackForBackend(track)),
+        settings: {
+          phraseBars: state.settings.phraseBars,
+          maxTempoChangePercent: 10,
+          preferStems: true,
+          targetEnergy: "arc",
+        },
+      }),
+    });
+    state.autoHandoff.plan = plan;
+    applyAutoHandoffPlan(plan);
+    setStatus(`Smart Beat Handoff planned: ${Math.round(plan.score || 0)}/100`);
+  } catch (error) {
+    state.autoHandoff.error = error.message || "Smart Beat Handoff failed";
+  } finally {
+    state.autoHandoff.loading = false;
+    render();
+  }
+}
+
+function serializableTrackForBackend(track) {
+  return {
+    id: track.id,
+    localId: track.localId,
+    name: track.name,
+    duration: track.duration,
+    bpm: track.bpm,
+    key: track.key,
+    camelot: track.camelot,
+    mode: track.mode,
+    energy: track.energy,
+    introPoint: track.introPoint,
+    outroPoint: track.outroPoint,
+    energy_profile: track.energy_profile,
+    transition_candidates: track.transition_candidates,
+    bars: track.bars,
+    phrases: track.phrases,
+    sections: track.sections,
+    energy_curve: track.energy_curve,
+    vocal_density_curve: track.vocal_density_curve,
+  };
+}
+
+function applyAutoHandoffPlan(plan) {
+  if (!plan?.orderedTrackIds?.length) return;
+  const readyById = new Map(playableTracks().map((track) => [track.id, track]));
+  const sorted = plan.orderedTrackIds.map((id) => readyById.get(id)).filter(Boolean);
+  const sortedIds = new Set(sorted.map((track) => track.id));
+  const remainingReady = playableTracks().filter((track) => !sortedIds.has(track.id));
+  const unresolved = state.tracks.filter((track) => track.status !== "ready");
+  state.tracks = [...sorted, ...remainingReady, ...unresolved];
+
+  for (const transition of plan.transitions || []) {
+    const prev = readyById.get(transition.fromTrackId);
+    const next = readyById.get(transition.toTrackId);
+    if (!prev || !next) continue;
+    const outgoingTime = Number(transition.outgoingCue?.time);
+    const incomingTime = Number(transition.incomingCue?.time);
+    if (Number.isFinite(outgoingTime)) prev.outroPoint = clamp(outgoingTime, 0.5, Math.max(0.5, prev.duration - 0.25));
+    if (Number.isFinite(incomingTime)) next.introPoint = clamp(incomingTime, 0, Math.max(0, next.duration - 0.25));
+    next.autoHandoffTransition = transition;
+  }
+
+  const durations = (plan.transitions || []).map((item) => Number(item.durationSec)).filter((value) => Number.isFinite(value) && value > 0);
+  if (durations.length) state.settings.crossfade = clamp(Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length), 2, 24);
+  state.settings.aiPrecision = true;
+  state.settings.autoTransition = true;
+  state.settings.mixStrategy = "auto";
+  state.settings.filterMode = "dynamicEq";
+  state.playbackOffset = 0;
+  applySettingsToControls();
+}
+
+function autoHandoffPanelClick(event) {
+  const button = event.target.closest("[data-auto-handoff-render]");
+  if (!button) return;
+  renderAutoHandoffPreviews();
+}
+
+async function renderAutoHandoffPreviews() {
+  const plan = state.autoHandoff.plan;
+  if (!plan?.transitions?.length || state.autoHandoff.rendering) return;
+  const readyById = new Map(playableTracks().map((track) => [track.id, track]));
+  state.autoHandoff.rendering = true;
+  state.autoHandoff.error = "";
+  state.autoHandoff.renderedCount = 0;
+  render();
+  try {
+    for (const transition of plan.transitions) {
+      const current = readyById.get(transition.fromTrackId);
+      const next = readyById.get(transition.toTrackId);
+      if (!current?.id || !next?.id) continue;
+      const recommendation = recommendationFromAutoHandoff(transition);
+      const result = await fetchJson("/api/transition-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          outgoingTrackId: current.id,
+          incomingTrackId: next.id,
+          recommendation,
+          options: {
+            targetMode: "quality",
+            useStemSeparation: true,
+            stemEngine: "demucs",
+            timeStretchEngine: "rubberband",
+            preserveFormants: true,
+            previewDurationBeforeTransition: 8,
+            previewDurationAfterTransition: 8,
+            exportFormat: "wav",
+            beginnerSafeMode: false,
+          },
+        }),
+      });
+      const preview = {
+        ...result,
+        outgoingLocalId: current.localId,
+        incomingLocalId: next.localId,
+        outgoingTrackId: current.id,
+        incomingTrackId: next.id,
+        timelineApplied: true,
+      };
+      state.teaching.previews[next.localId] = preview;
+      await hydrateTeachingPreviewAudio(preview);
+      const effective = effectiveTeachingCue(recommendation, preview);
+      current.outroPoint = clamp(effective.outgoingTime, 0.5, Math.max(0.5, current.duration - 0.25));
+      next.introPoint = clamp(effective.incomingTime, 0, Math.max(0, next.duration - 0.25));
+      next.appliedTransitionPreview = serializableTransitionPreview(preview, current, next);
+      transition.renderedPreview = {
+        url: preview.url,
+        method: preview.method,
+        renderMethod: preview.processingReport?.renderMethod,
+        riskScore: preview.processingReport?.riskScore,
+      };
+      state.autoHandoff.renderedCount += 1;
+      render();
+    }
+    setStatus(`Rendered ${state.autoHandoff.renderedCount} Smart Beat Handoff previews`);
+  } catch (error) {
+    state.autoHandoff.error = error.message || "Failed to render Smart Beat Handoff previews";
+  } finally {
+    state.autoHandoff.rendering = false;
+    render();
+  }
+}
+
+function recommendationFromAutoHandoff(transition) {
+  const method = {
+    drum_bed_handoff: "beatmix",
+    bass_swap_handoff: "bass_swap",
+    percussive_loop_bridge: "loop_build",
+    vocal_safe_bridge: "echo_out",
+    effect_tail_handoff: "echo_out",
+  }[transition.type] || "beatmix";
+  return {
+    method,
+    score: clamp((Number(transition.score) || 60) / 100, 0, 1),
+    difficulty: transition.risk === "low" ? 2 : transition.risk === "medium" ? 3 : 4,
+    reason: transition.explanation || "Smart Beat Handoff",
+    overlapDuration: Number(transition.durationSec) || state.settings.crossfade,
+    outgoingCue: {
+      time: Number(transition.outgoingCue?.time) || 0,
+      role: transition.outgoingCue?.role || "exit",
+      sectionType: "outro",
+      confidence: clamp((Number(transition.outgoingCue?.score) || 50) / 100, 0, 1),
+    },
+    incomingCue: {
+      time: Number(transition.incomingCue?.time) || 0,
+      role: transition.incomingCue?.role || "entry",
+      sectionType: "intro",
+      confidence: clamp((Number(transition.incomingCue?.score) || 50) / 100, 0, 1),
+    },
+    stepByStep: [],
+  };
+}
+
 function sortTracks(tracks, mode) {
   const copy = [...tracks];
   if (mode === "original") return copy.sort((a, b) => state.originalOrder.indexOf(a.localId) - state.originalOrder.indexOf(b.localId));
@@ -1853,6 +2055,10 @@ function transitionStrategyForItem(item) {
 function resolveMixStrategy(prevTrack, nextTrack) {
   const selected = state.settings.mixStrategy || "auto";
   if (selected !== "auto") return selected;
+  const plannedType = nextTrack?.autoHandoffTransition?.type;
+  if (plannedType === "bass_swap_handoff" || plannedType === "drum_bed_handoff") return "bassSwap";
+  if (plannedType === "vocal_safe_bridge") return "vocalSafe";
+  if (plannedType === "effect_tail_handoff" || plannedType === "percussive_loop_bridge") return "smooth";
   const prevVocal = prevTrack?.transition_candidates?.outro_vocal_density || 0;
   const nextVocal = nextTrack?.transition_candidates?.intro_vocal_density || 0;
   const bpmDelta = Math.abs((prevTrack?.bpm || 0) - (nextTrack?.bpm || 0));
@@ -2984,6 +3190,7 @@ function render() {
   renderTransport();
   renderMixTimeline();
   renderDeckMixer();
+  renderAutoHandoffPanel();
   renderMatchResult();
   renderTeachingPanel();
   renderMashupPanel();
@@ -3006,10 +3213,89 @@ function renderMetrics() {
   els.phraseBarsValue.textContent = `${state.settings.phraseBars} bars`;
   els.targetLufsValue.textContent = `${state.settings.targetLufs} LUFS`;
   els.sortButton.disabled = playable.length < 2;
+  els.autoHandoffButton.disabled = playable.length < 2 || state.autoHandoff.loading;
   els.playButton.disabled = playable.length < 1;
   els.restartButton.disabled = playable.length < 1;
   els.stopButton.disabled = !state.isPlaying;
   els.exportButton.disabled = playable.length < 1 || state.isExporting;
+}
+
+function renderAutoHandoffPanel() {
+  if (!els.autoHandoffPanel) return;
+  const { loading, rendering, renderedCount, plan, error } = state.autoHandoff;
+  if (loading) {
+    els.autoHandoffPanel.innerHTML = `<div class="auto-handoff-card">Planning Smart Beat Handoff...</div>`;
+    return;
+  }
+  if (error) {
+    els.autoHandoffPanel.innerHTML = `<div class="auto-handoff-card error">${escapeHtml(error)}</div>`;
+    return;
+  }
+  if (!plan) {
+    els.autoHandoffPanel.innerHTML = `
+      <div class="auto-handoff-card muted">
+        <strong>Smart Beat Handoff</strong>
+        <span>Generate an Auto-DJ order and stem-aware transition plan after at least two songs finish analysis.</span>
+      </div>
+    `;
+    return;
+  }
+  els.autoHandoffPanel.innerHTML = `
+    <div class="auto-handoff-card">
+      <div class="auto-handoff-head">
+        <strong>Smart Beat Handoff ${Math.round(plan.score || 0)}/100</strong>
+        <span>${escapeHtml(plan.summary || "")}</span>
+      </div>
+      <button type="button" data-auto-handoff-render ${rendering ? "disabled" : ""}>
+        ${rendering ? `Rendering ${renderedCount}/${(plan.transitions || []).length}...` : "Render Real Handoff Audio"}
+      </button>
+      <div class="auto-handoff-list">
+        ${(plan.transitions || []).map(renderAutoHandoffTransition).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderAutoHandoffTransition(transition) {
+  const bed = transition.rhythmBed || {};
+  const automation = transition.automation || {};
+  const warnings = transition.warnings || [];
+  const cueReasons = [
+    ...(transition.outgoingCue?.reasons || []).map((item) => `A: ${item}`),
+    ...(transition.incomingCue?.reasons || []).map((item) => `B: ${item}`),
+  ].slice(0, 4);
+  return `
+    <article class="auto-handoff-transition">
+      <div>
+        <strong>${escapeHtml(transitionTypeLabel(transition.type))}</strong>
+        <span>${escapeHtml(transition.fromName || "A")} -> ${escapeHtml(transition.toName || "B")}</span>
+      </div>
+      <div class="auto-handoff-metrics">
+        <span>${Math.round(transition.score || 0)}/100</span>
+        <span>${transition.barCount || 0} bars</span>
+        <span>${formatTime(Number(transition.durationSec) || 0)}</span>
+        <span>A OUT ${formatTime(Number(transition.outgoingCue?.time) || 0)}</span>
+        <span>B IN ${formatTime(Number(transition.incomingCue?.time) || 0)}</span>
+        <span>Bed ${escapeHtml(bed.source || "--")}/${escapeHtml(bed.stem || "--")}</span>
+        <span>Bass ${Math.round((automation.bassSwapAt || 0) * 100)}%</span>
+        <span>Risk ${escapeHtml(transition.risk || "--")}</span>
+        ${transition.renderedPreview?.url ? `<span>Rendered ${escapeHtml(transition.renderedPreview.renderMethod || transition.renderedPreview.method || "audio")}</span>` : ""}
+      </div>
+      <p>${escapeHtml(transition.explanation || "")}</p>
+      ${cueReasons.length ? `<small>${escapeHtml(cueReasons.join(" / "))}</small>` : ""}
+      ${warnings.length ? `<small>${escapeHtml(warnings.join(" / "))}</small>` : ""}
+    </article>
+  `;
+}
+
+function transitionTypeLabel(type) {
+  return {
+    drum_bed_handoff: "Drum Bed Handoff",
+    bass_swap_handoff: "Bass Swap Handoff",
+    percussive_loop_bridge: "Percussive Loop Bridge",
+    vocal_safe_bridge: "Vocal Safe Bridge",
+    effect_tail_handoff: "Effect Tail Handoff",
+  }[type] || type || "Handoff";
 }
 
 function syncMashupSettings() {

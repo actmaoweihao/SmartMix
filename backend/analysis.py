@@ -9,6 +9,7 @@ import imageio_ffmpeg
 import librosa
 import numpy as np
 
+from .cue_detr import predict_cue_points
 from .loudness import loudness_metrics
 from .matching import key_label_to_camelot
 
@@ -41,6 +42,7 @@ def analyze_audio(path: Path) -> dict:
     style = _estimate_style(y, sr, bpm, energy, beat_grid["confidence"])
     loudness = loudness_metrics(y, sr)
     candidates = _transition_candidates(y, sr, duration, beat_grid["bars"], energy, bpm)
+    candidates = _merge_cue_detr_candidates(path, candidates, duration, bpm)
 
     return {
         "duration": duration,
@@ -499,19 +501,23 @@ def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[f
     if not bars:
         intro = min(max(energy["intro_low"], 4.0), duration * 0.35)
         outro = max(intro + 1.0, duration - min(max(energy["outro_low"], 8.0), duration * 0.35))
+        sections = _fallback_sections(duration, float(bpm or 120), intro, outro)
+        cue_candidates = _fallback_cue_candidates(duration, intro, outro)
         return {
             "intro": round(intro, 3),
             "outro": round(outro, 3),
             "confidence": 0.35,
             "intro_vocal_density": None,
             "outro_vocal_density": None,
-            "sections": _fallback_sections(duration, float(bpm or 120), intro, outro),
+            "sections": sections,
+            "cue_candidates": cue_candidates,
             "vocal_density_curve": [],
             "energy_curve": [],
             "method": "energy-fallback",
         }
 
     features = _bar_features(y, sr, bars, duration)
+    features = _annotate_cue_features(features, bars, duration)
     intro_floor = max(energy["intro_low"], 2.0)
     intro = _pick_intro_bar(features, intro_floor, duration) or _first_at_or_after(bars, intro_floor) or bars[min(len(bars) - 1, 1)]
     outro_floor = max(duration * 0.55, duration - max(energy["outro_low"], 16.0) - 24.0)
@@ -524,6 +530,8 @@ def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[f
     if intro_feature and outro_feature:
         density_bonus = (1 - intro_feature["vocal_density"]) * 0.08 + (1 - outro_feature["vocal_density"]) * 0.08
     confidence = min(0.92, 0.45 + min(len(bars), 32) / 90 + density_bonus)
+    sections = _structure_sections(duration, float(bpm or 120), bars, features, float(intro), float(outro))
+    cue_candidates = _detect_cue_candidates(features, bars, sections, duration, float(bpm or 120), float(intro), float(outro))
     return {
         "intro": round(float(intro), 3),
         "outro": round(float(outro), 3),
@@ -532,10 +540,11 @@ def _transition_candidates(y: np.ndarray, sr: int, duration: float, bars: list[f
         "outro_vocal_density": round(float(outro_feature["vocal_density"]), 3) if outro_feature else None,
         "intro_energy": round(float(intro_feature["energy"]), 3) if intro_feature else None,
         "outro_energy": round(float(outro_feature["energy"]), 3) if outro_feature else None,
-        "sections": _structure_sections(duration, float(bpm or 120), bars, features, float(intro), float(outro)),
+        "sections": sections,
+        "cue_candidates": cue_candidates,
         "vocal_density_curve": _curve_points(features, "vocal_density"),
         "energy_curve": _curve_points(features, "energy"),
-        "method": "bar-vocal-energy",
+        "method": "cue-detection-v2",
     }
 
 
@@ -544,6 +553,315 @@ def _curve_points(features: list[dict], key: str, limit: int = 48) -> list[dict]
         return []
     step = max(1, int(np.ceil(len(features) / limit)))
     return [{"time": round(float(item["time"]), 3), "density" if key == "vocal_density" else "energy": round(float(item[key]), 3)} for item in features[::step]]
+
+
+def _annotate_cue_features(features: list[dict], bars: list[float], duration: float) -> list[dict]:
+    if not features:
+        return features
+    energies = np.asarray([float(item["energy"]) for item in features], dtype=float)
+    vocals = np.asarray([float(item["vocal_density"]) for item in features], dtype=float)
+    if len(energies) == 1:
+        for item in features:
+            item.update({"novelty": 0.0, "groove_stability": 0.5, "drum_proxy": float(item["energy"]) * 0.7, "phrase_alignment": 0.5})
+        return features
+
+    deltas = np.abs(np.diff(energies, prepend=energies[0]))
+    max_delta = float(np.max(deltas)) or 1.0
+    bar_lookup = {round(float(value), 3): index for index, value in enumerate(bars)}
+    for index, item in enumerate(features):
+        start = max(0, index - 2)
+        end = min(len(features), index + 3)
+        local_energy = energies[start:end]
+        local_vocal = vocals[start:end]
+        stability = 1.0 - min(1.0, float(np.std(local_energy)) * 2.6)
+        low_vocal_bonus = 1.0 - min(1.0, float(np.mean(local_vocal)))
+        bar_index = bar_lookup.get(round(float(item["time"]), 3), index)
+        phrase_alignment = 1.0 if bar_index % 16 == 0 else 0.86 if bar_index % 8 == 0 else 0.72 if bar_index % 4 == 0 else 0.42
+        drum_proxy = float(item["energy"]) * (0.72 + low_vocal_bonus * 0.28)
+        item["novelty"] = float(deltas[index] / max_delta)
+        item["groove_stability"] = float(max(0.0, min(1.0, stability)))
+        item["drum_proxy"] = float(max(0.0, min(1.0, drum_proxy)))
+        item["phrase_alignment"] = float(phrase_alignment)
+        item["is_boundary"] = bool(item["novelty"] >= 0.38 or phrase_alignment >= 0.86)
+    return features
+
+
+def _detect_cue_candidates(
+    features: list[dict],
+    bars: list[float],
+    sections: list[dict],
+    duration: float,
+    bpm: float,
+    intro: float,
+    outro: float,
+) -> list[dict]:
+    if not features:
+        return _fallback_cue_candidates(duration, intro, outro)
+
+    section_boundaries = _section_boundary_times(sections)
+    raw: list[dict] = []
+    for item in features:
+        time_value = float(item["time"])
+        if time_value < 0.5 or time_value > max(0.5, duration - 0.25):
+            continue
+        role_specs = _cue_roles_for_time(time_value, duration, item)
+        for role in role_specs:
+            raw.append(_score_cue_candidate(item, role, duration, section_boundaries, bpm))
+
+    raw.append(_score_cue_candidate(_nearest_bar_feature(features, intro) or features[0], "mix_in", duration, section_boundaries, bpm, forced_time=intro, source="analysis_intro"))
+    raw.append(_score_cue_candidate(_nearest_bar_feature(features, outro) or features[-1], "mix_out", duration, section_boundaries, bpm, forced_time=outro, source="analysis_outro"))
+
+    deduped: dict[tuple[str, int], dict] = {}
+    for cue in raw:
+        key = (cue["role"], int(round(float(cue["time"]) * 2)))
+        if key not in deduped or cue["score"] > deduped[key]["score"]:
+            deduped[key] = cue
+
+    selected: list[dict] = []
+    for role in ("mix_in", "mix_out", "drop", "bridge", "drum_loop", "vocal_safe"):
+        role_items = sorted([cue for cue in deduped.values() if cue["role"] == role], key=lambda cue: cue["score"], reverse=True)
+        selected.extend(role_items[:6 if role in {"mix_in", "mix_out"} else 4])
+    return sorted(selected, key=lambda cue: (cue["role"], -float(cue["score"]), float(cue["time"])))
+
+
+def _cue_roles_for_time(time_value: float, duration: float, item: dict) -> list[str]:
+    roles: list[str] = []
+    position = time_value / max(duration, 1e-6)
+    vocal = float(item.get("vocal_density", 0.5))
+    groove = float(item.get("groove_stability", 0.5))
+    drum = float(item.get("drum_proxy", 0.5))
+    novelty = float(item.get("novelty", 0.0))
+    if 0.02 <= position <= 0.48:
+        roles.append("mix_in")
+    if 0.46 <= position <= 0.98:
+        roles.append("mix_out")
+    if novelty >= 0.35 and 0.18 <= position <= 0.82:
+        roles.append("drop")
+        roles.append("bridge")
+    if groove >= 0.58 and drum >= 0.35 and vocal <= 0.62:
+        roles.append("drum_loop")
+    if vocal <= 0.42:
+        roles.append("vocal_safe")
+    return roles
+
+
+def _score_cue_candidate(
+    feature: dict,
+    role: str,
+    duration: float,
+    section_boundaries: list[float],
+    bpm: float,
+    forced_time: float | None = None,
+    source: str | None = None,
+) -> dict:
+    time_value = float(feature["time"] if forced_time is None else forced_time)
+    vocal_safety = 1.0 - float(feature.get("vocal_density", 0.5))
+    groove = float(feature.get("groove_stability", 0.5))
+    phrase = float(feature.get("phrase_alignment", 0.5))
+    novelty = float(feature.get("novelty", 0.0))
+    drum = float(feature.get("drum_proxy", 0.5))
+    energy = float(feature.get("energy", 0.5))
+    boundary = _boundary_score(time_value, section_boundaries, bpm)
+    room = _cue_room_score(time_value, duration, role)
+    role_fit = _role_energy_fit(role, energy, novelty)
+
+    if role == "drum_loop":
+        score = phrase * 0.22 + vocal_safety * 0.18 + groove * 0.28 + drum * 0.22 + room * 0.10
+    elif role == "drop":
+        score = phrase * 0.20 + novelty * 0.26 + energy * 0.20 + boundary * 0.18 + room * 0.08 + groove * 0.08
+    elif role == "bridge":
+        score = phrase * 0.20 + vocal_safety * 0.24 + novelty * 0.18 + boundary * 0.16 + groove * 0.12 + room * 0.10
+    elif role == "vocal_safe":
+        score = vocal_safety * 0.36 + phrase * 0.20 + groove * 0.16 + boundary * 0.12 + room * 0.10 + role_fit * 0.06
+    else:
+        score = phrase * 0.24 + vocal_safety * 0.22 + groove * 0.18 + boundary * 0.14 + role_fit * 0.12 + room * 0.10
+
+    reasons = []
+    if phrase >= 0.86:
+        reasons.append("phrase aligned")
+    if vocal_safety >= 0.62:
+        reasons.append("low vocal conflict")
+    if groove >= 0.62:
+        reasons.append("stable local groove")
+    if novelty >= 0.38:
+        reasons.append("structural change")
+    if boundary >= 0.75:
+        reasons.append("section boundary")
+
+    return {
+        "time": round(float(time_value), 3),
+        "role": role,
+        "score": round(float(max(0.0, min(1.0, score))) * 100, 1),
+        "source": source or "cue_detector_v2",
+        "energy": round(float(energy), 3),
+        "vocalDensity": round(float(feature.get("vocal_density", 0.5)), 3),
+        "components": {
+            "phraseAlignment": round(phrase, 3),
+            "vocalSafety": round(vocal_safety, 3),
+            "grooveStability": round(groove, 3),
+            "novelty": round(novelty, 3),
+            "drumProxy": round(drum, 3),
+            "sectionBoundary": round(boundary, 3),
+            "durationRoom": round(room, 3),
+        },
+        "reasons": reasons[:4],
+    }
+
+
+def _section_boundary_times(sections: list[dict]) -> list[float]:
+    values: list[float] = []
+    for section in sections:
+        for key in ("startTime", "endTime", "start", "end"):
+            value = section.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                values.append(float(value))
+    return sorted(set(round(value, 3) for value in values if value >= 0))
+
+
+def _boundary_score(time_value: float, boundaries: list[float], bpm: float) -> float:
+    if not boundaries:
+        return 0.45
+    beat = 60 / max(bpm, 1)
+    nearest = min(abs(time_value - boundary) for boundary in boundaries)
+    return float(max(0.0, min(1.0, 1.0 - nearest / max(beat * 4, 0.5))))
+
+
+def _cue_room_score(time_value: float, duration: float, role: str) -> float:
+    if role in {"mix_in", "drop"}:
+        room = time_value
+    elif role == "mix_out":
+        room = duration - time_value
+    else:
+        room = min(time_value, duration - time_value)
+    return float(max(0.0, min(1.0, room / 24.0)))
+
+
+def _role_energy_fit(role: str, energy: float, novelty: float) -> float:
+    targets = {
+        "mix_in": 0.48,
+        "mix_out": 0.42,
+        "bridge": 0.36,
+        "vocal_safe": 0.40,
+        "drum_loop": 0.55,
+        "drop": 0.76,
+    }
+    target = targets.get(role, 0.5)
+    return float(max(0.0, min(1.0, 1.0 - abs(float(energy) - target) + novelty * 0.12)))
+
+
+def _fallback_cue_candidates(duration: float, intro: float, outro: float) -> list[dict]:
+    return [
+        {
+            "time": round(float(intro), 3),
+            "role": "mix_in",
+            "score": 46.0,
+            "source": "energy_fallback",
+            "energy": None,
+            "vocalDensity": None,
+            "components": {},
+            "reasons": ["fallback intro"],
+        },
+        {
+            "time": round(float(outro), 3),
+            "role": "mix_out",
+            "score": 46.0,
+            "source": "energy_fallback",
+            "energy": None,
+            "vocalDensity": None,
+            "components": {},
+            "reasons": ["fallback outro"],
+        },
+    ]
+
+
+def _merge_cue_detr_candidates(path: Path, candidates: dict, duration: float, bpm: float | None) -> dict:
+    try:
+        model_cues = predict_cue_points(path)
+    except Exception as exc:
+        merged = {**candidates}
+        merged["cue_detr"] = {"enabled": True, "used": False, "error": str(exc)}
+        return merged
+    if not model_cues:
+        return {**candidates, "cue_detr": {"enabled": False, "used": False}}
+
+    existing = list(candidates.get("cue_candidates") or [])
+    curve_features = _features_from_transition_curves(candidates, duration)
+    boundaries = _section_boundary_times(candidates.get("sections") or [])
+    additions: list[dict] = []
+    for cue in model_cues:
+        time_value = float(cue["time"])
+        if time_value < 0.5 or time_value > max(0.5, duration - 0.25):
+            continue
+        feature = _nearest_bar_feature(curve_features, time_value) or {
+            "time": time_value,
+            "energy": 0.5,
+            "vocal_density": 0.5,
+            "novelty": 0.5,
+            "groove_stability": 0.5,
+            "drum_proxy": 0.5,
+            "phrase_alignment": 0.65,
+        }
+        roles = _cue_roles_for_time(time_value, duration, feature) or (["mix_in"] if time_value < duration * 0.5 else ["mix_out"])
+        for role in roles:
+            scored = _score_cue_candidate(feature, role, duration, boundaries, float(bpm or 120), forced_time=time_value, source="cue_detr")
+            model_score = float(cue.get("score", 70.0)) / 100
+            scored["score"] = round(min(100.0, scored["score"] * 0.58 + model_score * 42), 1)
+            scored["modelScore"] = round(model_score, 3)
+            scored["reasons"] = ["CUE-DETR"] + [reason for reason in scored.get("reasons", []) if reason != "CUE-DETR"]
+            additions.append(scored)
+
+    deduped: dict[tuple[str, int], dict] = {}
+    for cue in [*existing, *additions]:
+        role = str(cue.get("role") or "")
+        if not role or not isinstance(cue.get("time"), (int, float)):
+            continue
+        key = (role, int(round(float(cue["time"]) * 2)))
+        if key not in deduped or float(cue.get("score", 0)) > float(deduped[key].get("score", 0)):
+            deduped[key] = cue
+    merged_cues = sorted(deduped.values(), key=lambda cue: (str(cue.get("role")), -float(cue.get("score", 0)), float(cue.get("time", 0))))
+    return {
+        **candidates,
+        "cue_candidates": merged_cues,
+        "cue_detr": {
+            "enabled": True,
+            "used": bool(additions),
+            "rawCount": len(model_cues),
+            "mergedCount": len(additions),
+        },
+    }
+
+
+def _features_from_transition_curves(candidates: dict, duration: float) -> list[dict]:
+    energy_curve = candidates.get("energy_curve") or []
+    vocal_curve = candidates.get("vocal_density_curve") or []
+    times = sorted(
+        {
+            round(float(item.get("time")), 3)
+            for item in [*energy_curve, *vocal_curve]
+            if isinstance(item, dict) and isinstance(item.get("time"), (int, float))
+        }
+    )
+    features: list[dict] = []
+    for time_value in times:
+        energy = _curve_lookup(energy_curve, time_value, "energy", 0.5)
+        vocal = _curve_lookup(vocal_curve, time_value, "density", 0.5)
+        features.append(
+            {
+                "time": time_value,
+                "energy": energy,
+                "vocal_density": vocal,
+                "position": time_value / max(duration, 1e-6),
+            }
+        )
+    return _annotate_cue_features(features, times, duration)
+
+
+def _curve_lookup(curve: list[dict], time_value: float, key: str, fallback: float) -> float:
+    points = [item for item in curve if isinstance(item, dict) and isinstance(item.get("time"), (int, float)) and isinstance(item.get(key), (int, float))]
+    if not points:
+        return fallback
+    nearest = min(points, key=lambda item: abs(float(item["time"]) - time_value))
+    return float(nearest.get(key, fallback))
 
 
 def _structure_sections(duration: float, bpm: float, bars: list[float], features: list[dict], intro: float, outro: float) -> list[dict]:

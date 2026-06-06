@@ -1,0 +1,18 @@
+# Optional CUE-DETR cue point estimation pipeline.
+# Install only when you want ML cue detection:
+#   python -m pip install -r backend/requirements-cue-detr.txt
+#
+# Then enable it before starting the backend:
+#   PowerShell: $env:SMARTMIX_ENABLE_CUE_DETR="1"; pnpm backend
+#   bash: SMARTMIX_ENABLE_CUE_DETR=1 pnpm backend
+#
+# The first run downloads:
+# - facebook/detr-resnet-50 image processor
+# - disco-eth/cue-detr checkpoint
+
+transformers==4.42.3
+safetensors>=0.4.3
+matplotlib>=3.9.1
+timm>=1.0.7
+huggingface_hub>=0.23.0
+
