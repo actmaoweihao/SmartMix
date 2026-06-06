@@ -729,8 +729,24 @@ def _boundary_score(time_value: float, boundaries: list[float], bpm: float) -> f
 def _cue_room_score(time_value: float, duration: float, role: str) -> float:
     if role in {"mix_in", "drop"}:
         room = time_value
+        return float(max(0.0, min(1.0, room / 24.0)))
     elif role == "mix_out":
-        room = duration - time_value
+        if duration <= 0:
+            return 0.0
+        position = time_value / duration
+        late_enough = max(0.0, min(1.0, (position - 0.48) / 0.26))
+        tail_room = max(0.0, min(1.0, (duration - time_value) / 24.0))
+        return float(max(0.0, min(1.0, late_enough * 0.72 + tail_room * 0.28)))
+    elif role in {"bridge", "vocal_safe"}:
+        if duration <= 0:
+            return 0.0
+        position = time_value / duration
+        if position >= 0.55:
+            late_enough = max(0.0, min(1.0, (position - 0.50) / 0.24))
+            tail_room = max(0.0, min(1.0, (duration - time_value) / 24.0))
+            return float(max(0.0, min(1.0, late_enough * 0.65 + tail_room * 0.35)))
+        room = min(time_value, duration - time_value)
+        return float(max(0.0, min(0.55, room / 24.0)))
     else:
         room = min(time_value, duration - time_value)
     return float(max(0.0, min(1.0, room / 24.0)))

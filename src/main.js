@@ -1485,6 +1485,10 @@ function serializableTrackForBackend(track) {
     sections: track.sections,
     energy_curve: track.energy_curve,
     vocal_density_curve: track.vocal_density_curve,
+    vocal_activity: track.vocal_activity,
+    vocal_regions: track.vocal_regions,
+    vocal_release_points: track.vocal_release_points,
+    vocal_entry_points: track.vocal_entry_points,
   };
 }
 
@@ -2749,6 +2753,13 @@ async function runTrackStemSeparation(track, options = {}) {
 async function hydrateTrackStems(track, result) {
   const context = await getAudioContext();
   const stems = result?.stems || {};
+  mergeTrackAnalysisMetadata(track, result?.track || {});
+  if (result?.vocalActivity) {
+    track.vocal_activity = result.vocalActivity;
+    track.vocal_regions = result.vocalActivity.regions || [];
+    track.vocal_release_points = result.vocalActivity.releasePoints || [];
+    track.vocal_entry_points = result.vocalActivity.entryPoints || [];
+  }
   track.stems = track.stems || {};
   await Promise.all(
     STEMS.map(async (stem) => {
@@ -2765,6 +2776,22 @@ async function hydrateTrackStems(track, result) {
       };
     }),
   );
+}
+
+function mergeTrackAnalysisMetadata(track, meta) {
+  if (!track || !meta) return;
+  [
+    "transition_candidates",
+    "sections",
+    "energy_curve",
+    "vocal_density_curve",
+    "vocal_activity",
+    "vocal_regions",
+    "vocal_release_points",
+    "vocal_entry_points",
+  ].forEach((key) => {
+    if (meta[key] !== undefined) track[key] = meta[key];
+  });
 }
 
 async function playStemDebugger(offset = 0) {
@@ -3259,6 +3286,7 @@ function renderAutoHandoffPanel() {
 function renderAutoHandoffTransition(transition) {
   const bed = transition.rhythmBed || {};
   const automation = transition.automation || {};
+  const lyricGuard = transition.outgoingCue?.lyricGuard || automation.outgoingLyricGuard || {};
   const warnings = transition.warnings || [];
   const cueReasons = [
     ...(transition.outgoingCue?.reasons || []).map((item) => `A: ${item}`),
@@ -3279,6 +3307,7 @@ function renderAutoHandoffTransition(transition) {
         <span>Bed ${escapeHtml(bed.source || "--")}/${escapeHtml(bed.stem || "--")}</span>
         <span>Bass ${Math.round((automation.bassSwapAt || 0) * 100)}%</span>
         <span>Risk ${escapeHtml(transition.risk || "--")}</span>
+        ${lyricGuard.risk ? `<span>Lyric ${escapeHtml(lyricGuard.risk)}</span>` : ""}
         ${transition.renderedPreview?.url ? `<span>Rendered ${escapeHtml(transition.renderedPreview.renderMethod || transition.renderedPreview.method || "audio")}</span>` : ""}
       </div>
       <p>${escapeHtml(transition.explanation || "")}</p>

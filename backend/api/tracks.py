@@ -12,6 +12,7 @@ from ..services.tracks import (
     STEM_NAMES,
     cached_stem_paths,
     read_track_meta,
+    refresh_vocal_activity_metadata,
     save_and_analyze_upload,
     stem_paths,
     stem_response,
@@ -68,7 +69,8 @@ def separate_track_stems(track_id: str, request: StemSeparationRequest) -> dict:
 
     cached = cached_stem_paths(track_id)
     if cached and not request.force:
-        return stem_response(track_id, cached, device="cached", cached=True)
+        updated_meta = refresh_vocal_activity_metadata(track_id, cached)
+        return {**stem_response(track_id, cached, device="cached", cached=True), "vocalActivity": updated_meta.get("vocal_activity"), "track": updated_meta}
 
     if not demucs_available():
         raise HTTPException(status_code=503, detail="Demucs is not available. Install backend/requirements-tuning.txt first.")
@@ -88,7 +90,8 @@ def separate_track_stems(track_id: str, request: StemSeparationRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Demucs separation failed: {exc}") from exc
 
-    return stem_response(track_id, result.stems, device=result.device, cached=False)
+    updated_meta = refresh_vocal_activity_metadata(track_id, result.stems)
+    return {**stem_response(track_id, result.stems, device=result.device, cached=False), "vocalActivity": updated_meta.get("vocal_activity"), "track": updated_meta}
 
 
 @router.get("/{track_id}/stems/{stem_name}/audio")

@@ -224,6 +224,11 @@ def _best_local_cue(track: dict[str, Any], cue_time: float, role: str, method: s
     if not candidates:
         return {"time": cue_time, "improved": False}
     original_score = _cue_smoothness_score(track, cue_time, cue_time, role, method, overlap)
+    if role == "outgoing":
+        original_cut_risk = _outgoing_lyric_cut_penalty(track, cue_time, overlap)
+        candidates = [value for value in candidates if _outgoing_lyric_cut_penalty(track, value, overlap) <= original_cut_risk + 0.16]
+        if not candidates:
+            return {"time": cue_time, "improved": False}
     best = min(candidates, key=lambda value: _cue_smoothness_score(track, value, cue_time, role, method, overlap))
     best_score = _cue_smoothness_score(track, best, cue_time, role, method, overlap)
     return {"time": best, "improved": best_score + 0.04 < original_score and abs(best - cue_time) >= 0.25}
@@ -244,9 +249,27 @@ def _cue_smoothness_score(track: dict[str, Any], candidate: float, original: flo
     if role == "outgoing":
         energy_shape = max(0.0, local_after - energy) * 0.2
         next_phrase_penalty = max(0.0, vocal_peak - vocal) * 0.5
-        return vocal * 0.2 + vocal_window * 0.28 + vocal_peak * 0.38 + energy_window * 0.08 + energy_shape + next_phrase_penalty + distance_penalty + phrase_bonus
+        lyric_cut_penalty = _outgoing_lyric_cut_penalty(track, candidate, overlap)
+        return vocal * 0.16 + vocal_window * 0.22 + vocal_peak * 0.30 + energy_window * 0.06 + energy_shape + next_phrase_penalty + lyric_cut_penalty * 0.34 + distance_penalty + phrase_bonus
     intro_penalty = 0.0 if method in {"beatmix", "bass_swap", "echo_out"} else 0.04
     return vocal * 0.22 + early_vocal * 0.42 + max(0.0, energy_window - 0.75) * 0.12 + distance_penalty + phrase_bonus + intro_penalty
+
+
+def _outgoing_lyric_cut_penalty(track: dict[str, Any], cue_time: float, overlap: float) -> float:
+    duration = float(track.get("duration") or 0)
+    position = cue_time / max(duration, 1e-6)
+    vocal_curve = track.get("vocal_density_curve") or []
+    if not vocal_curve:
+        return 0.18 if position >= 0.55 else 0.52
+    lookahead = max(5.0, min(10.0, overlap))
+    before = _curve_average(vocal_curve, max(0.0, cue_time - 5.0), 5.0, "density")
+    at = _curve_value(vocal_curve, cue_time, "density")
+    after_avg = _curve_average(vocal_curve, cue_time, lookahead, "density")
+    after_peak = _curve_peak(vocal_curve, cue_time, lookahead, "density")
+    reentry = max(0.0, after_peak - min(at, after_avg))
+    early_penalty = max(0.0, 0.55 - position) * 1.5
+    release_bonus = max(0.0, before - at) * 0.22
+    return max(0.0, min(1.0, after_avg * 0.38 + after_peak * 0.42 + reentry * 0.28 + early_penalty - release_bonus))
 
 
 def compute_tempo_adjustment(outgoing_bpm: float, incoming_bpm: float, options: dict[str, Any] | None = None) -> dict[str, Any]:

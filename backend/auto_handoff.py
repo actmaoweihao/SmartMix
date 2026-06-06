@@ -36,14 +36,16 @@ def build_auto_handoff_plan(tracks: list[dict[str, Any]], settings: dict[str, An
 
 def _with_handoff_features(track: dict[str, Any]) -> dict[str, Any]:
     cues = _cue_candidates(track)
+    mix_in_cues = sorted([cue for cue in cues if cue["direction"] == "in"], key=lambda item: _cue_rank_score(item), reverse=True)[:5]
+    mix_out_cues = [_with_exit_guard(track, cue) for cue in cues if cue["direction"] == "out"]
     grid = _beat_grid_confidence(track)
     groove = _groove_quality(track)
     vocal = _track_vocal_density(track)
     return {
         **track,
         "_handoff": {
-            "mixInCues": sorted([cue for cue in cues if cue["direction"] == "in"], key=lambda item: item["score"], reverse=True)[:5],
-            "mixOutCues": sorted([cue for cue in cues if cue["direction"] == "out"], key=lambda item: item["score"], reverse=True)[:5],
+            "mixInCues": mix_in_cues,
+            "mixOutCues": sorted(mix_out_cues, key=lambda item: _cue_rank_score(item), reverse=True)[:8],
             "gridConfidence": grid,
             "grooveQuality": groove,
             "vocalDensity": vocal,
@@ -180,14 +182,22 @@ def _plan_pair(prev: dict[str, Any], next_track: dict[str, Any], settings: dict[
     pair = _pair_score(prev, next_track, settings)
     out_cue = _best_cue(prev, "out")
     in_cue = _best_cue(next_track, "in")
+    out_guard = out_cue.get("lyricGuard") or {}
     bpm = _compatible_bpm(prev, next_track)
     beat_seconds = 60.0 / max(bpm["target"], 1.0)
     bars = _select_bar_count(pair, prev, next_track, settings)
-    duration = bars * 4 * beat_seconds
     transition_type = _transition_type(pair, prev, next_track)
+    if out_guard.get("risk") == "high":
+        transition_type = "effect_tail_handoff"
+        bars = min(4, bars)
+    duration = bars * 4 * beat_seconds
     rhythm_bed = _rhythm_bed(prev, next_track, transition_type)
     risk = _risk_level(pair)
     warnings = _warnings(pair, prev, next_track, transition_type)
+    if out_guard.get("risk") == "high":
+        risk = "high"
+    elif out_guard.get("risk") == "medium" and risk == "low":
+        risk = "medium"
     return {
         "fromTrackId": prev.get("id"),
         "toTrackId": next_track.get("id"),
@@ -206,6 +216,7 @@ def _plan_pair(prev: dict[str, Any], next_track: dict[str, Any], settings: dict[
             "vocalDuck": pair["vocalSafety"] < 0.72,
             "tempoStretchRatio": round(bpm["stretch"], 5),
             "targetBpm": round(bpm["target"], 3),
+            "outgoingLyricGuard": out_guard,
         },
         "risk": risk,
         "warnings": warnings,
@@ -219,15 +230,17 @@ def _public_cue(cue: dict[str, Any]) -> dict[str, Any]:
         "time": cue.get("time"),
         "role": cue.get("role"),
         "score": cue.get("score"),
+        "handoffScore": cue.get("handoffScore", cue.get("score")),
         "source": cue.get("source"),
         "reasons": cue.get("reasons") or [],
         "metrics": cue.get("metrics") or {},
+        "lyricGuard": cue.get("lyricGuard"),
     }
 
 
 def _pair_score(prev: dict[str, Any], next_track: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     tempo = _tempo_score(prev, next_track)
-    cue = (_best_cue(prev, "out")["score"] + _best_cue(next_track, "in")["score"]) / 200
+    cue = (_cue_rank_score(_best_cue(prev, "out")) + _cue_rank_score(_best_cue(next_track, "in"))) / 200
     rhythm = (_handoff(prev)["grooveQuality"] + _handoff(next_track)["grooveQuality"]) / 2
     vocal = _vocal_safety(prev, next_track)
     bass = _bass_safety(prev, next_track)
@@ -290,10 +303,15 @@ def _select_bar_count(pair: dict[str, Any], prev: dict[str, Any], next_track: di
 def _best_cue(track: dict[str, Any], direction: str) -> dict[str, Any]:
     cues = _handoff(track)["mixInCues" if direction == "in" else "mixOutCues"]
     if cues:
+        if direction == "out":
+            safe = [cue for cue in cues if (cue.get("lyricGuard") or {}).get("risk") != "high"]
+            if safe:
+                return safe[0]
         return cues[0]
     duration = _float(track.get("duration"), 0.0)
     time_value = min(8.0, duration * 0.12) if direction == "in" else max(0.0, duration - 16.0)
-    return _score_cue(track, time_value, direction, "fallback")
+    cue = _score_cue(track, time_value, direction, "fallback")
+    return _with_exit_guard(track, cue) if direction == "out" else cue
 
 
 def _compatible_bpm(prev: dict[str, Any], next_track: dict[str, Any]) -> dict[str, float]:
@@ -326,6 +344,11 @@ def _rhythm_bed(prev: dict[str, Any], next_track: dict[str, Any], transition_typ
 
 def _warnings(pair: dict[str, Any], prev: dict[str, Any], next_track: dict[str, Any], transition_type: str) -> list[str]:
     warnings: list[str] = []
+    out_guard = (_best_cue(prev, "out").get("lyricGuard") or {})
+    if out_guard.get("risk") == "high":
+        warnings.append("Outgoing lyric cut risk is high; move the exit cue later or render an FX tail after the vocal phrase.")
+    elif out_guard.get("risk") == "medium":
+        warnings.append("Outgoing vocal phrase is only moderately safe; keep overlap short and preserve the outgoing tail.")
     if pair["tempo"] < 0.55:
         warnings.append("Tempo match is weak; keep the handoff short.")
     if pair["vocalSafety"] < 0.65:
@@ -343,6 +366,118 @@ def _risk_level(pair: dict[str, Any]) -> str:
     if pair["score"] >= 60:
         return "medium"
     return "high"
+
+
+def _cue_rank_score(cue: dict[str, Any]) -> float:
+    return _float(cue.get("handoffScore", cue.get("score")), 0.0)
+
+
+def _with_exit_guard(track: dict[str, Any], cue: dict[str, Any]) -> dict[str, Any]:
+    if cue.get("direction") != "out":
+        return cue
+    duration = _float(track.get("duration"), 0.0)
+    time_value = _float(cue.get("time"), 0.0)
+    guard = _outgoing_lyric_guard(track, time_value, str(cue.get("role") or "mix_out"))
+    adjusted = _float(cue.get("score"), 50.0) * guard["multiplier"]
+    reasons = list(cue.get("reasons") or [])
+    if guard["risk"] == "low":
+        reasons.append("vocal phrase cleared")
+    elif guard["risk"] == "high":
+        reasons.append("possible lyric cut")
+    position = time_value / max(duration, 1e-6)
+    if cue.get("role") == "vocal_safe" and position < 0.65:
+        reasons.append("vocal_safe is early; treated as support cue only")
+    return {
+        **cue,
+        "handoffScore": round(_clamp(adjusted, 0.0, 100.0), 1),
+        "lyricGuard": guard,
+        "reasons": reasons[:6],
+    }
+
+
+def _outgoing_lyric_guard(track: dict[str, Any], time_value: float, role: str) -> dict[str, Any]:
+    duration = _float(track.get("duration"), 0.0)
+    position = time_value / max(duration, 1e-6)
+    stem_guard = _stem_vocal_guard(track, time_value, duration)
+    curve = (track.get("transition_candidates") or {}).get("vocal_density_curve") or track.get("vocal_density_curve") or []
+    has_curve = isinstance(curve, list) and bool(curve)
+    before = _curve_average(curve, max(0.0, time_value - 5.0), 5.0, "density", 0.5) if has_curve else 0.5
+    at = _curve_value(curve, time_value, "density", 0.5) if has_curve else 0.5
+    after = _curve_average(curve, time_value, 8.0, "density", 0.5) if has_curve else 0.5
+    after_peak = _curve_peak(curve, time_value, 8.0, "density", 0.5) if has_curve else 0.5
+    reentry = max(0.0, after_peak - min(at, after))
+    min_position = 0.45 if duration < 120 else 0.55
+    position_score = _clamp((position - min_position) / 0.22, 0.0, 1.0)
+    if role == "mix_out":
+        role_score = 1.0
+    elif role == "bridge":
+        role_score = 0.78 if position >= min_position else 0.48
+    elif role == "vocal_safe":
+        role_score = 0.70 if position >= 0.65 else 0.32
+    else:
+        role_score = 0.6
+    boundary = _section_boundary_score(track, time_value)
+    phrase_release = _clamp(1.0 - after * 0.72 - after_peak * 0.42 - reentry * 0.36 + max(0.0, before - at) * 0.24, 0.0, 1.0)
+    if stem_guard.get("available"):
+        phrase_release = min(phrase_release, _float(stem_guard.get("releaseScore"), phrase_release))
+    multiplier = _clamp(0.25 + position_score * 0.24 + phrase_release * 0.30 + role_score * 0.14 + boundary * 0.07, 0.18, 1.08)
+    risk = "low"
+    if stem_guard.get("risk") == "high" or position < min_position or (after_peak >= 0.72 and after >= 0.50) or (role == "vocal_safe" and position < 0.65):
+        risk = "high"
+    elif stem_guard.get("risk") == "medium" or phrase_release < 0.48 or after_peak >= 0.62 or position < min_position + 0.08:
+        risk = "medium"
+    return {
+        "risk": risk,
+        "source": "demucs_vocals" if stem_guard.get("available") else "vocal_density_curve",
+        "multiplier": round(multiplier, 3),
+        "position": round(position, 3),
+        "minPosition": round(min_position, 3),
+        "vocalBefore": round(before, 3),
+        "vocalAtCue": round(at, 3),
+        "vocalAfterAvg": round(after, 3),
+        "vocalAfterPeak": round(after_peak, 3),
+        "vocalReentry": round(reentry, 3),
+        "phraseRelease": round(phrase_release, 3),
+        "sectionBoundary": round(boundary, 3),
+        "stemVocal": stem_guard,
+    }
+
+
+def _stem_vocal_guard(track: dict[str, Any], time_value: float, duration: float) -> dict[str, Any]:
+    regions = _vocal_regions(track)
+    if not regions:
+        return {"available": False}
+    lookahead = 8.0
+    containing = next((region for region in regions if float(region["start"]) - 0.12 <= time_value <= float(region["end"]) + 0.12), None)
+    active_after = _region_coverage(regions, time_value, time_value + lookahead)
+    next_entry = _next_region_start(regions, time_value)
+    last_release = _last_region_end(regions, time_value)
+    release_age = time_value - last_release if last_release is not None else None
+    inside_tail = max(0.0, float(containing["end"]) - time_value) if containing else 0.0
+    next_entry_in = max(0.0, next_entry - time_value) if next_entry is not None else None
+    release_score = 1.0
+    if containing:
+        release_score -= min(0.72, inside_tail / max(lookahead, 1e-6))
+    release_score -= min(0.45, active_after * 0.75)
+    if next_entry_in is not None and next_entry_in < 4.0:
+        release_score -= (4.0 - next_entry_in) * 0.08
+    if release_age is not None:
+        release_score += min(0.18, release_age / 24.0)
+    release_score = _clamp(release_score, 0.0, 1.0)
+    risk = "low"
+    if inside_tail > 0.9 or active_after >= 0.42:
+        risk = "high"
+    elif inside_tail > 0.25 or active_after >= 0.20 or (next_entry_in is not None and next_entry_in < 3.0):
+        risk = "medium"
+    return {
+        "available": True,
+        "risk": risk,
+        "releaseScore": round(release_score, 3),
+        "insideVocalTailSec": round(inside_tail, 3),
+        "activeAfter": round(active_after, 3),
+        "lastReleaseAgoSec": round(release_age, 3) if release_age is not None else None,
+        "nextEntryInSec": round(next_entry_in, 3) if next_entry_in is not None else None,
+    }
 
 
 def _explanation(prev: dict[str, Any], next_track: dict[str, Any], kind: str, rhythm_bed: dict[str, Any], risk: str, warnings: list[str]) -> str:
@@ -468,8 +603,14 @@ def _local_groove_score(track: dict[str, Any], time_value: float) -> float:
 
 
 def _duration_room_score(duration: float, time_value: float, direction: str) -> float:
-    room = time_value if direction == "in" else duration - time_value
-    return _clamp(room / 24.0, 0.0, 1.0)
+    if direction == "in":
+        return _clamp(time_value / 24.0, 0.0, 1.0)
+    if duration <= 0:
+        return 0.0
+    position = time_value / duration
+    late_enough = _clamp((position - 0.48) / 0.26, 0.0, 1.0)
+    tail_room = _clamp((duration - time_value) / 24.0, 0.0, 1.0)
+    return _clamp(late_enough * 0.72 + tail_room * 0.28, 0.0, 1.0)
 
 
 def _anchors(track: dict[str, Any]) -> list[float]:
@@ -481,6 +622,40 @@ def _sections(track: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = track.get("transition_candidates") or {}
     sections = track.get("sections") or candidates.get("sections") or []
     return [section for section in sections if isinstance(section, dict)]
+
+
+def _vocal_regions(track: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = track.get("transition_candidates") or {}
+    activity = track.get("vocal_activity") or candidates.get("vocal_activity") or {}
+    raw = track.get("vocal_regions") or activity.get("regions") or []
+    regions = []
+    for item in raw:
+        if not isinstance(item, dict) or not _is_number(item.get("start")) or not _is_number(item.get("end")):
+            continue
+        start = float(item["start"])
+        end = float(item["end"])
+        if end > start:
+            regions.append({**item, "start": start, "end": end})
+    return sorted(regions, key=lambda item: float(item["start"]))
+
+
+def _region_coverage(regions: list[dict[str, Any]], start: float, end: float) -> float:
+    if end <= start:
+        return 0.0
+    active = 0.0
+    for region in regions:
+        active += max(0.0, min(end, float(region["end"])) - max(start, float(region["start"])))
+    return _clamp(active / max(end - start, 1e-6), 0.0, 1.0)
+
+
+def _next_region_start(regions: list[dict[str, Any]], time_value: float) -> float | None:
+    future = [float(region["start"]) for region in regions if float(region["start"]) > time_value + 0.12]
+    return min(future) if future else None
+
+
+def _last_region_end(regions: list[dict[str, Any]], time_value: float) -> float | None:
+    past = [float(region["end"]) for region in regions if float(region["end"]) <= time_value + 0.12]
+    return max(past) if past else None
 
 
 def _section_start(section: dict[str, Any]) -> float:
@@ -499,6 +674,34 @@ def _curve_value(curve: Any, time_value: float, key: str, fallback: float) -> fl
         return _clamp(fallback, 0.0, 1.0)
     nearest = min(points, key=lambda item: abs(float(item["time"]) - time_value))
     return _clamp(_float(nearest.get(key), fallback), 0.0, 1.0)
+
+
+def _curve_average(curve: Any, start_time: float, duration: float, key: str, fallback: float) -> float:
+    if duration <= 0:
+        return _curve_value(curve, start_time, key, fallback)
+    sample_count = max(2, min(16, int(math.ceil(duration)) + 1))
+    values = [_curve_value(curve, start_time + float(offset), key, fallback) for offset in np.linspace(0, duration, sample_count)]
+    return _clamp(float(np.mean(values)) if values else fallback, 0.0, 1.0)
+
+
+def _curve_peak(curve: Any, start_time: float, duration: float, key: str, fallback: float) -> float:
+    if duration <= 0:
+        return _curve_value(curve, start_time, key, fallback)
+    sample_count = max(2, min(18, int(math.ceil(duration * 2)) + 1))
+    values = [_curve_value(curve, start_time + float(offset), key, fallback) for offset in np.linspace(0, duration, sample_count)]
+    return _clamp(float(np.max(values)) if values else fallback, 0.0, 1.0)
+
+
+def _section_boundary_score(track: dict[str, Any], time_value: float) -> float:
+    boundaries: list[float] = []
+    for section in _sections(track):
+        boundaries.extend([_section_start(section), _section_end(section)])
+    if not boundaries:
+        return 0.45
+    bpm = _float(track.get("bpm"), 120.0)
+    beat = 60.0 / max(bpm, 1.0)
+    nearest = min(abs(value - time_value) for value in boundaries)
+    return _clamp(1.0 - nearest / max(beat * 8, 1.0), 0.0, 1.0)
 
 
 def _boundary_vocal_hint(candidates: dict[str, Any], direction: str) -> float:

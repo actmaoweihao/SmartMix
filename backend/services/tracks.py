@@ -8,6 +8,7 @@ from fastapi import HTTPException, UploadFile
 
 from ..analysis import analyze_audio
 from ..storage import STEM_DIR, UPLOAD_DIR, read_json, write_json
+from ..vocal_activity import analyze_vocal_stem, merge_vocal_activity_into_analysis
 
 
 AUDIO_EXTENSIONS = {
@@ -41,6 +42,10 @@ def save_and_analyze_upload(file: UploadFile) -> dict:
 
     try:
         analysis = analyze_audio(path)
+        cached = cached_stem_paths(track_id)
+        if cached and cached.get("vocals"):
+            report = analyze_vocal_stem(cached["vocals"], analysis.get("duration"))
+            analysis = merge_vocal_activity_into_analysis(analysis, report)
     except Exception as exc:
         path.unlink(missing_ok=True)
         raise HTTPException(status_code=422, detail=f"Audio analysis failed: {exc}") from exc
@@ -88,3 +93,14 @@ def stem_response(track_id: str, paths: dict[str, Path], device: str, cached: bo
             for stem in STEM_NAMES
         },
     }
+
+
+def refresh_vocal_activity_metadata(track_id: str, paths: dict[str, Path]) -> dict:
+    meta = read_track_meta(track_id)
+    vocals = paths.get("vocals")
+    if not vocals or not vocals.exists():
+        return meta
+    report = analyze_vocal_stem(vocals, meta.get("duration"))
+    updated = merge_vocal_activity_into_analysis(meta, report)
+    write_json(UPLOAD_DIR / f"{track_id}.json", updated)
+    return updated
