@@ -101,7 +101,12 @@ def track_stem_audio(track_id: str, stem_name: str) -> FileResponse:
     path = stem_paths(track_id)[stem_name]
     if not path.exists():
         raise HTTPException(status_code=404, detail="Stem not found")
-    return FileResponse(path, media_type="audio/wav", filename=f"{track_id}_{stem_name}.wav")
+    try:
+        original_name = Path(read_track_meta(track_id).get("name") or track_id).stem
+    except HTTPException:
+        original_name = track_id
+    safe_name = "".join(char if char.isalnum() or char in {"-", "_", " "} else "_" for char in original_name).strip()
+    return FileResponse(path, media_type="audio/wav", filename=f"{safe_name or track_id}-{stem_name}.wav")
 
 
 @router.post("/{track_id}/reference-mix")

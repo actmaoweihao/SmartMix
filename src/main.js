@@ -20,6 +20,9 @@ const state = {
   isExporting: false,
   view: "studio",
   projects: [],
+  workflow: {
+    sortedOnce: false,
+  },
   stemDebugger: {
     trackId: null,
     isPlaying: false,
@@ -123,17 +126,18 @@ app.innerHTML = `
   <main class="app-shell">
     <header class="topbar">
       <section>
-        <p class="eyebrow">FastAPI Auto DJ</p>
+        <p class="eyebrow">Local AI DJ Workflow</p>
         <h1>SmartMix</h1>
+        <p class="product-line">上传歌曲，SmartMix 会分析节拍、调性、能量和段落，帮你排歌、设计过渡、试听并导出一段完整混音。</p>
       </section>
       <div class="top-actions">
         <label class="upload-button" for="fileInput">
-          <span>选择音频</span>
+          <span>添加歌曲</span>
           <input id="fileInput" type="file" accept="audio/*" multiple />
         </label>
+        <button id="teachingToggle" class="ghost" type="button">接歌教学</button>
         <button id="stemDebuggerToggle" class="ghost" type="button">\u5206\u8f68\u8c03\u8bd5</button>
         <button id="refreshProjects" class="ghost" type="button">刷新项目</button>
-        <button id="teachingToggle" class="ghost" type="button">教学入口</button>
       </div>
     </header>
 
@@ -142,6 +146,12 @@ app.innerHTML = `
         <div class="meter-block"><span>Tracks</span><strong id="trackCount">0</strong></div>
         <div class="meter-block"><span>Mix Time</span><strong id="mixDuration">00:00</strong></div>
         <div class="meter-block wide"><span>Status</span><strong id="statusText">等待后端</strong></div>
+
+        <section class="control-section primary-controls">
+          <div class="section-title">
+            <span class="tiny-label">Main Flow</span>
+            <strong>先做出一段可听的混音</strong>
+          </div>
 
         <label class="field">
           <span>排序策略</span>
@@ -160,6 +170,13 @@ app.innerHTML = `
           <span>过渡时长 <b id="crossfadeValue">8s</b></span>
           <input id="crossfade" type="range" min="2" max="24" value="8" />
         </label>
+        </section>
+
+        <details class="control-section advanced-controls">
+          <summary>
+            <span class="tiny-label">Advanced</span>
+            <strong>过渡、响度和 EQ 细调</strong>
+          </summary>
 
         <label class="toggle"><input id="autoTransition" type="checkbox" checked /><span>首尾能量自动微调</span></label>
         <label class="toggle"><input id="beatSync" type="checkbox" /><span>导出时节拍同步</span></label>
@@ -203,6 +220,7 @@ app.innerHTML = `
           <label><span>Mid</span><input id="eqMid" type="range" min="-1" max="1" value="0" step="0.05" /></label>
           <label><span>High</span><input id="eqHigh" type="range" min="-1" max="1" value="0" step="0.05" /></label>
         </div>
+        </details>
 
         <div class="button-row">
           <button id="sortButton" type="button">应用排序</button>
@@ -235,7 +253,13 @@ app.innerHTML = `
           <div><span class="pulse-dot"></span><p>拖入音频文件，后端会立刻分析 BPM、调性、风格和能量</p></div>
         </div>
 
-        <section class="match-panel" aria-label="两首歌匹配评分">
+        <section id="workflowGuide" class="workflow-guide" aria-label="SmartMix 使用流程"></section>
+
+        <details class="match-panel workflow-details" aria-label="两首歌匹配评分">
+          <summary>
+            <span class="tiny-label">Optional Tool</span>
+            <strong>两首歌能不能接？</strong>
+          </summary>
           <div class="match-head">
             <div>
               <span class="tiny-label">Pair Match</span>
@@ -254,7 +278,7 @@ app.innerHTML = `
             </label>
           </div>
           <div id="matchResult" class="match-result">上传任意两首歌，系统会用 Camelot、BPM、风格、能量和结构可过渡性计算匹配分。</div>
-        </section>
+        </details>
 
         <section id="teachingPanel" class="teaching-panel" aria-label="DJ 接歌教学" hidden>
           <div class="teaching-head">
@@ -286,7 +310,11 @@ app.innerHTML = `
           <div id="teachingContent" class="teaching-content"></div>
         </section>
 
-        <section class="mashup-panel" aria-label="双曲重组 / Mashup Builder">
+        <details class="mashup-panel workflow-details" aria-label="双曲重组 / Mashup Builder">
+          <summary>
+            <span class="tiny-label">Advanced Lab</span>
+            <strong>双曲重组 / Mashup Builder</strong>
+          </summary>
           <div class="mashup-head">
             <div>
               <span class="tiny-label">Mashup Builder</span>
@@ -362,7 +390,7 @@ app.innerHTML = `
           <div id="mashupSegments" class="mashup-segments"></div>
           <div id="mashupTimeline" class="mashup-timeline"></div>
           <div id="mashupResult" class="mashup-result"></div>
-        </section>
+        </details>
 
         <section class="transport">
           <button id="restartButton" type="button" class="iconish">从头播放</button>
@@ -470,6 +498,7 @@ const els = {
   stemDebuggerView: document.querySelector("#stemDebuggerView"),
   fileInput: document.querySelector("#fileInput"),
   stemDebuggerToggle: document.querySelector("#stemDebuggerToggle"),
+  workflowGuide: document.querySelector("#workflowGuide"),
   stemBackButton: document.querySelector("#stemBackButton"),
   stemTrackSelect: document.querySelector("#stemTrackSelect"),
   stemReferenceSelect: document.querySelector("#stemReferenceSelect"),
@@ -582,6 +611,7 @@ function ensureRepairMatchButton() {
 function bindEvents() {
   ensureRepairMatchButton();
   els.fileInput.addEventListener("change", (event) => addFiles([...event.target.files]));
+  els.workflowGuide.addEventListener("click", workflowGuideClick);
   els.stemDebuggerToggle.addEventListener("click", openStemDebugger);
   els.stemBackButton.addEventListener("click", closeStemDebugger);
   els.stemTrackSelect.addEventListener("change", selectStemDebugTrack);
@@ -737,6 +767,7 @@ async function pingBackend() {
 
 async function addFiles(files) {
   if (!files.length) return;
+  state.workflow.sortedOnce = false;
   for (const file of files) {
     const tempId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
     const track = {
@@ -1428,6 +1459,7 @@ function applySort() {
   const unresolved = state.tracks.filter((track) => track.status !== "ready");
   state.tracks = [...sorted, ...unresolved];
   state.playbackOffset = 0;
+  state.workflow.sortedOnce = true;
   setStatus("已应用排序");
   render();
 }
@@ -2209,6 +2241,7 @@ async function loadSelectedProject() {
     state.tracks = await Promise.all(project.tracks.map(rehydrateTrack));
     state.originalOrder = state.tracks.map((track) => track.localId);
     state.selectedId = state.tracks[0]?.localId || null;
+    state.workflow.sortedOnce = state.tracks.length >= 2;
     applySettingsToControls();
     state.tracks.forEach((track) => queueTrackStemSeparation(track));
     setStatus("项目已加载");
@@ -3213,6 +3246,7 @@ function wavePointerMove(event) {
 function render() {
   renderShellView();
   renderMetrics();
+  renderWorkflowGuide();
   renderTable();
   renderTransport();
   renderMixTimeline();
@@ -3223,6 +3257,112 @@ function render() {
   renderMashupPanel();
   if (state.view === "studio") drawWaveform();
   renderStemDebugger();
+}
+
+function renderWorkflowGuide() {
+  if (!els.workflowGuide) return;
+  const ready = playableTracks();
+  const analyzing = state.tracks.some((track) => track.status !== "ready" && track.status !== "error");
+  const hasDownload = !els.downloadLink.hidden;
+  const step = workflowStep(ready, analyzing, hasDownload);
+  const steps = [
+    { id: "upload", label: "添加歌曲", state: state.tracks.length ? "done" : "active" },
+    { id: "analyze", label: "等待分析", state: ready.length ? "done" : state.tracks.length ? "active" : "pending" },
+    { id: "arrange", label: "排歌与过渡", state: ready.length >= 2 ? "active" : "pending" },
+    { id: "preview", label: "试听检查", state: state.isPlaying ? "active" : ready.length ? "pending" : "pending" },
+    { id: "export", label: "导出成品", state: hasDownload ? "done" : ready.length ? "pending" : "pending" },
+  ];
+
+  els.workflowGuide.innerHTML = `
+    <div class="workflow-copy">
+      <span class="tiny-label">Start Here</span>
+      <strong>${escapeHtml(step.title)}</strong>
+      <p>${escapeHtml(step.body)}</p>
+    </div>
+    <div class="workflow-steps">
+      ${steps.map((item) => `
+        <span class="${item.state}">
+          <b>${escapeHtml(item.label)}</b>
+        </span>
+      `).join("")}
+    </div>
+    <div class="workflow-actions">
+      <button type="button" data-guide-action="${step.action}" ${step.disabled ? "disabled" : ""}>${escapeHtml(step.actionLabel)}</button>
+      <button type="button" class="secondary" data-guide-action="teaching" ${ready.length < 2 ? "disabled" : ""}>学习怎么接歌</button>
+    </div>
+  `;
+}
+
+function workflowStep(ready, analyzing, hasDownload) {
+  if (!state.tracks.length) {
+    return {
+      title: "先把几首歌放进来",
+      body: "SmartMix 的核心流程是：上传歌曲 -> 自动分析 -> 推荐排序和过渡 -> 试听 -> 导出。先添加 2 首以上歌曲，后面的功能会逐步变得有意义。",
+      action: "upload",
+      actionLabel: "添加歌曲",
+    };
+  }
+  if (analyzing || !ready.length) {
+    return {
+      title: "正在读取歌曲信息",
+      body: "系统会提取 BPM、调性、能量、风格和首尾可过渡点。分析完成后，你就能让它自动排序、生成过渡和试听整段混音。",
+      action: "wait",
+      actionLabel: "分析中",
+      disabled: true,
+    };
+  }
+  if (ready.length === 1) {
+    return {
+      title: "再添加一首，才能开始接歌",
+      body: "单首歌可以查看波形和 cue 点；两首以上才能计算过渡、自动排序、打开教学推荐和导出完整混音。",
+      action: "upload",
+      actionLabel: "继续添加",
+    };
+  }
+  if (!state.workflow.sortedOnce && !state.autoHandoff.plan && !state.isPlaying && !hasDownload) {
+    return {
+      title: "现在可以让它排歌了",
+      body: "推荐先点“应用排序”，SmartMix 会按调性、BPM、风格和能量把歌曲排成更顺的播放顺序。想要更自动化，可以再生成 Smart Beat Handoff。",
+      action: "sort",
+      actionLabel: "应用推荐排序",
+    };
+  }
+  if (!state.isPlaying && !hasDownload) {
+    return {
+      title: "试听这段混音",
+      body: "时间线已经可以播放。听一遍首尾过渡，如果感觉拥挤，再展开高级设置微调重叠时长、EQ 或过渡策略。",
+      action: "preview",
+      actionLabel: "开始试听",
+    };
+  }
+  if (state.isPlaying) {
+    return {
+      title: "边听边看过渡",
+      body: "播放时下方时间线和 Deck Mixer 会显示当前两首歌如何重叠。你可以跳到过渡点，或选择某首歌微调 IN / OUT。",
+      action: "export",
+      actionLabel: "准备导出",
+    };
+  }
+  return {
+    title: "导出或继续精修",
+    body: hasDownload ? "导出文件已经生成，可以下载；也可以继续调整排序、过渡和波形 cue 点后重新导出。" : "试听满意后导出 MP3 或 WAV。需要学习操作手法时打开接歌教学，需要分轨时进入 Stem Debugger。",
+    action: "export",
+    actionLabel: hasDownload ? "重新导出" : "导出混音",
+  };
+}
+
+function workflowGuideClick(event) {
+  const button = event.target.closest("[data-guide-action]");
+  if (!button || button.disabled) return;
+  const action = button.dataset.guideAction;
+  if (action === "upload") els.fileInput.click();
+  if (action === "sort") applySort();
+  if (action === "preview") previewMix(state.playbackOffset);
+  if (action === "export") exportMix();
+  if (action === "teaching") {
+    if (!state.teaching.open) toggleTeachingPanel();
+    els.teachingPanel?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 function renderShellView() {
@@ -3249,6 +3389,10 @@ function renderMetrics() {
 
 function renderAutoHandoffPanel() {
   if (!els.autoHandoffPanel) return;
+  if (playableTracks().length < 2 && !state.autoHandoff.plan && !state.autoHandoff.error && !state.autoHandoff.loading) {
+    els.autoHandoffPanel.innerHTML = "";
+    return;
+  }
   const { loading, rendering, renderedCount, plan, error } = state.autoHandoff;
   if (loading) {
     els.autoHandoffPanel.innerHTML = `<div class="auto-handoff-card">Planning Smart Beat Handoff...</div>`;
@@ -4008,16 +4152,21 @@ function panLabel(value) {
 
 function renderStemLane(stem, track) {
   const control = ensureStemControl(stem.id);
-  const isReal = Boolean(track?.stems?.[stem.id]?.buffer);
+  const realStem = track?.stems?.[stem.id];
+  const isReal = Boolean(realStem?.buffer);
   const pending = !isReal && isStemPending(track);
   const simulated = !isReal && !pending;
   const activeClass = `${control.mute ? " muted" : control.solo ? " solo" : ""}${isReal ? " real" : ""}${pending ? " pending" : ""}${simulated ? " simulated" : ""}`;
+  const downloadName = stemDownloadFilename(track, stem.id);
   return `
     <section class="stem-lane${activeClass}" style="--stem-color:${isReal ? stem.color : "#737b80"}">
       <div class="stem-control-strip">
         <div class="stem-buttons">
           <button type="button" class="${control.mute ? "active" : ""}" data-stem-action="mute" data-stem="${stem.id}" aria-label="${stem.label} mute">M</button>
           <button type="button" class="${control.solo ? "active" : ""}" data-stem-action="solo" data-stem="${stem.id}" aria-label="${stem.label} solo">S</button>
+          ${isReal && realStem?.url
+            ? `<a class="stem-download" href="${API}${escapeHtml(realStem.url)}" download="${escapeHtml(downloadName)}" aria-label="下载 ${stem.label} 分轨">下载</a>`
+            : `<span class="stem-download disabled" aria-disabled="true">下载</span>`}
           <strong>${stem.label}</strong>
           <small>${isReal ? "Demucs" : "\u6a21\u62df"}</small>
         </div>
@@ -4029,6 +4178,12 @@ function renderStemLane(stem, track) {
       <canvas class="stem-wave" width="1400" height="82" data-stem-wave="${stem.id}"></canvas>
     </section>
   `;
+}
+
+function stemDownloadFilename(track, stemId) {
+  const rawName = String(track?.name || "smartmix-track").replace(/\.[^.]+$/, "");
+  const safeName = rawName.replace(/[\\/:*?"<>|]+/g, "_").trim() || "smartmix-track";
+  return `${safeName}-${stemId}.wav`;
 }
 
 function renderStemTransport() {

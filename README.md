@@ -20,9 +20,10 @@ SmartMix 是一个本地运行的智能混音工作台。它把 Vite 前端、Fa
 - 后端高质量导出：按当前排序、IN/OUT、过渡、EQ、响度归一化和节拍同步导出 MP3/WAV。
 - Pair Match：上传任意两首歌，计算 A 到 B / B 到 A 的衔接评分，并给出调性、BPM、能量、结构分项。
 - 自动匹配修复：自动选择处理 A 或 B，生成调性、速度、能量修复方案并渲染新音频。
-- DJ 教学入口：基于当前 Deck A 推荐下一首歌、接歌方法、操作步骤、风险提示和真实无缝试听。
-- Demucs 分轨调试：可选生成 vocals / drums / bass / other 四路真实 stems；未完成时提供浏览器模拟分轨占位。
-- 双曲 Mashup Builder：分析两首歌的 8/16 小节段落，生成拼接/叠加方案，支持 stems、groove bed、人声优先级、能量曲线和替代方案。
+- 渐进式工作台：首屏提供 Start Here 流程引导，按“添加歌曲 -> 等待分析 -> 排歌与过渡 -> 试听检查 -> 导出成品”推进。
+- 接歌教学：基于当前 Deck A 推荐下一首歌、接歌方法、操作步骤、风险提示和真实无缝试听。
+- Demucs 分轨调试：可选生成 vocals / drums / bass / other 四路真实 stems；未完成时提供浏览器模拟分轨占位，真实分轨完成后可下载任意单独分轨 WAV。
+- 双曲 Mashup Builder：作为进阶实验区，分析两首歌的 8/16 小节段落，生成拼接/叠加方案，支持 stems、groove bed、人声优先级、能量曲线和替代方案。
 - Reference Mix：以一首参考歌为目标风格，为分轨后的歌曲生成参考混音。
 - Harmonic Tuning：可选把歌曲调到指定 Camelot，优先使用 Demucs + Rubber Band，失败时回退到整曲移调。
 - 项目保存与加载：保存曲目、排序、设置、混音参数和过渡状态。
@@ -59,9 +60,11 @@ SmartMix/
     reference_mix.py           # Reference Mix
     data/                      # 本地运行时数据，自动创建
   auto_mix/                    # 独立 auto mix 实验模块
+  scripts/                     # 启动辅助脚本，例如 Python 环境选择器
   docs/                        # 架构审查等补充文档
   ref/                         # 论文和第三方参考实现
   package.json                 # 前端、后端和测试命令
+  requirements.txt             # 项目整体 Python 依赖入口
 ```
 
 运行时数据目录：
@@ -83,6 +86,13 @@ backend/data/stems/            # Demucs 分轨缓存
 - pnpm
 - Python 3.11+
 
+`pnpm backend` 和 `pnpm setup:*` 会通过 `scripts/python-runner.mjs` 自动选择可用 Python，优先使用项目 `.venv` / `venv`，再尝试 `D:\miniconda\python.exe` 和 PATH 中的 `python`。如果你的 PATH 里有别的 Python 环境，可以通过 `SMARTMIX_PYTHON` 强制指定：
+
+```powershell
+$env:SMARTMIX_PYTHON="D:\miniconda\python.exe"
+pnpm dev
+```
+
 如果没有 pnpm：
 
 ```bash
@@ -97,6 +107,14 @@ MP3 导出默认使用 `imageio-ffmpeg` 自带的 ffmpeg，一般不需要额外
 pnpm install
 pnpm setup:backend
 ```
+
+根目录也提供了统一依赖入口：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+如果只想安装后端基础功能，继续使用 `pnpm setup:backend` 即可。
 
 ### 3. 启动开发服务
 
@@ -161,14 +179,14 @@ choco install rubberband
 ## 基础使用流程
 
 1. 打开 http://127.0.0.1:3000。
-2. 点击“选择音频”，或把音频文件拖入上传区域。
+2. 按首屏 `Start Here` 引导点击“添加歌曲”，或把音频文件拖入上传区域。
 3. 等待歌曲分析完成，曲目会显示 BPM、调性、Camelot、能量、风格、响度和过渡候选点。
-4. 选择排序策略，点击“应用排序”。
-5. 调整过渡时长、AI 精准小节混音、响度归一化、滤波、EQ 和 Deck Mixer。
-6. 点击“预览”在浏览器试听。
+4. 按引导点击“应用推荐排序”，或在左侧选择排序策略后点击“应用排序”。
+5. 点击“预览”在浏览器试听；时间线和 Deck Mixer 会显示当前过渡。
+6. 如需细调，展开左侧 `Advanced`，调整过渡策略、响度、滤波、EQ 和 Deck Mixer。
 7. 拖动波形上的 IN/OUT 手柄，微调每首歌的入点和出点。
-8. 需要教学时打开“教学入口”，选择推荐接法并生成真实无缝试听。
-9. 需要 stems 时打开“分轨调试”，等待 Demucs 真分轨完成。
+8. 需要学习接歌时打开“接歌教学”，选择推荐接法并生成真实无缝试听。
+9. 需要 stems 时打开“分轨调试”，等待 Demucs 真分轨完成；完成后可下载某一路单独分轨。
 10. 选择 MP3 或 WAV，点击“导出”，完成后下载结果。
 11. 点击“保存项目”可把当前曲目、排序和设置保存到本地。
 
@@ -239,6 +257,20 @@ backend/data/stems/{track_id}/demucs_api/
 ```
 
 如果缓存已存在，默认直接复用；请求参数 `force: true` 可强制重新生成。
+
+分轨完成后，前端“分轨调试”页会在每一路 vocals / drums / bass / other 旁显示“下载”按钮。下载文件来自：
+
+```http
+GET /api/tracks/{track_id}/stems/{stem_name}/audio
+```
+
+其中 `stem_name` 只能是 `vocals`、`drums`、`bass` 或 `other`。后端会返回 WAV 文件，文件名格式类似：
+
+```text
+原曲名-vocals.wav
+```
+
+只有真实 Demucs 分轨完成后才会启用下载；浏览器模拟分轨只是试听占位，不会提供下载。
 
 ### Pair Match 与自动修复
 
@@ -333,6 +365,8 @@ pnpm check            # 检查 src/main.js 语法
 pnpm typecheck        # TypeScript 类型检查
 ```
 
+`pnpm backend` 与 `pnpm setup:*` 不直接调用裸 `python`，而是通过 `scripts/python-runner.mjs` 选择依赖完整的 Python。这个机制可以避免 Windows PATH 中第一个 Python 不是 SmartMix 环境时出现 `ModuleNotFoundError: imageio_ffmpeg` 这类问题。
+
 ## API 概览
 
 | 方法 | 路径 | 用途 |
@@ -341,7 +375,7 @@ pnpm typecheck        # TypeScript 类型检查
 | `POST` | `/api/tracks` | 上传并分析单首歌 |
 | `GET` | `/api/tracks/{track_id}/audio` | 获取已上传音频 |
 | `POST` | `/api/tracks/{track_id}/stems` | 生成或读取 Demucs stems |
-| `GET` | `/api/tracks/{track_id}/stems/{stem_name}/audio` | 获取单个 stem 音频 |
+| `GET` | `/api/tracks/{track_id}/stems/{stem_name}/audio` | 下载单个 stem WAV 音频 |
 | `GET` | `/api/segmentation/msaf/algorithms` | 获取 MSAF 算法列表 |
 | `POST` | `/api/segmentation/tracks/{track_id}` | 独立单曲段落识别 |
 | `POST` | `/api/segmentation/tracks/{track_id}/sections` | 团队 SDK 版段落分析/标注/拆分输出 |
@@ -373,6 +407,7 @@ pnpm typecheck        # TypeScript 类型检查
 - `/api/tracks` 和 `/api/projects` 分别拆在 `backend/api/tracks.py`、`backend/api/projects.py`。
 - 音频分析、导出、匹配、修复、调音、Mashup 都是独立 Python 模块，便于单测和替换。
 - 后端启动时会自动创建 `backend/data/` 下的运行时目录。
+- `scripts/python-runner.mjs` 负责为后端启动和依赖安装选择 Python。可用 `SMARTMIX_PYTHON` 覆盖默认选择。
 
 ### 数据和隐私
 
@@ -416,6 +451,22 @@ http://127.0.0.1:8002/api/health
 pnpm setup:backend
 ```
 
+### 后端报 `No module named 'imageio_ffmpeg'`
+
+通常是终端里的 `python` 指到了另一个虚拟环境。SmartMix 的 `pnpm backend` 会自动选择一个依赖完整的 Python；如果仍然报错，可以显式指定：
+
+```powershell
+$env:SMARTMIX_PYTHON="D:\miniconda\python.exe"
+pnpm setup:backend
+pnpm backend
+```
+
+也可以检查选择器实际使用的 Python：
+
+```bash
+node scripts/python-runner.mjs --require-backend -c "import sys; print(sys.executable)"
+```
+
 ### 端口被占用
 
 默认前端使用 `3000`，后端使用 `8002`。如果端口被占用，可以先停止占用进程，或临时修改 `package.json` 中的 `frontend` / `backend` 脚本和 `src/api/client.js` 中的 API 端口。
@@ -444,6 +495,8 @@ pnpm setup:tuning
 ```
 
 如果安装后仍失败，检查 Torch、torchaudio、TorchCodec 和本机 Python 环境是否一致。GPU 用户还需要确认 CUDA 版 Torch 与显卡驱动匹配。
+
+真实分轨完成后，可以在“分轨调试”页下载单独的 vocals / drums / bass / other。若下载按钮不可用，说明当前仍是模拟分轨，或 Demucs 分轨还没有成功完成。
 
 ### Rubber Band 不可用
 
@@ -485,6 +538,6 @@ Get-Content README.md -Encoding utf8
 
 ## 当前状态
 
-SmartMix 仍是本地优先的开发版本。核心上传、分析、排序、预览、导出、项目保存、Pair Match、教学试听、分轨调试、Mashup 和调音管线已经具备可运行路径；高质量 stems、GPU 加速和 Rubber Band 调音依赖本机环境，首次运行可能需要较长下载和处理时间。
+SmartMix 仍是本地优先的开发版本。核心上传、分析、Start Here 渐进式引导、排序、预览、导出、项目保存、Pair Match、教学试听、分轨调试、单独分轨下载、Mashup 和调音管线已经具备可运行路径；高质量 stems、GPU 加速和 Rubber Band 调音依赖本机环境，首次运行可能需要较长下载和处理时间。
 
 Mashup Builder 的推荐使用路径见 [docs/product/MASHUP_UX_FLOW.md](docs/product/MASHUP_UX_FLOW.md)。

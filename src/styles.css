@@ -72,6 +72,14 @@ h1 {
   letter-spacing: 0;
 }
 
+.product-line {
+  max-width: 620px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
 .top-actions {
   display: flex;
   gap: 10px;
@@ -124,6 +132,10 @@ button.export {
 button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 .studio-grid {
@@ -189,8 +201,65 @@ button:disabled {
 .export-row,
 .download-link,
 .auto-handoff-panel,
-.project-box {
+.project-box,
+.control-section {
   grid-column: 1 / -1;
+}
+
+.control-section {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(240, 207, 90, 0.28);
+  background:
+    linear-gradient(180deg, rgba(240, 207, 90, 0.045), transparent 52%),
+    var(--panel-2);
+  padding: 10px;
+}
+
+.section-title,
+.control-section summary {
+  display: grid;
+  gap: 2px;
+}
+
+.section-title strong,
+.control-section summary strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.control-section .field,
+.control-section .toggle,
+.control-section .eq-bank {
+  grid-column: auto;
+  background: rgba(16, 17, 19, 0.72);
+}
+
+.advanced-controls {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(32, 35, 42, 0.72);
+}
+
+.advanced-controls summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.advanced-controls summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-controls summary::after {
+  content: "展开";
+  justify-self: start;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.advanced-controls[open] summary::after {
+  content: "收起";
 }
 
 .auto-handoff-panel {
@@ -337,8 +406,12 @@ input[type="range"] {
 
 .button-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 6px;
+}
+
+#autoHandoffButton {
+  grid-column: 1 / -1;
 }
 
 .export-row {
@@ -778,7 +851,7 @@ input[type="range"] {
 
 .stem-buttons {
   display: grid;
-  grid-template-columns: 26px 26px minmax(0, 1fr);
+  grid-template-columns: 26px 26px 52px minmax(0, 1fr);
   align-items: center;
   gap: 6px;
 }
@@ -800,6 +873,26 @@ input[type="range"] {
   color: var(--accent);
 }
 
+.stem-download {
+  display: grid;
+  place-items: center;
+  min-height: 24px;
+  border: 1px solid rgba(101, 215, 242, 0.35);
+  border-radius: 5px;
+  background: rgba(101, 215, 242, 0.12);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.stem-download.disabled {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #202224;
+  color: rgba(255, 255, 255, 0.34);
+  cursor: not-allowed;
+}
+
 .stem-buttons strong {
   min-width: 0;
   overflow: hidden;
@@ -810,7 +903,7 @@ input[type="range"] {
 }
 
 .stem-buttons small {
-  grid-column: 3;
+  grid-column: 4;
   color: var(--muted);
   font-size: 11px;
   line-height: 1;
@@ -956,10 +1049,136 @@ input[type="range"] {
   margin: 0;
 }
 
+.workflow-guide {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.95fr) minmax(360px, 1.3fr) auto;
+  gap: 14px;
+  align-items: center;
+  margin: 12px;
+  border: 1px solid rgba(240, 207, 90, 0.36);
+  background:
+    linear-gradient(135deg, rgba(240, 207, 90, 0.12), transparent 42%),
+    #14161a;
+  padding: 14px;
+}
+
+.workflow-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.workflow-copy strong {
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.workflow-copy p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.workflow-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.workflow-steps span {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--muted);
+  padding: 10px 8px;
+}
+
+.workflow-steps span::before {
+  content: "";
+  display: block;
+  width: 22px;
+  height: 3px;
+  margin-bottom: 8px;
+  background: var(--line);
+}
+
+.workflow-steps b {
+  display: block;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-steps .active {
+  border-color: rgba(240, 207, 90, 0.62);
+  background: rgba(240, 207, 90, 0.1);
+  color: var(--text);
+}
+
+.workflow-steps .active::before {
+  background: var(--accent);
+}
+
+.workflow-steps .done {
+  border-color: rgba(48, 213, 160, 0.48);
+  background: rgba(48, 213, 160, 0.08);
+  color: var(--accent-2);
+}
+
+.workflow-steps .done::before {
+  background: var(--accent-2);
+}
+
+.workflow-actions {
+  display: grid;
+  gap: 8px;
+  min-width: 148px;
+}
+
+.workflow-actions button {
+  width: 100%;
+}
+
 .match-panel {
   margin: 12px;
   border: 1px solid var(--line);
   background: #14161a;
+}
+
+.workflow-details {
+  overflow: hidden;
+}
+
+.workflow-details > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.workflow-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.workflow-details > summary::after {
+  content: "展开";
+  border: 1px solid var(--line);
+  color: var(--muted);
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.workflow-details[open] > summary::after {
+  content: "收起";
+}
+
+.workflow-details > summary strong {
+  display: block;
 }
 
 .teaching-panel {
@@ -2342,6 +2561,8 @@ tr.selected {
   }
 
   .button-row,
+  .workflow-guide,
+  .workflow-steps,
   .match-inputs,
   .mashup-flow,
   .mashup-segments,
@@ -2351,6 +2572,10 @@ tr.selected {
   .transition-explain,
   .cue-editor,
   .transport {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-actions {
     grid-template-columns: 1fr;
   }
 
