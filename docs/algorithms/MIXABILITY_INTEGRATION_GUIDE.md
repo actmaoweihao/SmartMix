@@ -91,6 +91,7 @@ pair = evaluate_song_pair("A.wav", "B.wav")
 - `summary`：面向 UI 的短解释。
 - `components`：tempo、cue、alignment、rhythm、vocal、bass、harmonic、energy、structure、style 的详细分。
 - `transitionQuality`：cue drift、tempo stretch、vocal/bass conflict、analysis quality 等质量指标。
+- `methodScores`：beatmix、bass_swap、quick_cut、echo_out、breakdown_switch 的方法适配分与阈值。
 - `degradedTransition`：是否建议降级转场，以及建议方法。
 
 接歌功能里推荐这样用：
@@ -102,6 +103,33 @@ else:
     method = "skip_or_manual_review"
 ```
 
+如果功能需要直接选择转场方法，优先使用 `degradedTransition.method`；如果需要解释或调参，再读取 `methodScores`。
+
+## 学习型 cue 接入
+
+上传分析阶段会自动调用 `backend.learned_cues.collect_learned_cue_points()`。学习型 cue 会作为候选进入 `transition_candidates.cue_candidates`，再由规则层重新做安全评分。
+
+支持三种 provider：
+
+| Provider | 开关/配置 | 说明 |
+| --- | --- | --- |
+| CUE-DETR | `SMARTMIX_ENABLE_CUE_DETR=1` | 使用 `SMARTMIX_CUE_DETR_CHECKPOINT` 指定 checkpoint |
+| Sidecar JSON | `SMARTMIX_LEARNED_CUE_DIR` 或 `SMARTMIX_LEARNED_CUE_FILE` | 自训练模型离线生成 cue JSON |
+| Command | `SMARTMIX_CUE_MODEL_COMMAND` | 本地命令输出 cue JSON，命令里可用 `{path}` 和 `{stem}` |
+
+Sidecar / Command 输出格式：
+
+```json
+{
+  "cues": [
+    {"time": 16.0, "role": "mix_in", "confidence": 0.88},
+    {"time": 192.0, "role": "mix_out", "score": 91}
+  ]
+}
+```
+
+`role` 可选；不传时 SmartMix 会根据歌曲位置和局部特征推断 `mix_in` / `mix_out` / `drop` / `bridge` 等角色。
+
 ## 约定
 
 - 新功能需要“判断两首歌能不能接”时，优先从 `mixability_service.evaluate_pair()` 开始。
@@ -109,4 +137,3 @@ else:
 - 新功能需要“整条歌单排序”时，使用 `order_tracks()`。
 - 新功能需要“评测一串歌哪里接得差”时，使用 `evaluate_sequence()`。
 - 算法内部函数仍可用于研究和单元测试，但不作为跨团队稳定接口。
-

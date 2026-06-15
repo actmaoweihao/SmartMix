@@ -54,6 +54,14 @@ SORT_HARMONIC_WEIGHTS = {
     "style": 0.03,
 }
 
+MIX_METHOD_THRESHOLDS = {
+    "beatmix": 74.0,
+    "bass_swap": 66.0,
+    "quick_cut": 62.0,
+    "echo_out": 58.0,
+    "breakdown_switch": 60.0,
+}
+
 
 def evaluate_mixability(
     prev_track: dict[str, Any],
@@ -81,7 +89,8 @@ def evaluate_mixability(
     raw_score = sum(components[key]["score"] * weight for key, weight in weights.items())
     transition_quality = transition_quality_report(prev_track, next_track, components)
     adjusted = _adjust_score(raw_score, components, transition_quality)
-    degraded_transition = degraded_transition_plan(components, transition_quality)
+    method_scores = mix_method_scores(components, transition_quality)
+    degraded_transition = degraded_transition_plan(components, transition_quality, method_scores)
     return {
         "profile": profile,
         "score": round(float(adjusted), 1),
@@ -90,6 +99,7 @@ def evaluate_mixability(
         "weights": weights,
         "components": components,
         "transitionQuality": transition_quality,
+        "methodScores": method_scores,
         "degradedTransition": degraded_transition,
         "summary": _summary(adjusted, components),
     }
@@ -128,6 +138,7 @@ def order_tracks_by_mixability(
                 "phraseBars": score["components"]["structure"].get("phraseBars"),
                 "transitionPlan": score["components"]["structure"].get("transition"),
                 "transitionQuality": score.get("transitionQuality"),
+                "methodScores": score.get("methodScores"),
                 "degradedTransition": score.get("degradedTransition"),
                 "components": _compact_components(score["components"]),
                 "summary": score["summary"],
@@ -166,6 +177,7 @@ def recommend_next_by_mixability(
                 "durationSec": score["components"]["structure"].get("overlapSeconds"),
                 "phraseBars": score["components"]["structure"].get("phraseBars"),
                 "transitionQuality": score.get("transitionQuality"),
+                "methodScores": score.get("methodScores"),
                 "degradedTransition": score.get("degradedTransition"),
                 "components": _compact_components(score["components"]),
                 "summary": score["summary"],
@@ -199,6 +211,7 @@ def evaluate_transition_sequence(
                 "toName": next_track.get("name"),
                 "mixabilityScore": score["score"],
                 "transitionQuality": quality,
+                "methodScores": score.get("methodScores"),
                 "degradedTransition": score["degradedTransition"],
                 "outgoingCue": score["components"]["cue"].get("outgoing"),
                 "incomingCue": score["components"]["cue"].get("incoming"),
@@ -505,7 +518,44 @@ def transition_quality_report(prev_track: dict[str, Any], next_track: dict[str, 
     }
 
 
-def degraded_transition_plan(components: dict[str, dict[str, Any]], quality: dict[str, Any]) -> dict[str, Any]:
+def mix_method_scores(components: dict[str, dict[str, Any]], quality: dict[str, Any]) -> dict[str, Any]:
+    metrics = quality.get("metrics") or {}
+    q = _float(quality.get("score"), 60.0)
+    tempo = _float(components.get("tempo", {}).get("score"), 50.0)
+    alignment = _float(components.get("alignment", {}).get("score"), 50.0)
+    rhythm = _float(components.get("rhythm", {}).get("score"), 50.0)
+    vocal = _float(components.get("vocal", {}).get("score"), 50.0)
+    bass = _float(components.get("bass", {}).get("score"), 50.0)
+    structure = _float(components.get("structure", {}).get("score"), 50.0)
+    analysis = _float(metrics.get("analysisQuality"), 0.62) * 100.0
+    tempo_stretch = _float(metrics.get("tempoStretchPercent"), 0.0)
+    beat_drift = metrics.get("beatGridDriftMs")
+    vocal_conflict = _float(metrics.get("vocalConflict"), 0.0) * 100.0
+    bass_conflict = _float(metrics.get("bassConflict"), 0.0) * 100.0
+    drift_risk = 0.0 if not isinstance(beat_drift, (int, float)) else _clamp((float(beat_drift) - 80.0) / 2.2, 0.0, 100.0)
+    stretch_risk = _clamp((tempo_stretch - 3.0) * 14.0, 0.0, 100.0)
+    risk_need = max(drift_risk, stretch_risk, vocal_conflict, bass_conflict)
+
+    scores = {
+        "beatmix": tempo * 0.20 + alignment * 0.24 + rhythm * 0.14 + vocal * 0.09 + bass * 0.06 + structure * 0.16 + q * 0.08 + analysis * 0.03,
+        "bass_swap": tempo * 0.14 + alignment * 0.17 + rhythm * 0.10 + vocal * 0.11 + (100 - bass_conflict) * 0.10 + structure * 0.15 + q * 0.08 + min(100.0, bass_conflict * 1.6 + 35.0) * 0.15,
+        "quick_cut": alignment * 0.12 + structure * 0.20 + q * 0.10 + analysis * 0.12 + min(100.0, vocal_conflict * 1.7 + 28.0) * 0.24 + tempo * 0.07 + bass * 0.05 + rhythm * 0.10,
+        "echo_out": structure * 0.12 + q * 0.08 + analysis * 0.10 + min(100.0, max(drift_risk, stretch_risk) + 38.0) * 0.26 + vocal * 0.08 + bass * 0.08 + max(tempo, alignment) * 0.08 + risk_need * 0.20,
+        "breakdown_switch": structure * 0.24 + alignment * 0.15 + q * 0.12 + analysis * 0.10 + tempo * 0.10 + vocal * 0.10 + bass * 0.08 + rhythm * 0.11,
+    }
+
+    result = {}
+    for method, score in scores.items():
+        threshold = MIX_METHOD_THRESHOLDS[method]
+        result[method] = {
+            "score": round(_clamp(score, 0.0, 100.0), 1),
+            "threshold": threshold,
+            "usable": bool(score >= threshold),
+        }
+    return result
+
+
+def degraded_transition_plan(components: dict[str, dict[str, Any]], quality: dict[str, Any], method_scores: dict[str, Any] | None = None) -> dict[str, Any]:
     metrics = quality.get("metrics") or {}
     warnings = list(quality.get("warnings") or [])
     quality_score = _float(quality.get("score"), 60.0)
@@ -520,8 +570,12 @@ def degraded_transition_plan(components: dict[str, dict[str, Any]], quality: dic
     max_overlap = _float(components.get("structure", {}).get("overlapSeconds"), 8.0)
     reason = "quality supports phrase-aware blend"
     degraded = False
+    method_scores = method_scores or mix_method_scores(components, quality)
+    beatmix_score = _float((method_scores.get("beatmix") or {}).get("score"), 0.0)
 
-    if quality_score < 45 or analysis_quality < 0.42:
+    if beatmix_score >= MIX_METHOD_THRESHOLDS["beatmix"] and quality_score >= 68:
+        method = "beatmix"
+    elif quality_score < 45 or analysis_quality < 0.42:
         method = "echo_out"
         max_overlap = min(max_overlap, 4.0)
         reason = "analysis quality is too low for a long beatmatched blend"
@@ -552,6 +606,17 @@ def degraded_transition_plan(components: dict[str, dict[str, Any]], quality: dic
         reason = "tempo stretch is noticeable; prefer a shorter musical switch"
         degraded = True
 
+    if degraded:
+        viable = [
+            (name, _float(item.get("score"), 0.0))
+            for name, item in method_scores.items()
+            if name != "beatmix" and bool(item.get("usable"))
+        ]
+        if viable:
+            method, _ = max(viable, key=lambda item: (item[1], _method_priority(item[0])))
+            max_overlap = min(max_overlap, _method_overlap_limit(method, max_overlap))
+            reason = _method_reason(method, reason)
+
     if degraded and reason not in warnings:
         warnings.insert(0, reason)
 
@@ -560,8 +625,29 @@ def degraded_transition_plan(components: dict[str, dict[str, Any]], quality: dic
         "method": method,
         "maxOverlapSec": round(float(max(1.5, max_overlap)), 2),
         "reason": reason,
+        "methodScore": method_scores.get(method),
+        "methodScores": method_scores,
         "warnings": warnings[:5],
     }
+
+
+def _method_priority(method: str) -> int:
+    return {"echo_out": 5, "quick_cut": 4, "bass_swap": 3, "breakdown_switch": 2, "beatmix": 1}.get(method, 0)
+
+
+def _method_overlap_limit(method: str, current: float) -> float:
+    limits = {"echo_out": 4.0, "quick_cut": 2.5, "bass_swap": 8.0, "breakdown_switch": 6.0}
+    return min(float(current), limits.get(method, float(current)))
+
+
+def _method_reason(method: str, fallback: str) -> str:
+    reasons = {
+        "echo_out": "method-aware score favors echo-out effect-tail handoff",
+        "quick_cut": "method-aware score favors quick cut to avoid vocal overlap",
+        "bass_swap": "method-aware score favors bass-swap automation",
+        "breakdown_switch": "method-aware score favors shorter breakdown switch",
+    }
+    return reasons.get(method, fallback)
 
 
 def cue_grid_drift_ms(track: dict[str, Any], cue_time: float) -> float | None:

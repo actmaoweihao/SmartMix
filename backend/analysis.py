@@ -9,7 +9,7 @@ import imageio_ffmpeg
 import librosa
 import numpy as np
 
-from .cue_detr import predict_cue_points
+from .learned_cues import collect_learned_cue_points
 from .loudness import loudness_metrics
 from .matching import key_label_to_camelot
 
@@ -42,7 +42,7 @@ def analyze_audio(path: Path) -> dict:
     style = _estimate_style(y, sr, bpm, energy, beat_grid["confidence"])
     loudness = loudness_metrics(y, sr)
     candidates = _transition_candidates(y, sr, duration, beat_grid["bars"], energy, bpm)
-    candidates = _merge_cue_detr_candidates(path, candidates, duration, bpm)
+    candidates = _merge_learned_cue_candidates(path, candidates, duration, bpm)
     camelot = key_label_to_camelot(key["label"], key["mode"])
     analysis_quality = _analysis_quality(duration, bpm, beat_grid, key, camelot, loudness, candidates)
 
@@ -793,15 +793,23 @@ def _fallback_cue_candidates(duration: float, intro: float, outro: float) -> lis
     ]
 
 
-def _merge_cue_detr_candidates(path: Path, candidates: dict, duration: float, bpm: float | None) -> dict:
+def _merge_learned_cue_candidates(path: Path, candidates: dict, duration: float, bpm: float | None) -> dict:
     try:
-        model_cues = predict_cue_points(path)
+        learned = collect_learned_cue_points(path)
+        model_cues = learned.get("cues") or []
+        providers = learned.get("providers") or []
     except Exception as exc:
         merged = {**candidates}
+        merged["learned_cue"] = {"enabled": True, "used": False, "error": str(exc)}
         merged["cue_detr"] = {"enabled": True, "used": False, "error": str(exc)}
         return merged
     if not model_cues:
-        return {**candidates, "cue_detr": {"enabled": False, "used": False}}
+        cue_detr_provider = next((item for item in providers if item.get("provider") == "cue_detr"), None)
+        return {
+            **candidates,
+            "learned_cue": {"enabled": bool(providers), "used": False, "providers": providers},
+            "cue_detr": cue_detr_provider or {"enabled": False, "used": False},
+        }
 
     existing = list(candidates.get("cue_candidates") or [])
     curve_features = _features_from_transition_curves(candidates, duration)
@@ -820,13 +828,18 @@ def _merge_cue_detr_candidates(path: Path, candidates: dict, duration: float, bp
             "drum_proxy": 0.5,
             "phrase_alignment": 0.65,
         }
-        roles = _cue_roles_for_time(time_value, duration, feature) or (["mix_in"] if time_value < duration * 0.5 else ["mix_out"])
+        forced_role = cue.get("role") if cue.get("role") in {"mix_in", "mix_out", "drop", "bridge", "drum_loop", "vocal_safe"} else None
+        roles = [forced_role] if forced_role else _cue_roles_for_time(time_value, duration, feature) or (["mix_in"] if time_value < duration * 0.5 else ["mix_out"])
         for role in roles:
-            scored = _score_cue_candidate(feature, role, duration, boundaries, float(bpm or 120), forced_time=time_value, source="cue_detr")
+            source = str(cue.get("source") or cue.get("provider") or "learned_cue")
+            scored = _score_cue_candidate(feature, role, duration, boundaries, float(bpm or 120), forced_time=time_value, source=source)
             model_score = float(cue.get("score", 70.0)) / 100
-            scored["score"] = round(min(100.0, scored["score"] * 0.58 + model_score * 42), 1)
+            safe_score = float(scored["score"])
+            scored["score"] = round(min(100.0, safe_score * 0.62 + model_score * 38), 1)
             scored["modelScore"] = round(model_score, 3)
-            scored["reasons"] = ["CUE-DETR"] + [reason for reason in scored.get("reasons", []) if reason != "CUE-DETR"]
+            scored["provider"] = cue.get("provider") or source
+            scored["safetyScore"] = round(safe_score / 100, 3)
+            scored["reasons"] = ["learned cue"] + [reason for reason in scored.get("reasons", []) if reason != "learned cue"]
             additions.append(scored)
 
     deduped: dict[tuple[str, int], dict] = {}
@@ -841,13 +854,13 @@ def _merge_cue_detr_candidates(path: Path, candidates: dict, duration: float, bp
     return {
         **candidates,
         "cue_candidates": merged_cues,
-        "cue_detr": {
-            "enabled": True,
-            "used": bool(additions),
-            "rawCount": len(model_cues),
-            "mergedCount": len(additions),
-        },
+        "learned_cue": {"enabled": True, "used": bool(additions), "rawCount": len(model_cues), "mergedCount": len(additions), "providers": providers},
+        "cue_detr": next((item for item in providers if item.get("provider") == "cue_detr"), {"enabled": False, "used": False}),
     }
+
+
+def _merge_cue_detr_candidates(path: Path, candidates: dict, duration: float, bpm: float | None) -> dict:
+    return _merge_learned_cue_candidates(path, candidates, duration, bpm)
 
 
 def _analysis_quality(
