@@ -1452,16 +1452,75 @@ function correlateProfile(chroma, profile, root) {
   return score;
 }
 
-function applySort() {
+async function applySort() {
   const ready = playableTracks();
   if (ready.length < 2) return;
-  const sorted = sortTracks(ready, state.settings.sortMode);
+  let sorted = null;
+  state.lastMixabilityOrder = null;
+  if (["recommended", "harmonic"].includes(state.settings.sortMode) && ready.every((track) => track.id)) {
+    try {
+      setStatus("正在用 Mixability 评分排序...");
+      const result = await fetchJson("/api/mixability/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: state.settings.sortMode,
+          trackIds: ready.map((track) => track.id),
+          tracks: ready.map((track) => serializableTrackForBackend(track)),
+          settings: {
+            phraseBars: state.settings.phraseBars,
+            targetEnergy: "arc",
+          },
+        }),
+      });
+      sorted = applyBackendOrder(ready, result);
+      state.lastMixabilityOrder = result;
+      setStatus(`已应用 Mixability 排序：${Math.round(result.score || 0)}/100`);
+    } catch (error) {
+      console.warn("Mixability ordering failed; falling back to local sorting.", error);
+      setStatus("Mixability 排序失败，已回退本地排序");
+    }
+  }
+  if (!sorted) sorted = sortTracks(ready, state.settings.sortMode);
   const unresolved = state.tracks.filter((track) => track.status !== "ready");
   state.tracks = [...sorted, ...unresolved];
   state.playbackOffset = 0;
   state.workflow.sortedOnce = true;
-  setStatus("已应用排序");
+  if (!state.lastMixabilityOrder || !["recommended", "harmonic"].includes(state.settings.sortMode)) setStatus("已应用排序");
   render();
+}
+
+function applyBackendOrder(ready, orderResult) {
+  const orderedTrackIds = orderResult?.orderedTrackIds;
+  if (!orderedTrackIds?.length) return null;
+  const byId = new Map(ready.map((track) => [track.id, track]));
+  const sorted = orderedTrackIds.map((id) => byId.get(id)).filter(Boolean);
+  const sortedIds = new Set(sorted.map((track) => track.id));
+  const remaining = ready.filter((track) => !sortedIds.has(track.id));
+  applyMixabilityTransitionCues(orderResult, byId);
+  return sorted.length ? [...sorted, ...remaining] : null;
+}
+
+function applyMixabilityTransitionCues(orderResult, byId) {
+  for (const transition of orderResult?.transitions || []) {
+    const prev = byId.get(transition.fromTrackId);
+    const next = byId.get(transition.toTrackId);
+    if (!prev || !next) continue;
+    const outgoingTime = Number(transition.outgoingCue?.time);
+    const incomingTime = Number(transition.incomingCue?.time);
+    if (Number.isFinite(outgoingTime)) prev.outroPoint = clamp(outgoingTime, 0.5, Math.max(0.5, prev.duration - 0.25));
+    if (Number.isFinite(incomingTime)) next.introPoint = clamp(incomingTime, 0, Math.max(0, next.duration - 0.25));
+    next.mixabilityTransition = {
+      score: transition.score,
+      level: transition.level,
+      durationSec: transition.durationSec,
+      phraseBars: transition.phraseBars,
+      summary: transition.summary,
+      components: transition.components,
+      outgoingCue: transition.outgoingCue,
+      incomingCue: transition.incomingCue,
+    };
+  }
 }
 
 async function generateAutoHandoffPlan() {
@@ -4291,7 +4350,9 @@ function syncMixTimelinePlayback(timeline = buildTimeline()) {
 function formatActiveTransitionLabel(timeline) {
   const transition = activeTransition(timeline);
   if (!transition) return "--";
-  return `${transition.prev.track.name} → ${transition.next.track.name}`;
+  const mixability = transition.next.track.mixabilityTransition;
+  const suffix = mixability ? ` · Mixability ${Math.round(Number(mixability.score) || 0)}` : "";
+  return `${transition.prev.track.name} → ${transition.next.track.name}${suffix}`;
 }
 
 function renderDeckMixer() {
@@ -4303,6 +4364,7 @@ function renderDeckMixer() {
     return;
   }
   const strategy = resolveMixStrategy(transition.prev.track, transition.next.track);
+  const mixability = transition.next.track.mixabilityTransition;
   els.deckMixer.innerHTML = `
     <div class="transition-explain">
       <div>
@@ -4317,10 +4379,27 @@ function renderDeckMixer() {
         <span>A OUT ${formatTime(transition.prev.track.outroPoint)}</span>
         <span>B IN ${formatTime(transition.next.track.introPoint)}</span>
         <span>Confidence ${Math.round((transition.plan?.confidence || 0) * 100)}%</span>
+        ${mixability ? `<span>${escapeHtml(formatMixabilityLabel(mixability))}</span>` : ""}
+        ${mixability ? `<span>${escapeHtml(formatMixabilityRisks(mixability.components))}</span>` : ""}
       </div>
     </div>
     ${[renderDeck("A", transition.prev), renderDeck("B", transition.next)].join("")}
   `;
+}
+
+function formatMixabilityLabel(mixability) {
+  const score = Math.round(Number(mixability?.score) || 0);
+  const level = mixability?.level ? ` ${mixability.level}` : "";
+  return `Mixability ${score}${level}`;
+}
+
+function formatMixabilityRisks(components = {}) {
+  const weak = Object.entries(components)
+    .filter(([, value]) => Number(value) < 65)
+    .sort((a, b) => Number(a[1]) - Number(b[1]))
+    .slice(0, 3)
+    .map(([key]) => key);
+  return weak.length ? `Watch ${weak.join(", ")}` : "No major weak component";
 }
 
 function renderDeck(label, item) {

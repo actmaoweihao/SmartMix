@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from .matching import camelot_key_distance
+from .mixability import evaluate_mixability
 
 
 DEFAULT_SETTINGS = {
@@ -239,24 +240,18 @@ def _public_cue(cue: dict[str, Any]) -> dict[str, Any]:
 
 
 def _pair_score(prev: dict[str, Any], next_track: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-    tempo = _tempo_score(prev, next_track)
-    cue = (_cue_rank_score(_best_cue(prev, "out")) + _cue_rank_score(_best_cue(next_track, "in"))) / 200
-    rhythm = (_handoff(prev)["grooveQuality"] + _handoff(next_track)["grooveQuality"]) / 2
-    vocal = _vocal_safety(prev, next_track)
-    bass = _bass_safety(prev, next_track)
-    harmonic = _harmonic_score(prev, next_track)
-    energy = _energy_flow_score(prev, next_track, settings)
-    score = (
-        tempo * 0.24
-        + cue * 0.18
-        + rhythm * 0.16
-        + vocal * 0.14
-        + bass * 0.12
-        + harmonic * 0.10
-        + energy * 0.06
-    )
+    mixability = evaluate_mixability(prev, next_track, profile="handoff", settings=settings)
+    components = mixability["components"]
+    tempo = _unit(components["tempo"])
+    cue = _unit(components["cue"])
+    rhythm = _unit(components["rhythm"])
+    vocal = _unit(components["vocal"])
+    bass = _unit(components["bass"])
+    harmonic = _unit(components["harmonic"])
+    energy = _unit(components["energy"])
     return {
-        "score": _clamp(score, 0.0, 1.0) * 100,
+        "score": mixability["score"],
+        "rawScore": mixability["rawScore"],
         "tempo": tempo,
         "cue": cue,
         "rhythmBedQuality": rhythm,
@@ -264,6 +259,7 @@ def _pair_score(prev: dict[str, Any], next_track: dict[str, Any], settings: dict
         "bassSafety": bass,
         "harmonic": harmonic,
         "energy": energy,
+        "mixability": mixability,
         "components": {
             "tempo": tempo,
             "cue": cue,
@@ -274,6 +270,10 @@ def _pair_score(prev: dict[str, Any], next_track: dict[str, Any], settings: dict
             "energyFlow": energy,
         },
     }
+
+
+def _unit(component: dict[str, Any]) -> float:
+    return _clamp(_float(component.get("score"), 0.0) / 100.0, 0.0, 1.0)
 
 
 def _transition_type(pair: dict[str, Any], prev: dict[str, Any], next_track: dict[str, Any]) -> str:

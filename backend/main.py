@@ -13,6 +13,7 @@ from .api.tracks import router as tracks_router
 from .auto_handoff import build_auto_handoff_plan
 from .matching import evaluate_track_match
 from .mashup import analyze_mashup_tracks, build_mashup_plan, render_mashup_plan
+from .mixability import order_tracks_by_mixability
 from .mixing import render_mix
 from .repair import MatchRepairOptions, repair_track_for_match
 from .seamless import generate_seamless_transition
@@ -59,6 +60,13 @@ class AutoHandoffPlanRequest(BaseModel):
     trackIds: list[str]
     tracks: list[dict] = []
     settings: dict = {}
+
+
+class MixabilityOrderRequest(BaseModel):
+    trackIds: list[str]
+    tracks: list[dict] = []
+    settings: dict = {}
+    mode: str = "recommended"
 
 
 class MashupAnalyzeRequest(BaseModel):
@@ -191,6 +199,30 @@ def auto_handoff_plan(request: AutoHandoffPlanRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Auto handoff planning failed: {exc}") from exc
+
+
+@app.post("/api/mixability/order")
+def mixability_order(request: MixabilityOrderRequest) -> dict:
+    if request.mode not in {"recommended", "harmonic"}:
+        raise HTTPException(status_code=400, detail="mode must be recommended or harmonic")
+    by_id = {track["id"]: track for track in request.tracks if track.get("id")}
+    metas = []
+    for track_id in request.trackIds:
+        meta_path = UPLOAD_DIR / f"{track_id}.json"
+        if meta_path.exists():
+            meta = read_json(meta_path)
+            meta.update(by_id.get(track_id, {}))
+        elif track_id in by_id:
+            meta = by_id[track_id]
+        else:
+            raise HTTPException(status_code=404, detail=f"Track not found: {track_id}")
+        metas.append(meta)
+    try:
+        return order_tracks_by_mixability(metas, mode=request.mode, settings=request.settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mixability ordering failed: {exc}") from exc
 
 
 @app.post("/api/transition-preview")

@@ -316,28 +316,25 @@ def evaluate_track_match(track_a: dict[str, Any], track_b: dict[str, Any]) -> di
 
 
 def evaluate_direction(prev_track: dict[str, Any], next_track: dict[str, Any]) -> dict[str, Any]:
+    from .mixability import evaluate_mixability
+
+    mixability = evaluate_mixability(prev_track, next_track, profile="pair_match")
+    components = mixability["components"]
     prev_camelot = _track_camelot(prev_track)
     next_camelot = _track_camelot(next_track)
-    key_eval = camelot_key_distance(prev_camelot, next_camelot)
-    bpm_eval = bpm_match_score(prev_track.get("bpm"), next_track.get("bpm"))
-    energy_eval = energy_match_score(prev_track, next_track)
-    structure_eval = structure_match_score(prev_track, next_track)
-    style_eval = style_match_score(prev_track, next_track)
-
-    raw_total = round(
-        key_eval["score"] * 0.40
-        + bpm_eval["score"] * 0.25
-        + energy_eval["score"] * 0.15
-        + structure_eval["score"] * 0.10
-        + style_eval["score"] * 0.10,
-        1,
-    )
-    total = adjusted_total_score(raw_total, key_eval, bpm_eval, energy_eval, structure_eval, style_eval)
+    key_eval = components["harmonic"]
+    bpm_eval = components["tempo"]
+    energy_eval = components["energy"]
+    structure_eval = components["structure"]
+    style_eval = components["style"]
+    raw_total = mixability["rawScore"]
+    total = mixability["score"]
     return {
         "direction": f"{prev_track.get('name', 'A')} -> {next_track.get('name', 'B')}",
         "total_score": total,
         "raw_total_score": raw_total,
-        "level": total_rank(total, key_eval, bpm_eval, energy_eval, structure_eval, style_eval),
+        "level": mixability["level"],
+        "mixability": mixability,
         "components": {
             "camelot": {
                 **key_eval,
@@ -421,23 +418,14 @@ def energy_match_score(track_a: dict[str, Any], track_b: dict[str, Any]) -> dict
 
 
 def structure_match_score(prev_track: dict[str, Any], next_track: dict[str, Any]) -> dict[str, Any]:
-    transition = recommend_transition(prev_track, next_track)
-    seconds = transition["seconds"]
-    if seconds >= 24:
-        score = 96
-    elif seconds >= 16:
-        score = 88
-    elif seconds >= 8:
-        score = 76
-    elif seconds >= 4:
-        score = 58
-    else:
-        score = 35
+    from .mixability import structure_compatibility
+
+    result = structure_compatibility(prev_track, next_track)
     return {
-        "score": score,
-        "overlap_seconds": seconds,
-        "phrase_bars": transition["phrase_bars"],
-        "reason": "Scores whether the previous outro and next intro can carry a phrase-length overlap.",
+        "score": result["score"],
+        "overlap_seconds": result["overlapSeconds"],
+        "phrase_bars": result["phraseBars"],
+        "reason": result["reason"],
     }
 
 
