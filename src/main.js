@@ -45,6 +45,12 @@ const state = {
     maxComplexity: 3,
     previews: {},
     loadingPreviewId: null,
+    mixability: {
+      key: "",
+      loading: false,
+      recommendations: {},
+      error: "",
+    },
   },
   autoHandoff: {
     loading: false,
@@ -1076,6 +1082,7 @@ async function uploadAndAnalyze(track) {
     track.mode = result.mode;
     track.energy = result.energy || 0;
     track.energy_profile = result.energy_profile || null;
+    track.analysis_quality = result.analysis_quality || null;
     applyTrackStyle(track, result);
     track.energy_curve = result.energy_curve || result.transition_candidates?.energy_curve || null;
     track.vocal_density_curve = result.vocal_density_curve || result.transition_candidates?.vocal_density_curve || null;
@@ -1155,6 +1162,20 @@ function applyLocalFallbackAnalysis(track, error) {
   track.mode = key.mode;
   track.energy = envelope.energy;
   track.energy_profile = envelope.energyProfile;
+  track.analysis_quality = {
+    overall: 38,
+    level: "low",
+    components: {
+      beatGrid: { score: track.bpm ? 35 : 20, reason: "browser fallback BPM estimate" },
+      downbeat: { score: 15, reason: "no downbeat tracking in browser fallback" },
+      structure: { score: 25, reason: "no section analysis in browser fallback" },
+      cue: { score: 35, reason: "energy-only fallback cue" },
+      key: { score: track.camelot ? 45 : 25, reason: "browser fallback key estimate" },
+      loudness: { score: 45, reason: "RMS loudness approximation" },
+    },
+    warnings: ["backend analysis unavailable; using browser fallback"],
+    method: "browser-fallback-analysis-quality",
+  };
   applyTrackStyle(track, estimateLocalStyle(track.bpm, envelope.energy, envelope.energyProfile));
   track.energy_curve = null;
   track.vocal_density_curve = null;
@@ -1517,6 +1538,8 @@ function applyMixabilityTransitionCues(orderResult, byId) {
       phraseBars: transition.phraseBars,
       summary: transition.summary,
       components: transition.components,
+      transitionQuality: transition.transitionQuality,
+      degradedTransition: transition.degradedTransition,
       outgoingCue: transition.outgoingCue,
       incomingCue: transition.incomingCue,
     };
@@ -1570,6 +1593,7 @@ function serializableTrackForBackend(track) {
     introPoint: track.introPoint,
     outroPoint: track.outroPoint,
     energy_profile: track.energy_profile,
+    analysis_quality: track.analysis_quality,
     transition_candidates: track.transition_candidates,
     bars: track.bars,
     phrases: track.phrases,
@@ -2356,6 +2380,7 @@ function exportableTrack(track) {
     beat_confidence: track.beat_confidence || 0,
     energy: track.energy,
     energy_profile: track.energy_profile,
+    analysis_quality: track.analysis_quality,
     energy_curve: track.energy_curve,
     vocal_density_curve: track.vocal_density_curve,
     sections: track.sections,
@@ -3134,6 +3159,7 @@ function removeTrack(localId) {
 
 function selectTrack(localId) {
   state.selectedId = localId;
+  state.teaching.mixability.key = "";
   render();
 }
 
@@ -3147,6 +3173,7 @@ function syncTeachingSettings() {
   state.teaching.targetEnergy = els.teachingEnergy.value;
   state.teaching.beginnerMode = els.teachingBeginner.checked;
   state.teaching.maxComplexity = Number(els.teachingComplexity.value) || 3;
+  state.teaching.mixability.key = "";
   renderTeachingPanel();
 }
 
@@ -3168,11 +3195,7 @@ async function generateTeachingPreview(nextId) {
     setStatus("需要先上传并完成后端分析，才能生成真实过渡试听");
     return;
   }
-  const rec = recommendTransition(toTeachingAnalysis(current), toTeachingAnalysis(next), {
-    targetEnergy: state.teaching.targetEnergy,
-    beginnerMode: state.teaching.beginnerMode,
-    maxComplexity: state.teaching.maxComplexity,
-  })[0];
+  const rec = teachingRecommendationFor(current, next);
   state.teaching.loadingPreviewId = nextId;
   renderTeachingPanel();
   try {
@@ -3220,11 +3243,7 @@ async function applyTeachingRecommendation(nextId) {
   const current = selectedTrack()?.status === "ready" ? selectedTrack() : playableTracks()[0];
   const next = state.tracks.find((track) => track.localId === nextId);
   if (!current || !next || current.localId === next.localId) return;
-  const rec = recommendTransition(toTeachingAnalysis(current), toTeachingAnalysis(next), {
-    targetEnergy: state.teaching.targetEnergy,
-    beginnerMode: state.teaching.beginnerMode,
-    maxComplexity: state.teaching.maxComplexity,
-  })[0];
+  const rec = teachingRecommendationFor(current, next);
   let preview = teachingPreviewFor(nextId, current.localId);
   if (!preview) {
     setStatus("先生成无缝试听，确保使用和导出走同一份过渡音频");
@@ -4381,6 +4400,8 @@ function renderDeckMixer() {
         <span>Confidence ${Math.round((transition.plan?.confidence || 0) * 100)}%</span>
         ${mixability ? `<span>${escapeHtml(formatMixabilityLabel(mixability))}</span>` : ""}
         ${mixability ? `<span>${escapeHtml(formatMixabilityRisks(mixability.components))}</span>` : ""}
+        ${mixability?.transitionQuality ? `<span>${escapeHtml(formatTransitionQuality(mixability.transitionQuality))}</span>` : ""}
+        ${mixability?.degradedTransition?.degraded ? `<span>${escapeHtml(formatDegradedTransition(mixability.degradedTransition))}</span>` : ""}
       </div>
     </div>
     ${[renderDeck("A", transition.prev), renderDeck("B", transition.next)].join("")}
@@ -4402,6 +4423,16 @@ function formatMixabilityRisks(components = {}) {
   return weak.length ? `Watch ${weak.join(", ")}` : "No major weak component";
 }
 
+function formatTransitionQuality(quality) {
+  const score = Math.round(Number(quality?.score) || 0);
+  const warning = quality?.warnings?.[0] ? ` · ${quality.warnings[0]}` : "";
+  return `Quality ${quality?.level || "--"} ${score}${warning}`;
+}
+
+function formatDegradedTransition(degraded) {
+  return `Auto ${methodLabel(degraded?.method)} · ${degraded?.reason || "safer fallback"}`;
+}
+
 function renderDeck(label, item) {
   const track = item.track;
   const mixer = ensureTrackMixer(track);
@@ -4415,6 +4446,7 @@ function renderDeck(label, item) {
       <div class="deck-stats">
         <span>${track.bpm || "--"} BPM</span>
         <span>${track.camelot || track.key || "--"}</span>
+        ${track.analysis_quality ? `<span>Analysis ${escapeHtml(track.analysis_quality.level || "--")} ${Math.round(Number(track.analysis_quality.overall) || 0)}</span>` : ""}
         <span>${formatTime(item.start)} → ${formatTime(item.end)}</span>
       </div>
       ${renderMixerSlider(track.localId, "gain", "Gain", mixer.gain, 0, 1.4, 0.01, `${Math.round(mixer.gain * 100)}%`)}
@@ -4446,13 +4478,15 @@ function renderTeachingPanel() {
   }
 
   const currentAnalysis = toTeachingAnalysis(current);
-  const candidateAnalyses = tracks.filter((track) => track.localId !== current.localId).map(toTeachingAnalysis);
-  const recommendations = recommendNextTracks(currentAnalysis, candidateAnalyses, {
+  const candidateTracks = tracks.filter((track) => track.localId !== current.localId);
+  ensureTeachingMixability(current, candidateTracks);
+  const candidateAnalyses = candidateTracks.map(toTeachingAnalysis);
+  const recommendations = mergeTeachingMixability(recommendNextTracks(currentAnalysis, candidateAnalyses, {
     targetEnergy: state.teaching.targetEnergy,
     beginnerMode: state.teaching.beginnerMode,
     maxComplexity: state.teaching.maxComplexity,
-    maxResults: 4,
-  });
+    maxResults: Math.max(4, candidateAnalyses.length),
+  })).slice(0, 4);
 
   els.teachingContent.innerHTML = `
     <div class="teaching-current">
@@ -4464,6 +4498,8 @@ function renderTeachingPanel() {
         <span>${current.bpm || "--"} BPM</span>
         <span>${escapeHtml(current.camelot || current.key || "--")}</span>
         <span>OUT ${formatTime(current.outroPoint)}</span>
+        ${state.teaching.mixability.loading ? "<span>Mixability...</span>" : ""}
+        ${state.teaching.mixability.error ? `<span>${escapeHtml(state.teaching.mixability.error)}</span>` : ""}
       </div>
     </div>
     <div class="teaching-grid">
@@ -4472,9 +4508,77 @@ function renderTeachingPanel() {
   `;
 }
 
+function teachingMixabilityKey(current, candidates) {
+  return [
+    current?.id || "",
+    candidates.map((track) => track.id).sort().join(","),
+    state.teaching.targetEnergy,
+    state.teaching.beginnerMode ? "beginner" : "free",
+    state.teaching.maxComplexity,
+  ].join("|");
+}
+
+async function ensureTeachingMixability(current, candidates) {
+  if (!state.teaching.open || state.teaching.mixability.loading) return;
+  if (!current?.id || !candidates.length || !candidates.every((track) => track.id)) return;
+  const key = teachingMixabilityKey(current, candidates);
+  if (state.teaching.mixability.key === key) return;
+  state.teaching.mixability = {
+    key,
+    loading: true,
+    recommendations: {},
+    error: "",
+  };
+  try {
+    const result = await fetchJson("/api/mixability/recommend-next", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        currentTrackId: current.id,
+        candidateTrackIds: candidates.map((track) => track.id),
+        tracks: [current, ...candidates].map((track) => serializableTrackForBackend(track)),
+        settings: {
+          targetEnergy: state.teaching.targetEnergy,
+          phraseBars: state.settings.phraseBars,
+        },
+        limit: Math.max(5, candidates.length),
+      }),
+    });
+    state.teaching.mixability = {
+      key,
+      loading: false,
+      recommendations: Object.fromEntries((result.recommendations || []).map((item) => [item.trackId, item])),
+      error: "",
+    };
+  } catch (error) {
+    state.teaching.mixability = {
+      key,
+      loading: false,
+      recommendations: {},
+      error: "Mixability 暂不可用",
+    };
+  }
+  renderTeachingPanel();
+}
+
+function mergeTeachingMixability(recommendations) {
+  const byTrackId = state.teaching.mixability.recommendations || {};
+  return recommendations
+    .map((item) => {
+      const target = state.tracks.find((track) => track.localId === item.track.id);
+      const mixability = target?.id ? byTrackId[target.id] : null;
+      return mixability ? { ...item, mixability, totalScore: Math.max(item.totalScore, (Number(mixability.score) || 0) / 100) } : item;
+    })
+    .sort((a, b) => {
+      const scoreA = a.mixability ? Number(a.mixability.score) : a.totalScore * 100;
+      const scoreB = b.mixability ? Number(b.mixability.score) : b.totalScore * 100;
+      return scoreB - scoreA;
+    });
+}
+
 function renderTeachingCard(item, index) {
   const target = state.tracks.find((track) => track.localId === item.track.id);
-  const rec = item.bestTransition;
+  const rec = target ? applyMixabilityToRecommendation(item.bestTransition, item.mixability) : item.bestTransition;
   const explanation = explainTransition(rec);
   const preview = teachingPreviewFor(item.track.id);
   const effective = effectiveTeachingCue(rec, preview);
@@ -4486,7 +4590,7 @@ function renderTeachingCard(item, index) {
           <span class="tiny-label">Recommendation ${index + 1}</span>
           <strong>${escapeHtml(methodLabel(rec.method))}</strong>
         </div>
-        <b>${Math.round(item.totalScore * 100)}</b>
+        <b>${Math.round(item.mixability?.score ?? item.totalScore * 100)}</b>
       </div>
       <div class="teaching-pair">
         <span class="${effective.adjusted ? "cue-adjusted" : ""}">A OUT ${formatTime(effective.outgoingTime)}</span>
@@ -4494,6 +4598,7 @@ function renderTeachingCard(item, index) {
         <span>Overlap ${formatTime(effective.overlapDuration)}</span>
         <span>难度 ${rec.difficulty}/5</span>
       </div>
+      ${item.mixability ? renderTeachingMixability(item.mixability) : ""}
       ${effective.adjusted ? renderCueAdjustmentNote(rec, effective) : ""}
       <h3 title="${escapeHtml(target?.name || item.track.title)}">${escapeHtml(target?.name || item.track.title)}</h3>
       ${renderTeachingDebug(rec.debug)}
@@ -4508,6 +4613,71 @@ function renderTeachingCard(item, index) {
         <button type="button" data-teaching-apply="${escapeHtml(item.track.id)}">使用这个接法</button>
       </div>
     </article>
+  `;
+}
+
+function teachingRecommendationFor(current, next) {
+  const rec = recommendTransition(toTeachingAnalysis(current), toTeachingAnalysis(next), {
+    targetEnergy: state.teaching.targetEnergy,
+    beginnerMode: state.teaching.beginnerMode,
+    maxComplexity: state.teaching.maxComplexity,
+  })[0];
+  return applyMixabilityToRecommendation(rec, teachingMixabilityForTrack(next));
+}
+
+function teachingMixabilityForTrack(track) {
+  return track?.id ? state.teaching.mixability.recommendations?.[track.id] : null;
+}
+
+function applyMixabilityToRecommendation(rec, mixability) {
+  if (!rec || !mixability) return rec;
+  const outgoingTime = Number(mixability.outgoingCue?.time);
+  const incomingTime = Number(mixability.incomingCue?.time);
+  const duration = Number(mixability.durationSec);
+  const nextRec = {
+    ...rec,
+    outgoingCue: Number.isFinite(outgoingTime)
+      ? {
+          ...rec.outgoingCue,
+          time: outgoingTime,
+          confidence: clamp((Number(mixability.outgoingCue?.score) || rec.outgoingCue.confidence * 100) / 100, 0, 1),
+        }
+      : rec.outgoingCue,
+    incomingCue: Number.isFinite(incomingTime)
+      ? {
+          ...rec.incomingCue,
+          time: incomingTime,
+          confidence: clamp((Number(mixability.incomingCue?.score) || rec.incomingCue.confidence * 100) / 100, 0, 1),
+        }
+      : rec.incomingCue,
+    overlapDuration: Number.isFinite(duration) && duration > 0 ? duration : rec.overlapDuration,
+    reason: `${rec.reason} Mixability ${Math.round(Number(mixability.score) || 0)}: ${mixability.summary || "backend pair score"}`,
+  };
+  const degraded = mixability.degradedTransition;
+  if (!degraded?.degraded) return nextRec;
+  const maxOverlap = Number(degraded.maxOverlapSec);
+  return {
+    ...nextRec,
+    method: degraded.method || nextRec.method,
+    overlapDuration: Number.isFinite(maxOverlap) ? Math.min(nextRec.overlapDuration, maxOverlap) : nextRec.overlapDuration,
+    reason: `${nextRec.reason} 已按转场质量自动降级：${degraded.reason || "safer transition"}`,
+    debug: nextRec.debug
+      ? {
+          ...nextRec.debug,
+          reasons: [...(nextRec.debug.reasons || []), degraded.reason || "transition quality fallback"],
+        }
+      : nextRec.debug,
+  };
+}
+
+function renderTeachingMixability(mixability) {
+  return `
+    <div class="teaching-risk">
+      ${escapeHtml(formatMixabilityLabel(mixability))}
+      · ${escapeHtml(formatMixabilityRisks(mixability.components))}
+      ${mixability.transitionQuality ? ` · ${escapeHtml(formatTransitionQuality(mixability.transitionQuality))}` : ""}
+      ${mixability.degradedTransition?.degraded ? ` · ${escapeHtml(formatDegradedTransition(mixability.degradedTransition))}` : ""}
+    </div>
   `;
 }
 

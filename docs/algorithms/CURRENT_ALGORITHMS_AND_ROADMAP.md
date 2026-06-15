@@ -303,6 +303,16 @@ tempo + beat_grid + phrase + key + energy + vocal + bass + style + novelty
 - 前端 `recommended` / `harmonic` 排序已优先调用后端 Mixability 排序；后端不可用时回退原本地排序。
 - Mixability 排序结果已返回并写回每段推荐的 outgoing/incoming cue，排序后会直接影响时间线预览和导出锚点。
 - 时间线当前转场和 Deck Mixer 已显示 Mixability 分数及低分风险组件，方便调试排序原因。
+- 已新增 `POST /api/mixability/recommend-next`，教学推荐会用后端 Mixability 结果重排候选歌曲。
+- 教学卡片、无缝试听生成和“使用这个接法”已复用 Mixability 推荐的 cue 与 overlap，让推荐分数、试听和时间线应用保持一致。
+- 后端单曲分析已新增 `analysis_quality`，输出 beatGrid、downbeat、structure、cue、key、loudness 组件质量与整体等级。
+- Mixability 的 rhythm/structure 评分已参考 `analysis_quality`，避免在 beat grid 或结构识别不可靠时过度推荐长过渡。
+- Deck Mixer 已展示当前曲目的 Analysis 等级和整体分数，便于判断推荐是否建立在可靠分析上。
+- Mixability 已新增 `transitionQuality`，输出 beat grid drift、tempo stretch、人声/低频冲突、分析质量下限等转场质量指标。
+- 排序结果、教学推荐和 Deck Mixer 已展示 `transitionQuality` 等级及首条风险提示，作为后续 cue accuracy / beat drift 评测入口。
+- Mixability 已新增 `degradedTransition`，当 beat drift、tempo stretch、人声/低频冲突或分析质量风险过高时，会建议降级为 `echo_out`、`quick_cut`、`breakdown_switch` 或 `bass_swap`。
+- Smart Beat Handoff 和教学推荐已读取 `degradedTransition`，低质量长混音会自动改用更安全的过渡类型和更短 overlap。
+- 已新增 `POST /api/mixability/evaluate-transitions`，可批量评估当前相邻转场的 cue drift、transitionQuality 和自动降级结果。
 - 新模块保留旧 API 字段名，例如 `phrase_bars`、`overlap_seconds`、`normalized_bpm_b`，避免前端 Pair Match 面板被重构影响。
 
 建议任务：

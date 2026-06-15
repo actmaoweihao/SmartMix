@@ -9,40 +9,46 @@ from .transition import plan_transition
 
 
 PAIR_MATCH_WEIGHTS = {
-    "harmonic": 0.40,
-    "tempo": 0.25,
-    "energy": 0.15,
-    "structure": 0.10,
-    "style": 0.10,
+    "harmonic": 0.34,
+    "tempo": 0.22,
+    "energy": 0.13,
+    "structure": 0.09,
+    "style": 0.08,
+    "cue": 0.07,
+    "alignment": 0.07,
 }
 
 HANDOFF_WEIGHTS = {
-    "tempo": 0.24,
-    "cue": 0.18,
-    "rhythm": 0.16,
-    "vocal": 0.14,
-    "bass": 0.12,
+    "tempo": 0.21,
+    "cue": 0.14,
+    "alignment": 0.14,
+    "rhythm": 0.14,
+    "vocal": 0.13,
+    "bass": 0.10,
     "harmonic": 0.10,
-    "energy": 0.06,
+    "energy": 0.04,
 }
 
 SORT_RECOMMENDED_WEIGHTS = {
-    "tempo": 0.32,
-    "harmonic": 0.24,
-    "energy": 0.14,
-    "cue": 0.10,
-    "structure": 0.08,
+    "tempo": 0.28,
+    "harmonic": 0.21,
+    "energy": 0.12,
+    "cue": 0.09,
+    "alignment": 0.11,
+    "structure": 0.07,
     "vocal": 0.05,
     "bass": 0.04,
     "style": 0.03,
 }
 
 SORT_HARMONIC_WEIGHTS = {
-    "harmonic": 0.45,
-    "tempo": 0.18,
+    "harmonic": 0.40,
+    "tempo": 0.16,
     "energy": 0.10,
-    "structure": 0.09,
+    "structure": 0.08,
     "cue": 0.08,
+    "alignment": 0.08,
+    "rhythm": 0.08,
     "vocal": 0.04,
     "bass": 0.03,
     "style": 0.03,
@@ -58,11 +64,13 @@ def evaluate_mixability(
 ) -> dict[str, Any]:
     """Score how safely and musically prev_track can hand off to next_track."""
     settings = settings or {}
+    cue = cue_compatibility(prev_track, next_track)
     components = {
         "tempo": tempo_compatibility(prev_track, next_track),
-        "cue": cue_compatibility(prev_track, next_track),
+        "cue": cue,
+        "alignment": alignment_compatibility(prev_track, next_track, cue),
         "rhythm": rhythm_compatibility(prev_track, next_track),
-        "vocal": vocal_safety(prev_track, next_track),
+        "vocal": vocal_safety(prev_track, next_track, cue),
         "bass": bass_safety(prev_track, next_track),
         "harmonic": harmonic_compatibility(prev_track, next_track),
         "energy": energy_continuity(prev_track, next_track, settings),
@@ -71,7 +79,9 @@ def evaluate_mixability(
     }
     weights = _weights_for_profile(profile)
     raw_score = sum(components[key]["score"] * weight for key, weight in weights.items())
-    adjusted = _adjust_score(raw_score, components)
+    transition_quality = transition_quality_report(prev_track, next_track, components)
+    adjusted = _adjust_score(raw_score, components, transition_quality)
+    degraded_transition = degraded_transition_plan(components, transition_quality)
     return {
         "profile": profile,
         "score": round(float(adjusted), 1),
@@ -79,6 +89,8 @@ def evaluate_mixability(
         "level": rank_mixability(adjusted, components),
         "weights": weights,
         "components": components,
+        "transitionQuality": transition_quality,
+        "degradedTransition": degraded_transition,
         "summary": _summary(adjusted, components),
     }
 
@@ -115,6 +127,8 @@ def order_tracks_by_mixability(
                 "durationSec": score["components"]["structure"].get("overlapSeconds"),
                 "phraseBars": score["components"]["structure"].get("phraseBars"),
                 "transitionPlan": score["components"]["structure"].get("transition"),
+                "transitionQuality": score.get("transitionQuality"),
+                "degradedTransition": score.get("degradedTransition"),
                 "components": _compact_components(score["components"]),
                 "summary": score["summary"],
             }
@@ -125,6 +139,77 @@ def order_tracks_by_mixability(
         "profile": profile,
         "orderedTrackIds": [track["id"] for track in ordered],
         "score": round(float(np.mean(score_values)) if score_values else 0.0, 1),
+        "transitions": transitions,
+    }
+
+
+def recommend_next_by_mixability(
+    current_track: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    settings: dict[str, Any] | None = None,
+    limit: int = 5,
+) -> dict[str, Any]:
+    scored = []
+    for candidate in candidates:
+        if candidate.get("id") == current_track.get("id"):
+            continue
+        score = evaluate_mixability(current_track, candidate, profile="handoff", settings=settings)
+        scored.append(
+            {
+                "trackId": candidate.get("id"),
+                "trackName": candidate.get("name"),
+                "score": score["score"],
+                "level": score["level"],
+                "outgoingCue": score["components"]["cue"].get("outgoing"),
+                "incomingCue": score["components"]["cue"].get("incoming"),
+                "durationSec": score["components"]["structure"].get("overlapSeconds"),
+                "phraseBars": score["components"]["structure"].get("phraseBars"),
+                "transitionQuality": score.get("transitionQuality"),
+                "degradedTransition": score.get("degradedTransition"),
+                "components": _compact_components(score["components"]),
+                "summary": score["summary"],
+            }
+        )
+    scored.sort(key=lambda item: float(item["score"]), reverse=True)
+    return {
+        "currentTrackId": current_track.get("id"),
+        "recommendations": scored[: max(1, int(limit))],
+    }
+
+
+def evaluate_transition_sequence(
+    tracks: list[dict[str, Any]],
+    *,
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if len(tracks) < 2:
+        raise ValueError("At least two tracks are required for transition evaluation.")
+    transitions = []
+    for index in range(1, len(tracks)):
+        prev = tracks[index - 1]
+        next_track = tracks[index]
+        score = evaluate_mixability(prev, next_track, profile="handoff", settings=settings)
+        quality = score["transitionQuality"]
+        transitions.append(
+            {
+                "fromTrackId": prev.get("id"),
+                "toTrackId": next_track.get("id"),
+                "fromName": prev.get("name"),
+                "toName": next_track.get("name"),
+                "mixabilityScore": score["score"],
+                "transitionQuality": quality,
+                "degradedTransition": score["degradedTransition"],
+                "outgoingCue": score["components"]["cue"].get("outgoing"),
+                "incomingCue": score["components"]["cue"].get("incoming"),
+                "components": _compact_components(score["components"]),
+            }
+        )
+    quality_scores = [float(item["transitionQuality"]["score"]) for item in transitions]
+    return {
+        "count": len(transitions),
+        "averageQuality": round(float(np.mean(quality_scores)) if quality_scores else 0.0, 1),
+        "lowQualityCount": sum(1 for value in quality_scores if value < 58),
         "transitions": transitions,
     }
 
@@ -184,9 +269,12 @@ def rhythm_compatibility(prev_track: dict[str, Any], next_track: dict[str, Any])
     next_grid = beat_grid_confidence(next_track)
     prev_groove = groove_quality(prev_track)
     next_groove = groove_quality(next_track)
+    quality = min(analysis_quality_component(prev_track, "beatGrid"), analysis_quality_component(next_track, "beatGrid"))
     score = (prev_grid * 0.35 + next_grid * 0.35 + prev_groove * 0.15 + next_groove * 0.15) * 100
+    score = score * (0.78 + quality * 0.22)
     return {
         "score": round(_clamp(score, 0.0, 100.0), 1),
+        "analysisQuality": round(quality, 3),
         "gridConfidence": round(min(prev_grid, next_grid), 3),
         "prevGrid": round(prev_grid, 3),
         "nextGrid": round(next_grid, 3),
@@ -196,9 +284,44 @@ def rhythm_compatibility(prev_track: dict[str, Any], next_track: dict[str, Any])
     }
 
 
-def vocal_safety(prev_track: dict[str, Any], next_track: dict[str, Any]) -> dict[str, Any]:
-    out_time = cue_compatibility(prev_track, next_track)["outgoing"]["time"]
-    in_time = cue_compatibility(prev_track, next_track)["incoming"]["time"]
+def alignment_compatibility(prev_track: dict[str, Any], next_track: dict[str, Any], cue: dict[str, Any]) -> dict[str, Any]:
+    outgoing_time = _float((cue.get("outgoing") or {}).get("time"), math.nan)
+    incoming_time = _float((cue.get("incoming") or {}).get("time"), math.nan)
+    outgoing_drift = cue_grid_drift_ms(prev_track, outgoing_time)
+    incoming_drift = cue_grid_drift_ms(next_track, incoming_time)
+    drift_values = [value for value in (outgoing_drift, incoming_drift) if value is not None]
+    if not drift_values:
+        quality = min(analysis_quality_component(prev_track, "beatGrid"), analysis_quality_component(next_track, "beatGrid"))
+        score = 52.0 * (0.82 + quality * 0.18)
+        return {
+            "score": round(_clamp(score, 0.0, 100.0), 1),
+            "beatGridDriftMs": None,
+            "outgoingCueDriftMs": None,
+            "incomingCueDriftMs": None,
+            "reason": "Beat/bar anchors are unavailable; alignment confidence is conservative.",
+        }
+    drift_ms = max(drift_values)
+    outgoing_alignment = _cue_metric(cue.get("outgoing"), "phraseAlignment", alignment_score(prev_track, outgoing_time))
+    incoming_alignment = _cue_metric(cue.get("incoming"), "phraseAlignment", alignment_score(next_track, incoming_time))
+    phrase_alignment = (outgoing_alignment + incoming_alignment) / 2.0
+    quality = min(analysis_quality_component(prev_track, "beatGrid"), analysis_quality_component(next_track, "beatGrid"))
+    drift_score = _clamp(100.0 - max(0.0, drift_ms - 25.0) / 2.1, 0.0, 100.0)
+    score = drift_score * 0.66 + phrase_alignment * 100.0 * 0.24 + quality * 100.0 * 0.10
+    return {
+        "score": round(_clamp(score, 0.0, 100.0), 1),
+        "beatGridDriftMs": round(float(drift_ms), 1),
+        "outgoingCueDriftMs": round(float(outgoing_drift), 1) if outgoing_drift is not None else None,
+        "incomingCueDriftMs": round(float(incoming_drift), 1) if incoming_drift is not None else None,
+        "phraseAlignment": round(float(phrase_alignment), 3),
+        "analysisQuality": round(float(quality), 3),
+        "reason": "Scores whether both cue points land close to beat/bar/phrase anchors.",
+    }
+
+
+def vocal_safety(prev_track: dict[str, Any], next_track: dict[str, Any], cue: dict[str, Any] | None = None) -> dict[str, Any]:
+    cue = cue or cue_compatibility(prev_track, next_track)
+    out_time = cue["outgoing"]["time"]
+    in_time = cue["incoming"]["time"]
     prev_vocal = curve_value(_vocal_curve(prev_track), out_time, "density", track_vocal_density(prev_track))
     next_vocal = curve_value(_vocal_curve(next_track), in_time, "density", track_vocal_density(next_track))
     stem_penalty = max(_stem_vocal_risk(prev_track, out_time), _stem_vocal_risk(next_track, in_time)) * 22
@@ -289,8 +412,11 @@ def structure_compatibility(prev_track: dict[str, Any], next_track: dict[str, An
         score = 35.0
     confidence = float(transition.get("confidence") or 0.0)
     score = score * 0.82 + confidence * 100 * 0.18
+    quality = min(analysis_quality_component(prev_track, "structure"), analysis_quality_component(next_track, "structure"))
+    score = score * (0.82 + quality * 0.18)
     return {
         "score": round(_clamp(score, 0.0, 100.0), 1),
+        "analysisQuality": round(quality, 3),
         "overlap_seconds": seconds,
         "phrase_bars": transition.get("phrase_bars", 0),
         "overlapSeconds": seconds,
@@ -306,6 +432,156 @@ def style_compatibility(prev_track: dict[str, Any], next_track: dict[str, Any]) 
 
     result = style_match_score(prev_track, next_track)
     return {**result, "score": round(float(result.get("score", 62.0)), 1)}
+
+
+def analysis_quality_component(track: dict[str, Any], component: str | None = None) -> float:
+    quality = track.get("analysis_quality") or {}
+    if component:
+        item = (quality.get("components") or {}).get(component) or {}
+        return _clamp(_float(item.get("score"), 62.0) / 100.0, 0.0, 1.0)
+    return _clamp(_float(quality.get("overall"), 62.0) / 100.0, 0.0, 1.0)
+
+
+def transition_quality_report(prev_track: dict[str, Any], next_track: dict[str, Any], components: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    cue = components.get("cue") or {}
+    tempo = components.get("tempo") or {}
+    alignment = components.get("alignment") or {}
+    vocal = components.get("vocal") or {}
+    bass = components.get("bass") or {}
+    structure = components.get("structure") or {}
+    outgoing_time = _float((cue.get("outgoing") or {}).get("time"), math.nan)
+    incoming_time = _float((cue.get("incoming") or {}).get("time"), math.nan)
+    outgoing_drift = alignment.get("outgoingCueDriftMs")
+    incoming_drift = alignment.get("incomingCueDriftMs")
+    beat_grid_drift_ms = alignment.get("beatGridDriftMs")
+    stretch_ratio = _float(tempo.get("stretchRatio"), 1.0)
+    tempo_stretch_percent = abs(stretch_ratio - 1.0) * 100.0
+    analysis_quality = min(analysis_quality_component(prev_track), analysis_quality_component(next_track))
+    vocal_conflict = _clamp(1.0 - _float(vocal.get("score"), 0.0) / 100.0, 0.0, 1.0)
+    bass_conflict = _clamp(1.0 - _float(bass.get("score"), 0.0) / 100.0, 0.0, 1.0)
+    structure_score = _float(structure.get("score"), 0.0) / 100.0
+
+    drift_penalty = 18.0 if beat_grid_drift_ms is None else min(28.0, beat_grid_drift_ms / 12.0)
+    tempo_penalty = max(0.0, tempo_stretch_percent - 3.0) * 3.2
+    score = 100.0
+    score -= drift_penalty
+    score -= min(24.0, tempo_penalty)
+    score -= vocal_conflict * 18.0
+    score -= bass_conflict * 12.0
+    score -= (1.0 - analysis_quality) * 18.0
+    score -= (1.0 - structure_score) * 10.0
+    score = _clamp(score, 0.0, 100.0)
+
+    warnings = []
+    if beat_grid_drift_ms is None:
+        warnings.append("cue grid drift unavailable")
+    elif beat_grid_drift_ms > 180:
+        warnings.append(f"cue grid drift {round(beat_grid_drift_ms)}ms")
+    if tempo_stretch_percent > 6:
+        warnings.append(f"tempo stretch {tempo_stretch_percent:.1f}%")
+    if vocal_conflict > 0.45:
+        warnings.append("vocal overlap risk")
+    if bass_conflict > 0.28:
+        warnings.append("bass conflict risk")
+    if analysis_quality < 0.55:
+        warnings.append("low analysis quality")
+
+    return {
+        "score": round(float(score), 1),
+        "level": transition_quality_level(score),
+        "metrics": {
+            "beatGridDriftMs": round(float(beat_grid_drift_ms), 1) if beat_grid_drift_ms is not None else None,
+            "outgoingCueDriftMs": round(float(outgoing_drift), 1) if outgoing_drift is not None else None,
+            "incomingCueDriftMs": round(float(incoming_drift), 1) if incoming_drift is not None else None,
+            "tempoStretchPercent": round(float(tempo_stretch_percent), 2),
+            "vocalConflict": round(float(vocal_conflict), 3),
+            "bassConflict": round(float(bass_conflict), 3),
+            "analysisQuality": round(float(analysis_quality), 3),
+            "structureScore": round(float(structure_score), 3),
+            "alignmentScore": round(_float(alignment.get("score"), 0.0) / 100.0, 3),
+        },
+        "warnings": warnings[:5],
+        "method": "smartmix-transition-quality-v1",
+    }
+
+
+def degraded_transition_plan(components: dict[str, dict[str, Any]], quality: dict[str, Any]) -> dict[str, Any]:
+    metrics = quality.get("metrics") or {}
+    warnings = list(quality.get("warnings") or [])
+    quality_score = _float(quality.get("score"), 60.0)
+    tempo_stretch = _float(metrics.get("tempoStretchPercent"), 0.0)
+    beat_drift = metrics.get("beatGridDriftMs")
+    vocal_conflict = _float(metrics.get("vocalConflict"), 0.0)
+    bass_conflict = _float(metrics.get("bassConflict"), 0.0)
+    analysis_quality = _float(metrics.get("analysisQuality"), 0.62)
+    structure_score = _float(components.get("structure", {}).get("score"), 60.0)
+
+    method = "beatmix"
+    max_overlap = _float(components.get("structure", {}).get("overlapSeconds"), 8.0)
+    reason = "quality supports phrase-aware blend"
+    degraded = False
+
+    if quality_score < 45 or analysis_quality < 0.42:
+        method = "echo_out"
+        max_overlap = min(max_overlap, 4.0)
+        reason = "analysis quality is too low for a long beatmatched blend"
+        degraded = True
+    elif tempo_stretch > 8 or (isinstance(beat_drift, (int, float)) and beat_drift > 260):
+        method = "echo_out"
+        max_overlap = min(max_overlap, 4.0)
+        reason = "tempo or cue grid drift is high; use effect-tail handoff"
+        degraded = True
+    elif vocal_conflict > 0.58:
+        method = "quick_cut"
+        max_overlap = min(max_overlap, 2.5)
+        reason = "vocal overlap risk is high; avoid long simultaneous vocals"
+        degraded = True
+    elif bass_conflict > 0.34:
+        method = "bass_swap"
+        max_overlap = min(max_overlap, 8.0)
+        reason = "low-end conflict requires bass-swap automation"
+        degraded = True
+    elif structure_score < 58 or quality_score < 60:
+        method = "breakdown_switch"
+        max_overlap = min(max_overlap, 6.0)
+        reason = "structure/cue confidence is moderate; prefer a shorter section switch"
+        degraded = True
+    elif tempo_stretch > 5:
+        method = "breakdown_switch"
+        max_overlap = min(max_overlap, 6.0)
+        reason = "tempo stretch is noticeable; prefer a shorter musical switch"
+        degraded = True
+
+    if degraded and reason not in warnings:
+        warnings.insert(0, reason)
+
+    return {
+        "degraded": degraded,
+        "method": method,
+        "maxOverlapSec": round(float(max(1.5, max_overlap)), 2),
+        "reason": reason,
+        "warnings": warnings[:5],
+    }
+
+
+def cue_grid_drift_ms(track: dict[str, Any], cue_time: float) -> float | None:
+    if not math.isfinite(cue_time):
+        return None
+    anchors = []
+    for key in ("phrases", "bars", "beats"):
+        anchors.extend(float(value) for value in track.get(key) or [] if _is_number(value))
+    if not anchors:
+        return None
+    nearest = min(abs(cue_time - anchor) for anchor in anchors)
+    return float(nearest * 1000.0)
+
+
+def transition_quality_level(score: float) -> str:
+    if score >= 78:
+        return "high"
+    if score >= 58:
+        return "medium"
+    return "low"
 
 
 def cues_for_direction(track: dict[str, Any], direction: str) -> list[dict[str, Any]]:
@@ -373,6 +649,13 @@ def public_cue(cue: dict[str, Any]) -> dict[str, Any]:
         "reasons": cue.get("reasons") or [],
         "metrics": cue.get("metrics") or {},
     }
+
+
+def _cue_metric(cue: Any, key: str, fallback: float) -> float:
+    if not isinstance(cue, dict):
+        return _clamp(fallback, 0.0, 1.0)
+    metrics = cue.get("metrics") or {}
+    return _clamp(_float(metrics.get(key), fallback), 0.0, 1.0)
 
 
 def rank_mixability(score: float, components: dict[str, dict[str, Any]] | None = None) -> str:
@@ -492,7 +775,7 @@ def direction_for_role(role: str) -> str | None:
     return None
 
 
-def _adjust_score(raw_score: float, components: dict[str, dict[str, Any]]) -> float:
+def _adjust_score(raw_score: float, components: dict[str, dict[str, Any]], quality: dict[str, Any] | None = None) -> float:
     score = float(raw_score)
     harmonic = components["harmonic"]
     if harmonic.get("relation") == "clash":
@@ -505,20 +788,43 @@ def _adjust_score(raw_score: float, components: dict[str, dict[str, Any]]) -> fl
         score = min(score, 84.0)
     if harmonic.get("relation") == "jaws_mix":
         score = min(score, 79.0)
-    for key, ceiling in (("tempo", 84.0), ("structure", 84.0), ("vocal", 86.0)):
+    for key, ceiling in (("tempo", 84.0), ("alignment", 82.0), ("structure", 84.0), ("vocal", 86.0)):
         if float(components[key].get("score") or 0) < 60:
             score = min(score, ceiling)
     if float(components["energy"].get("score") or 0) < 60:
         score = min(score, 89.0)
     if components["style"].get("relation") == "contrast":
         score = min(score, 86.0)
+    if quality:
+        metrics = quality.get("metrics") or {}
+        quality_score = _float(quality.get("score"), 60.0)
+        beat_drift = metrics.get("beatGridDriftMs")
+        tempo_stretch = _float(metrics.get("tempoStretchPercent"), 0.0)
+        vocal_conflict = _float(metrics.get("vocalConflict"), 0.0)
+        analysis_quality = _float(metrics.get("analysisQuality"), 0.62)
+        if quality_score < 45:
+            score = min(score, 58.0)
+        elif quality_score < 58:
+            score = min(score, 70.0)
+        if isinstance(beat_drift, (int, float)) and beat_drift > 260:
+            score = min(score, 62.0)
+        elif isinstance(beat_drift, (int, float)) and beat_drift > 180:
+            score = min(score, 72.0)
+        if tempo_stretch > 8:
+            score = min(score, 64.0)
+        elif tempo_stretch > 6:
+            score = min(score, 74.0)
+        if vocal_conflict > 0.58:
+            score = min(score, 66.0)
+        if analysis_quality < 0.42:
+            score = min(score, 60.0)
     return _clamp(score, 0.0, 100.0)
 
 
 def _summary(score: float, components: dict[str, dict[str, Any]]) -> str:
     weak = [
         key
-        for key in ("tempo", "cue", "rhythm", "vocal", "bass", "harmonic", "energy", "structure", "style")
+        for key in ("tempo", "cue", "alignment", "rhythm", "vocal", "bass", "harmonic", "energy", "structure", "style")
         if float(components[key].get("score") or 0) < 65
     ]
     if not weak:

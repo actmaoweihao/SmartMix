@@ -13,10 +13,10 @@ from .api.tracks import router as tracks_router
 from .auto_handoff import build_auto_handoff_plan
 from .matching import evaluate_track_match
 from .mashup import analyze_mashup_tracks, build_mashup_plan, render_mashup_plan
-from .mixability import order_tracks_by_mixability
 from .mixing import render_mix
 from .repair import MatchRepairOptions, repair_track_for_match
 from .seamless import generate_seamless_transition
+from .services.mixability_service import mixability_service
 from .services.tracks import read_track_meta, save_and_analyze_upload
 from .storage import EXPORT_DIR, UPLOAD_DIR, ensure_dirs, read_json, write_json
 
@@ -67,6 +67,20 @@ class MixabilityOrderRequest(BaseModel):
     tracks: list[dict] = []
     settings: dict = {}
     mode: str = "recommended"
+
+
+class MixabilityRecommendRequest(BaseModel):
+    currentTrackId: str
+    candidateTrackIds: list[str]
+    tracks: list[dict] = []
+    settings: dict = {}
+    limit: int = 5
+
+
+class MixabilityEvaluateRequest(BaseModel):
+    trackIds: list[str]
+    tracks: list[dict] = []
+    settings: dict = {}
 
 
 class MashupAnalyzeRequest(BaseModel):
@@ -203,26 +217,43 @@ def auto_handoff_plan(request: AutoHandoffPlanRequest) -> dict:
 
 @app.post("/api/mixability/order")
 def mixability_order(request: MixabilityOrderRequest) -> dict:
-    if request.mode not in {"recommended", "harmonic"}:
-        raise HTTPException(status_code=400, detail="mode must be recommended or harmonic")
-    by_id = {track["id"]: track for track in request.tracks if track.get("id")}
-    metas = []
-    for track_id in request.trackIds:
-        meta_path = UPLOAD_DIR / f"{track_id}.json"
-        if meta_path.exists():
-            meta = read_json(meta_path)
-            meta.update(by_id.get(track_id, {}))
-        elif track_id in by_id:
-            meta = by_id[track_id]
-        else:
-            raise HTTPException(status_code=404, detail=f"Track not found: {track_id}")
-        metas.append(meta)
     try:
-        return order_tracks_by_mixability(metas, mode=request.mode, settings=request.settings)
+        metas = mixability_service.resolve_tracks(request.trackIds, request.tracks)
+        return mixability_service.order_tracks(metas, mode=request.mode, settings=request.settings)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Mixability ordering failed: {exc}") from exc
+
+
+@app.post("/api/mixability/recommend-next")
+def mixability_recommend_next(request: MixabilityRecommendRequest) -> dict:
+    try:
+        metas_by_id = mixability_service.resolve_track_map([request.currentTrackId, *request.candidateTrackIds], request.tracks)
+        current = metas_by_id[request.currentTrackId]
+        candidates = [metas_by_id[track_id] for track_id in request.candidateTrackIds if track_id in metas_by_id]
+        return mixability_service.recommend_next(current, candidates, settings=request.settings, limit=request.limit)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mixability recommendation failed: {exc}") from exc
+
+
+@app.post("/api/mixability/evaluate-transitions")
+def mixability_evaluate_transitions(request: MixabilityEvaluateRequest) -> dict:
+    try:
+        metas = mixability_service.resolve_tracks(request.trackIds, request.tracks)
+        return mixability_service.evaluate_sequence(metas, settings=request.settings)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transition evaluation failed: {exc}") from exc
 
 
 @app.post("/api/transition-preview")

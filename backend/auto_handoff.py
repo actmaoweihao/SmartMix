@@ -277,6 +277,17 @@ def _unit(component: dict[str, Any]) -> float:
 
 
 def _transition_type(pair: dict[str, Any], prev: dict[str, Any], next_track: dict[str, Any]) -> str:
+    degraded = (pair.get("mixability") or {}).get("degradedTransition") or {}
+    if degraded.get("degraded"):
+        method = degraded.get("method")
+        if method == "quick_cut":
+            return "vocal_safe_bridge"
+        if method == "bass_swap":
+            return "bass_swap_handoff"
+        if method == "breakdown_switch":
+            return "percussive_loop_bridge"
+        if method == "echo_out":
+            return "effect_tail_handoff"
     grid = min(_handoff(prev)["gridConfidence"], _handoff(next_track)["gridConfidence"])
     if pair["tempo"] < 0.45 or grid < 0.32:
         return "effect_tail_handoff"

@@ -43,6 +43,8 @@ def analyze_audio(path: Path) -> dict:
     loudness = loudness_metrics(y, sr)
     candidates = _transition_candidates(y, sr, duration, beat_grid["bars"], energy, bpm)
     candidates = _merge_cue_detr_candidates(path, candidates, duration, bpm)
+    camelot = key_label_to_camelot(key["label"], key["mode"])
+    analysis_quality = _analysis_quality(duration, bpm, beat_grid, key, camelot, loudness, candidates)
 
     return {
         "duration": duration,
@@ -53,7 +55,7 @@ def analyze_audio(path: Path) -> dict:
         "downbeat_offset": beat_grid["downbeat_offset"],
         "beat_confidence": beat_grid["confidence"],
         "key": key["label"],
-        "camelot": key_label_to_camelot(key["label"], key["mode"]),
+        "camelot": camelot,
         "key_index": key["index"],
         "mode": key["mode"],
         "energy": energy["energy"],
@@ -67,6 +69,7 @@ def analyze_audio(path: Path) -> dict:
         "loudness_lufs": loudness["lufs"],
         "true_peak_db": loudness["peak_db"],
         "transition_candidates": candidates,
+        "analysis_quality": analysis_quality,
         "sections": candidates.get("sections", []),
         "vocal_density_curve": candidates.get("vocal_density_curve", []),
         "energy_curve": candidates.get("energy_curve", []),
@@ -845,6 +848,122 @@ def _merge_cue_detr_candidates(path: Path, candidates: dict, duration: float, bp
             "mergedCount": len(additions),
         },
     }
+
+
+def _analysis_quality(
+    duration: float,
+    bpm: float | None,
+    beat_grid: dict,
+    key: dict,
+    camelot: str | None,
+    loudness: dict,
+    candidates: dict,
+) -> dict:
+    beats = beat_grid.get("beats") or []
+    bars = beat_grid.get("bars") or []
+    sections = candidates.get("sections") or []
+    cues = candidates.get("cue_candidates") or []
+    components = {
+        "beatGrid": _beat_grid_quality(duration, bpm, beats, bars, float(beat_grid.get("confidence") or 0)),
+        "downbeat": _downbeat_quality(beats, bars, float(beat_grid.get("confidence") or 0)),
+        "structure": _structure_quality(sections, candidates),
+        "cue": _cue_quality(cues, candidates),
+        "key": _key_quality(key, camelot),
+        "loudness": _loudness_quality(loudness),
+    }
+    weights = {
+        "beatGrid": 0.26,
+        "downbeat": 0.16,
+        "structure": 0.18,
+        "cue": 0.22,
+        "key": 0.10,
+        "loudness": 0.08,
+    }
+    overall = sum(components[name]["score"] * weight for name, weight in weights.items())
+    warnings = []
+    for name, item in components.items():
+        if item["score"] < 55:
+            warnings.append(f"{name}: {item['reason']}")
+    return {
+        "overall": round(float(overall), 1),
+        "level": _quality_level(overall),
+        "components": components,
+        "warnings": warnings[:6],
+        "method": "smartmix-analysis-quality-v1",
+    }
+
+
+def _beat_grid_quality(duration: float, bpm: float | None, beats: list[float], bars: list[float], confidence: float) -> dict:
+    if not bpm or not beats:
+        return {"score": 20.0, "reason": "beat tracking unavailable"}
+    expected_beats = duration / max(60 / float(bpm), 1e-6)
+    coverage = _clamp01(len(beats) / max(expected_beats, 1.0))
+    regularity = 0.45
+    if len(beats) >= 8:
+        diffs = np.diff(np.asarray(beats, dtype=float))
+        median = float(np.median(diffs)) if diffs.size else 0.0
+        jitter = float(np.median(np.abs(diffs - median)) / max(median, 1e-6)) if median else 0.5
+        regularity = _clamp01(1.0 - jitter * 4.0)
+    bar_bonus = 0.12 if len(bars) >= 8 else 0.0
+    score = (confidence * 0.34 + coverage * 0.24 + regularity * 0.30 + bar_bonus) * 100
+    return {"score": round(float(_clamp01(score / 100) * 100), 1), "reason": "beat coverage and grid regularity"}
+
+
+def _downbeat_quality(beats: list[float], bars: list[float], confidence: float) -> dict:
+    if len(beats) < 8 or len(bars) < 2:
+        return {"score": 25.0, "reason": "not enough beats/bars for downbeat confidence"}
+    bar_ratio = _clamp01(len(bars) / max(len(beats) / 4, 1.0))
+    score = (confidence * 0.72 + bar_ratio * 0.28) * 100
+    return {"score": round(float(score), 1), "reason": "heuristic downbeat offset confidence"}
+
+
+def _structure_quality(sections: list[dict], candidates: dict) -> dict:
+    if not sections:
+        return {"score": 25.0, "reason": "no structural sections"}
+    confidences = [float(item.get("confidence") or 0.35) for item in sections if isinstance(item, dict)]
+    base = float(np.mean(confidences)) if confidences else 0.35
+    method = str(candidates.get("method") or "")
+    method_bonus = 0.12 if method == "cue-detection-v2" else -0.08 if "fallback" in method else 0.0
+    diversity = len({str(item.get("type")) for item in sections if isinstance(item, dict)}) / 7
+    score = _clamp01(base * 0.70 + diversity * 0.18 + method_bonus) * 100
+    return {"score": round(float(score), 1), "reason": f"{method or 'unknown'} sections"}
+
+
+def _cue_quality(cues: list[dict], candidates: dict) -> dict:
+    if not cues:
+        return {"score": 20.0, "reason": "no cue candidates"}
+    best_in = max([float(cue.get("score") or 0) for cue in cues if cue.get("role") in {"mix_in", "drop", "drum_loop"}] or [0])
+    best_out = max([float(cue.get("score") or 0) for cue in cues if cue.get("role") in {"mix_out", "bridge", "vocal_safe"}] or [0])
+    role_count = len({str(cue.get("role")) for cue in cues})
+    coverage = _clamp01(role_count / 6)
+    confidence = float(candidates.get("confidence") or 0.35) * 100
+    score = best_in * 0.32 + best_out * 0.32 + confidence * 0.22 + coverage * 100 * 0.14
+    return {"score": round(float(score), 1), "reason": "best in/out cue scores and role coverage"}
+
+
+def _key_quality(key: dict, camelot: str | None) -> dict:
+    if not camelot or key.get("index") is None:
+        return {"score": 35.0, "reason": "key or Camelot unknown"}
+    return {"score": 72.0, "reason": "template chroma key estimate"}
+
+
+def _loudness_quality(loudness: dict) -> dict:
+    lufs = loudness.get("lufs")
+    peak = loudness.get("peak_db")
+    if not isinstance(lufs, (int, float)) or not math.isfinite(float(lufs)):
+        return {"score": 35.0, "reason": "LUFS unavailable"}
+    score = 72.0
+    if isinstance(peak, (int, float)) and math.isfinite(float(peak)) and float(peak) > -0.2:
+        score -= 12
+    return {"score": round(score, 1), "reason": "LUFS and peak metrics available"}
+
+
+def _quality_level(score: float) -> str:
+    if score >= 78:
+        return "high"
+    if score >= 58:
+        return "medium"
+    return "low"
 
 
 def _features_from_transition_curves(candidates: dict, duration: float) -> list[dict]:
