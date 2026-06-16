@@ -22,6 +22,7 @@ from ..services.stem_separation import demucs_available, separate_demucs_stems
 from ..tuning import (
     analyze_tuned_output,
     normalize_camelot,
+    render_playback_transform,
     render_harmonic_tune,
 )
 
@@ -50,6 +51,12 @@ class TuneTrackRequest(BaseModel):
     device: str = "auto"
 
 
+class PlaybackTransformRequest(BaseModel):
+    speed: float = 1.0
+    pitchSemitones: float = 0.0
+    preserveFormants: bool = True
+
+
 @router.post("")
 async def upload_track(file: UploadFile = File(...)) -> dict:
     return save_and_analyze_upload(file)
@@ -59,6 +66,33 @@ async def upload_track(file: UploadFile = File(...)) -> dict:
 def track_audio(track_id: str) -> FileResponse:
     payload = read_track_meta(track_id)
     return FileResponse(payload["path"], media_type=payload.get("content_type") or "audio/mpeg", filename=payload["name"])
+
+
+@router.post("/{track_id}/playback-transform")
+def playback_transform(track_id: str, request: PlaybackTransformRequest) -> dict:
+    meta = read_track_meta(track_id)
+    if request.speed < 0.5 or request.speed > 1.5:
+        raise HTTPException(status_code=400, detail="speed must be between 0.5 and 1.5")
+    if request.pitchSemitones < -12 or request.pitchSemitones > 12:
+        raise HTTPException(status_code=400, detail="pitchSemitones must be between -12 and 12")
+
+    try:
+        result = render_playback_transform(
+            Path(meta["path"]),
+            track_id=track_id,
+            speed=request.speed,
+            pitch_semitones=request.pitchSemitones,
+            preserve_formants=request.preserveFormants,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Playback transform failed: {exc}") from exc
+
+    return {
+        "url": f"/api/exports/{result['filename']}",
+        **result,
+    }
 
 
 @router.post("/{track_id}/stems")

@@ -1,5 +1,13 @@
 import "./styles.css";
 import { API_BASE_URL as API, apiUrl, fetchJson } from "./api/client";
+import {
+  DEFAULT_REALTIME_PITCH_TEMPO_TRANSFORM,
+  createRealtimePitchTempoEngine,
+  isRealtimePitchTempoActive,
+  realtimePitchRatio,
+  realtimeSpeed,
+  realtimeTimelineSeconds,
+} from "./audio/realtimePitchTempo";
 import { explainTransition } from "./explain/explainTransition";
 import { normalizeStyle, scoreStyleCompatibility, styleDistance, styleFamily, styleLabel } from "./analysis/style";
 import { recommendNextTracks, recommendTransition } from "./transitions/recommend";
@@ -18,6 +26,10 @@ const state = {
   timer: null,
   isPlaying: false,
   isExporting: false,
+  playbackTransform: {
+    ...DEFAULT_REALTIME_PITCH_TEMPO_TRANSFORM,
+    loading: false,
+  },
   view: "studio",
   projects: [],
   workflow: {
@@ -227,6 +239,30 @@ app.innerHTML = `
           <label><span>High</span><input id="eqHigh" type="range" min="-1" max="1" value="0" step="0.05" /></label>
         </div>
         </details>
+
+        <section class="control-section playback-transform-controls">
+          <div class="section-title">
+            <span class="tiny-label">Realtime Preview</span>
+            <strong>实时变速变调</strong>
+          </div>
+          <label class="toggle"><input id="playbackTransformEnabled" type="checkbox" /><span>启用实时预听</span></label>
+          <label class="field">
+            <span>速度 <b id="playbackSpeedValue">正常</b></span>
+            <input id="playbackSpeed" type="range" min="0.5" max="1.5" value="1" step="0.01" />
+          </label>
+          <div class="speed-presets" aria-label="速度预设">
+            <button type="button" data-speed-preset="0.8">0.8x</button>
+            <button type="button" data-speed-preset="1">正常</button>
+            <button type="button" data-speed-preset="1.2">1.2x</button>
+          </div>
+          <label class="field">
+            <span>升降调 <b id="playbackPitchValue">正常</b></span>
+            <input id="playbackPitch" type="range" min="-12" max="12" value="0" step="1" />
+          </label>
+          <label class="toggle"><input id="preserveFormants" type="checkbox" checked /><span>保留人声 formant</span></label>
+          <div class="pitch-labels"><span>降调</span><span>正常</span><span>升调</span></div>
+          <small id="playbackTransformStatus" class="transform-status">改速度不改音调，改音调不改速度。</small>
+        </section>
 
         <div class="button-row">
           <button id="sortButton" type="button">应用排序</button>
@@ -540,6 +576,13 @@ const els = {
   eqLow: document.querySelector("#eqLow"),
   eqMid: document.querySelector("#eqMid"),
   eqHigh: document.querySelector("#eqHigh"),
+  playbackTransformEnabled: document.querySelector("#playbackTransformEnabled"),
+  playbackSpeed: document.querySelector("#playbackSpeed"),
+  playbackSpeedValue: document.querySelector("#playbackSpeedValue"),
+  playbackPitch: document.querySelector("#playbackPitch"),
+  playbackPitchValue: document.querySelector("#playbackPitchValue"),
+  preserveFormants: document.querySelector("#preserveFormants"),
+  playbackTransformStatus: document.querySelector("#playbackTransformStatus"),
   sortButton: document.querySelector("#sortButton"),
   autoHandoffButton: document.querySelector("#autoHandoffButton"),
   autoHandoffPanel: document.querySelector("#autoHandoffPanel"),
@@ -597,6 +640,15 @@ const wave = {
   ctx: els.waveCanvas.getContext("2d"),
   dragging: null,
 };
+
+const realtimePitchTempoEngine = createRealtimePitchTempoEngine({
+  setStatus,
+  onFallback: () => {
+    if (state.isPlaying) scheduleLivePreviewRefresh();
+  },
+  resolveTrackUrl: (track) => apiUrl(`/api/tracks/${track.id}/audio`),
+  createProcessingChain: createPreviewProcessingChain,
+});
 
 bindEvents();
 pingBackend();
@@ -693,6 +745,16 @@ function bindEvents() {
   els.filterMode.addEventListener("change", syncSettings);
   els.exportFormat.addEventListener("change", syncSettings);
   [els.eqLow, els.eqMid, els.eqHigh].forEach((input) => input.addEventListener("input", syncSettings));
+  els.playbackTransformEnabled.addEventListener("change", syncPlaybackTransformSettings);
+  els.playbackSpeed.addEventListener("input", syncPlaybackTransformSettings);
+  els.playbackPitch.addEventListener("input", syncPlaybackTransformSettings);
+  els.preserveFormants.addEventListener("change", syncPlaybackTransformSettings);
+  document.querySelectorAll("[data-speed-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      els.playbackSpeed.value = button.dataset.speedPreset;
+      syncPlaybackTransformSettings();
+    });
+  });
 
   els.mixProgress.addEventListener("input", () => {
     state.playbackOffset = Number(els.mixProgress.value);
@@ -760,6 +822,43 @@ function syncSettings() {
   if (state.isPlaying && scheduleSettingsChanged(previousScheduleSettings)) {
     scheduleLivePreviewRefresh();
   }
+}
+
+function syncPlaybackTransformSettings() {
+  state.playbackTransform.enabled = els.playbackTransformEnabled.checked;
+  state.playbackTransform.speed = Number(els.playbackSpeed.value) || 1;
+  state.playbackTransform.pitchSemitones = Number(els.playbackPitch.value) || 0;
+  state.playbackTransform.preserveFormants = els.preserveFormants.checked;
+  renderPlaybackTransformControls();
+  if (state.isPlaying) {
+    applyLivePlaybackTransform();
+    scheduleLivePreviewRefresh();
+  }
+}
+
+function renderPlaybackTransformControls() {
+  if (!els.playbackSpeedValue) return;
+  const speed = state.playbackTransform.speed;
+  const pitch = state.playbackTransform.pitchSemitones;
+  els.playbackTransformEnabled.checked = state.playbackTransform.enabled;
+  els.playbackSpeed.value = String(speed);
+  els.playbackPitch.value = String(pitch);
+  els.preserveFormants.checked = state.playbackTransform.preserveFormants;
+  els.playbackSpeedValue.textContent = Math.abs(speed - 1) < 0.001 ? "正常" : `${speed.toFixed(2)}x`;
+  els.playbackPitchValue.textContent = pitch === 0 ? "正常" : `${pitch > 0 ? "+" : ""}${pitch} st`;
+  const active = playbackTransformActive();
+  els.playbackTransformStatus.textContent = state.playbackTransform.loading
+    ? "Rubber Band 正在生成试听缓存..."
+    : active
+      ? "实时预听已启用，拖动滑杆会快速影响后续播放。"
+      : "改速度不改音调，改音调不改速度。";
+  document.querySelectorAll("[data-speed-preset]").forEach((button) => {
+    button.classList.toggle("active", Math.abs(Number(button.dataset.speedPreset) - speed) < 0.001);
+  });
+}
+
+function applyLivePlaybackTransform() {
+  realtimePitchTempoEngine.updateControllers(state.activeSources, state.playbackTransform);
 }
 
 async function pingBackend() {
@@ -1859,19 +1958,87 @@ function camelotRelation(codeA, codeB) {
 async function previewMix(offset = 0) {
   const tracks = playableTracks().filter((track) => track.buffer);
   if (!tracks.length) return;
+  let useRealtimeEngine = playbackTransformActive() && !realtimePitchTempoEngine.failed;
+  let context;
+  try {
+    context = useRealtimeEngine ? await realtimePitchTempoEngine.getAudioContext() : await getAudioContext();
+  } catch {
+    useRealtimeEngine = false;
+    context = await getAudioContext();
+  }
+  useRealtimeEngine = useRealtimeEngine && !realtimePitchTempoEngine.failed;
   stopStemDebugger({ keepStatus: true });
   stopPreview({ keepStatus: true });
-  const context = await getAudioContext();
   const timeline = buildTimeline(tracks);
-  const started = scheduleMix(context, tracks, timeline, Math.min(offset, timeline.total));
+  const safeOffset = Math.min(offset, timeline.total);
+  let started = 0;
+  if (useRealtimeEngine) {
+    const scheduled = await realtimePitchTempoEngine.scheduleTimeline({
+      timeline,
+      offset: safeOffset,
+      transform: state.playbackTransform,
+    });
+    state.activeSources.push(...scheduled.controllers);
+    state.activeNodes.push(...scheduled.nodes);
+    started = scheduled.started;
+  } else {
+    started = scheduleMix(context, tracks, timeline, safeOffset);
+  }
   if (!started) return;
   state.isPlaying = true;
   state.playStartContextTime = context.currentTime;
-  state.playStartOffset = offset;
-  state.playbackOffset = offset;
+  state.playStartOffset = safeOffset;
+  state.playbackOffset = safeOffset;
   state.timer = window.setInterval(tickPlayback, 80);
-  setStatus("正在预览混音");
+  setStatus(useRealtimeEngine ? "Superpowered 实时预听中" : "正在预览混音");
   render();
+}
+
+function createPreviewProcessingChain({ context, item, localStart, offset, sourceOffset, endAt }) {
+  const track = item.track;
+  const envelopeGain = context.createGain();
+  const renderedDuckGain = context.createGain();
+  const mixerGain = context.createGain();
+  const low = context.createBiquadFilter();
+  const mid = context.createBiquadFilter();
+  const high = context.createBiquadFilter();
+  const dynamicLow = context.createBiquadFilter();
+  const dynamicMid = context.createBiquadFilter();
+  const dynamicHigh = context.createBiquadFilter();
+  const transitionFilter = context.createBiquadFilter();
+  configureEq(track, low, mid, high, transitionFilter, context.currentTime);
+  configureDynamicEq(dynamicLow, dynamicMid, dynamicHigh);
+  low
+    .connect(mid)
+    .connect(high)
+    .connect(dynamicLow)
+    .connect(dynamicMid)
+    .connect(dynamicHigh)
+    .connect(transitionFilter)
+    .connect(envelopeGain)
+    .connect(renderedDuckGain)
+    .connect(mixerGain)
+    .connect(context.destination);
+  mixerGain.gain.setValueAtTime(ensureTrackMixer(track).gain, localStart);
+  applyPreviewEnvelope(item, envelopeGain.gain, transitionFilter, dynamicLow, dynamicMid, dynamicHigh, localStart, offset, sourceOffset);
+  renderedDuckGain.gain.setValueAtTime(1, localStart);
+  return {
+    input: low,
+    activeNode: {
+      trackId: track.localId,
+      mixerGain,
+      envelopeGain,
+      renderedDuckGain,
+      low,
+      mid,
+      high,
+      dynamicLow,
+      dynamicMid,
+      dynamicHigh,
+      transitionFilter,
+      endAt,
+    },
+  };
 }
 
 function scheduleMix(context, tracks, timeline, offset) {
@@ -1880,12 +2047,17 @@ function scheduleMix(context, tracks, timeline, offset) {
   let started = 0;
   timeline.items.forEach((item) => {
     if (item.end <= offset) return;
+    if (playbackTransformActive()) {
+      if (scheduleGranularItem(context, item, startAt, offset)) started += 1;
+      return;
+    }
     const track = item.track;
+    const buffer = playbackBufferForTrack(track);
     const sourceOffset = item.sourceStart + Math.max(0, offset - item.start);
-    if (sourceOffset >= track.buffer.duration) return;
+    if (sourceOffset >= buffer.duration) return;
 
     const source = context.createBufferSource();
-    source.buffer = track.buffer;
+    source.buffer = buffer;
     const envelopeGain = context.createGain();
     const renderedDuckGain = context.createGain();
     const mixerGain = context.createGain();
@@ -1939,6 +2111,128 @@ function scheduleMix(context, tracks, timeline, offset) {
   });
   started += scheduleRenderedTransitionPreviews(context, timeline, renderedRegions, startAt, offset);
   return started > 0;
+}
+
+function scheduleGranularItem(context, item, startAt, offset) {
+  const track = item.track;
+  const sourceOffset = item.sourceStart + Math.max(0, offset - item.start);
+  const originalOffset = sourceOffset * playbackSpeed();
+  if (originalOffset >= track.buffer.duration) return false;
+
+  const envelopeGain = context.createGain();
+  const renderedDuckGain = context.createGain();
+  const mixerGain = context.createGain();
+  const low = context.createBiquadFilter();
+  const mid = context.createBiquadFilter();
+  const high = context.createBiquadFilter();
+  const dynamicLow = context.createBiquadFilter();
+  const dynamicMid = context.createBiquadFilter();
+  const dynamicHigh = context.createBiquadFilter();
+  const transitionFilter = context.createBiquadFilter();
+  configureEq(track, low, mid, high, transitionFilter, context.currentTime);
+  configureDynamicEq(dynamicLow, dynamicMid, dynamicHigh);
+  low
+    .connect(mid)
+    .connect(high)
+    .connect(dynamicLow)
+    .connect(dynamicMid)
+    .connect(dynamicHigh)
+    .connect(transitionFilter)
+    .connect(envelopeGain)
+    .connect(renderedDuckGain)
+    .connect(mixerGain)
+    .connect(context.destination);
+
+  const localStart = startAt + Math.max(0, item.start - offset);
+  mixerGain.gain.setValueAtTime(ensureTrackMixer(track).gain, localStart);
+  applyPreviewEnvelope(item, envelopeGain.gain, transitionFilter, dynamicLow, dynamicMid, dynamicHigh, localStart, offset, sourceOffset);
+  renderedDuckGain.gain.setValueAtTime(1, localStart);
+
+  const controller = createGranularController({
+    context,
+    buffer: track.buffer,
+    destination: low,
+    startAt: localStart,
+    endAt: startAt + Math.max(0, item.end - offset),
+    sourceOffset: originalOffset,
+    speed: playbackSpeed(),
+    pitchRatio: pitchRatioForPlayback(),
+  });
+  controller.start();
+  state.activeSources.push(controller);
+  state.activeNodes.push({
+    source: controller,
+    trackId: track.localId,
+    mixerGain,
+    envelopeGain,
+    renderedDuckGain,
+    low,
+    mid,
+    high,
+    dynamicLow,
+    dynamicMid,
+    dynamicHigh,
+    transitionFilter,
+  });
+  return true;
+}
+
+function createGranularController({ context, buffer, destination, startAt, endAt, sourceOffset, speed, pitchRatio }) {
+  const scheduledSources = new Set();
+  let stopped = false;
+  let nextTime = startAt;
+  let nextSourceOffset = sourceOffset;
+  let timer = null;
+  const hop = 0.045;
+  const grainDuration = 0.12;
+  const attack = 0.018;
+  const lookahead = 0.34;
+
+  const schedule = () => {
+    if (stopped) return;
+    const horizon = context.currentTime + lookahead;
+    while (nextTime < horizon && nextTime < endAt && nextSourceOffset < buffer.duration) {
+      const source = context.createBufferSource();
+      const gain = context.createGain();
+      source.buffer = buffer;
+      source.playbackRate.setValueAtTime(pitchRatio, nextTime);
+      source.connect(gain).connect(destination);
+      gain.gain.setValueAtTime(0.0001, nextTime);
+      gain.gain.linearRampToValueAtTime(1, nextTime + attack);
+      gain.gain.setValueAtTime(1, Math.max(nextTime + attack, nextTime + grainDuration - attack));
+      gain.gain.linearRampToValueAtTime(0.0001, nextTime + grainDuration);
+      try {
+        source.start(nextTime, nextSourceOffset, grainDuration);
+      } catch {
+        break;
+      }
+      source.onended = () => scheduledSources.delete(source);
+      scheduledSources.add(source);
+      nextTime += hop;
+      nextSourceOffset += speed * hop;
+    }
+    if (nextTime < endAt && nextSourceOffset < buffer.duration) {
+      timer = window.setTimeout(schedule, 35);
+    }
+  };
+
+  return {
+    start() {
+      schedule();
+    },
+    stop() {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+      scheduledSources.forEach((source) => {
+        try {
+          source.stop();
+        } catch {
+          // Grain may already have ended.
+        }
+      });
+      scheduledSources.clear();
+    },
+  };
 }
 
 function configureEq(track, low, mid, high, transitionFilter, now) {
@@ -2076,12 +2370,12 @@ function scheduleLivePreviewRefresh() {
   state.liveRefreshTimer = window.setTimeout(() => {
     state.liveRefreshTimer = null;
     if (state.isPlaying) previewMix(state.playbackOffset);
-  }, 120);
+  }, playbackTransformActive() ? 35 : 120);
 }
 
 function applyPreviewEnvelope(item, param, filterNode, low, mid, high, startsAt, mixOffset, sourceOffset) {
   const track = item.track;
-  const endAt = startsAt + Math.max(0, track.buffer.duration - sourceOffset);
+  const endAt = startsAt + Math.max(0, item.end - Math.max(mixOffset, item.start));
   const elapsed = Math.max(0, mixOffset - item.start);
   const strategy = transitionStrategyForItem(item);
   const vocalHandoffIn = strategy === "vocalHandoff" && item.transitionIn;
@@ -2422,12 +2716,14 @@ function applySettingsToControls() {
   els.eqLow.value = state.settings.eq.low;
   els.eqMid.value = state.settings.eq.mid;
   els.eqHigh.value = state.settings.eq.high;
+  renderPlaybackTransformControls();
 }
 
 function buildTimeline(tracks = playableTracks()) {
   const items = [];
   tracks.forEach((track, index) => {
     ensureTrackMixer(track);
+    const duration = playbackTime(track.duration);
     if (index === 0) {
       items.push({
         track,
@@ -2435,7 +2731,7 @@ function buildTimeline(tracks = playableTracks()) {
         lane: 0,
         start: 0,
         sourceStart: 0,
-        end: track.duration,
+        end: duration,
         fadeIn: 0,
         fadeOut: 0,
         fadeOutStart: null,
@@ -2448,23 +2744,26 @@ function buildTimeline(tracks = playableTracks()) {
     const previous = tracks[index - 1];
     const previousItem = items[index - 1];
     const plan = planClientTransition(previous, track);
+    const scaledPlanSeconds = playbackTime(plan.seconds);
+    const scaledPrevOverlapStart = playbackTime(plan.prevOverlapStart);
+    const scaledNextOverlapStart = playbackTime(plan.nextOverlapStart);
     plan.prevTrack = previous;
     plan.nextTrack = track;
-    previousItem.fadeOut = plan.seconds;
-    previousItem.fadeOutStart = previousItem.start + Math.max(0, plan.prevOverlapStart - previousItem.sourceStart);
-    previousItem.end = Math.min(previousItem.end, previousItem.fadeOutStart + plan.seconds);
+    previousItem.fadeOut = scaledPlanSeconds;
+    previousItem.fadeOutStart = previousItem.start + Math.max(0, scaledPrevOverlapStart - previousItem.sourceStart);
+    previousItem.end = Math.min(previousItem.end, previousItem.fadeOutStart + scaledPlanSeconds);
     previousItem.transitionOut = plan;
 
     const start = previousItem.fadeOutStart;
-    const sourceStart = plan.nextOverlapStart;
+    const sourceStart = scaledNextOverlapStart;
     items.push({
       track,
       index,
       lane: index % 2,
       start,
       sourceStart,
-      end: start + Math.max(0, track.duration - sourceStart),
-      fadeIn: plan.seconds,
+      end: start + Math.max(0, duration - sourceStart),
+      fadeIn: scaledPlanSeconds,
       fadeOut: 0,
       fadeOutStart: null,
       transitionIn: plan,
@@ -2512,6 +2811,7 @@ function planClientTransition(prev, next) {
 }
 
 function renderedPreviewForTransition(prev, next) {
+  if (playbackTransformActive()) return null;
   const preview = teachingPreviewFor(next.localId, prev.localId);
   if (!preview?.buffer || !preview.timelineApplied) return null;
   const outgoingTime = Number(preview.outgoingCue?.time ?? preview.alignment?.outgoingExitTime);
@@ -2893,6 +3193,72 @@ async function hydrateTrackStems(track, result) {
       };
     }),
   );
+}
+
+async function ensurePlaybackTransformBuffers(tracks, context) {
+  if (!playbackTransformActive()) return true;
+  const key = playbackTransformKey();
+  const targets = tracks.filter((track) => track.id && track.playbackTransform?.key !== key);
+  if (!targets.length) return true;
+  state.playbackTransform.loading = true;
+  renderPlaybackTransformControls();
+  setStatus("Rubber Band 正在生成试听缓存...");
+  try {
+    for (const track of targets) {
+      const result = await fetchJson(`/api/tracks/${track.id}/playback-transform`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          speed: state.playbackTransform.speed,
+          pitchSemitones: state.playbackTransform.pitchSemitones,
+          preserveFormants: state.playbackTransform.preserveFormants,
+        }),
+      });
+      const response = await fetch(apiUrl(result.url));
+      if (!response.ok) throw new Error(`Rubber Band audio fetch failed for ${track.name}`);
+      const arrayBuffer = await response.arrayBuffer();
+      track.playbackTransform = {
+        key,
+        buffer: await context.decodeAudioData(arrayBuffer.slice(0)),
+        result,
+      };
+    }
+    setStatus("Rubber Band 试听缓存已就绪");
+    return true;
+  } catch (error) {
+    setStatus(error.message || "Rubber Band 处理失败");
+    return false;
+  } finally {
+    state.playbackTransform.loading = false;
+    renderPlaybackTransformControls();
+  }
+}
+
+function playbackTransformActive() {
+  return isRealtimePitchTempoActive(state.playbackTransform);
+}
+
+function playbackTransformKey() {
+  const transform = state.playbackTransform;
+  return `${transform.speed.toFixed(4)}:${Number(transform.pitchSemitones).toFixed(3)}:${transform.preserveFormants ? "F" : "N"}`;
+}
+
+function playbackSpeed() {
+  return realtimeSpeed(state.playbackTransform);
+}
+
+function pitchRatioForPlayback() {
+  return realtimePitchRatio(state.playbackTransform);
+}
+
+function playbackBufferForTrack(track) {
+  return playbackTransformActive() && track.playbackTransform?.key === playbackTransformKey()
+    ? track.playbackTransform.buffer
+    : track.buffer;
+}
+
+function playbackTime(seconds) {
+  return realtimeTimelineSeconds(seconds, state.playbackTransform);
 }
 
 function mergeTrackAnalysisMetadata(track, meta) {
@@ -3327,6 +3693,7 @@ function render() {
   renderWorkflowGuide();
   renderTable();
   renderTransport();
+  renderPlaybackTransformControls();
   renderMixTimeline();
   renderDeckMixer();
   renderAutoHandoffPanel();

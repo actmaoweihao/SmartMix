@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@superpoweredsdk/web':
+        specifier: 2.7.2
+        version: 2.7.2
     devDependencies:
       '@types/node':
         specifier: ^25.8.0
@@ -325,6 +329,9 @@ packages:
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
+  '@superpoweredsdk/web@2.7.2':
+    resolution: {integrity: sha512-2ZOZPl0H+lqPu2tJdbGBpAvcZxycMNjXO25odDqyhpa5FiYOIhOaYHvAgjAhQ201c6bfbHpAP6lWzQWPvjsZoA==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -814,6 +821,8 @@ snapshots:
     optional: true
 
   '@standard-schema/spec@1.1.0': {}
+
+  '@superpoweredsdk/web@2.7.2': {}
 
   '@types/chai@5.2.3':
     dependencies:

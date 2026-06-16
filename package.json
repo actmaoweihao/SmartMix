@@ -19,5 +19,8 @@
     "typescript": "^6.0.3",
     "vite": "^7.2.4",
     "vitest": "^4.1.6"
+  },
+  "dependencies": {
+    "@superpoweredsdk/web": "2.7.2"
   }
 }

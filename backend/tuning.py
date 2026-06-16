@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -221,6 +222,64 @@ def render_harmonic_tune(
         device=used_device,
         warnings=warnings,
     )
+
+
+def render_playback_transform(
+    input_path: Path,
+    *,
+    track_id: str,
+    speed: float,
+    pitch_semitones: float,
+    preserve_formants: bool = True,
+) -> dict[str, Any]:
+    command = _rubberband_command()
+    if not command:
+        raise RuntimeError("Rubber Band is not available. Install rubberband-r3 or rubberband and make sure it is on PATH.")
+
+    speed = float(speed)
+    pitch_semitones = float(pitch_semitones)
+    if abs(speed - 1.0) < 0.001 and abs(pitch_semitones) < 0.001:
+        raise RuntimeError("Playback transform is only needed when speed or pitch changes.")
+
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    signature = hashlib.sha1(
+        f"{input_path.resolve()}|{input_path.stat().st_mtime_ns}|{speed:.4f}|{pitch_semitones:.3f}|{int(preserve_formants)}".encode("utf-8")
+    ).hexdigest()[:14]
+    output_path = EXPORT_DIR / f"{track_id}_rubberband_{signature}.wav"
+    if output_path.exists():
+        return {
+            "filename": output_path.name,
+            "cached": True,
+            "engine": "rubberband",
+            "speed": round(speed, 4),
+            "pitchSemitones": round(pitch_semitones, 3),
+            "durationRatio": round(1.0 / speed, 6),
+        }
+
+    args = [command, "-3", "--fine"]
+    if abs(speed - 1.0) >= 0.001:
+        args.extend(["-t", f"{speed:.6f}"])
+    if abs(pitch_semitones) >= 0.001:
+        args.extend(["-p", f"{pitch_semitones:.6f}"])
+        if preserve_formants:
+            args.append("-F")
+    args.extend([str(input_path), str(output_path)])
+
+    try:
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as exc:
+        output_path.unlink(missing_ok=True)
+        detail = (exc.stderr or "").strip().splitlines()[-1:] or [str(exc)]
+        raise RuntimeError(f"Rubber Band failed: {detail[0]}") from exc
+
+    return {
+        "filename": output_path.name,
+        "cached": False,
+        "engine": "rubberband",
+        "speed": round(speed, 4),
+        "pitchSemitones": round(pitch_semitones, 3),
+        "durationRatio": round(1.0 / speed, 6),
+    }
 
 
 def analyze_tuned_output(result: TuningRenderResult, original_meta: dict[str, Any]) -> dict[str, Any]:
