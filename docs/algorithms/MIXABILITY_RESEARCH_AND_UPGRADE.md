@@ -54,57 +54,9 @@
 
 这样可以避免“其他维度很好，但实际会明显跑拍/撞人声”的候选被评为推荐。
 
-## 已补齐的两个增强项
-
-### 1. 学习型 cue 接入
-
-已新增 `backend/learned_cues.py`，把学习型 cue 抽成 provider：
-
-- CUE-DETR：继续通过 `SMARTMIX_ENABLE_CUE_DETR=1` 和 `SMARTMIX_CUE_DETR_CHECKPOINT` 启用。
-- 自训练 sidecar：支持 `SMARTMIX_LEARNED_CUE_DIR` 下的 `{track_stem}.cues.json`，或 `SMARTMIX_LEARNED_CUE_FILE` 指向单个 JSON。
-- 自训练命令：支持 `SMARTMIX_CUE_MODEL_COMMAND`，命令 stdout 输出 JSON cue 列表。
-
-JSON cue 格式：
-
-```json
-{
-  "cues": [
-    {"time": 32.0, "role": "mix_in", "confidence": 0.91},
-    {"time": 188.5, "role": "mix_out", "score": 84}
-  ]
-}
-```
-
-模型 cue 不会直接覆盖规则 cue。它们会先被转换为候选，再通过 SmartMix 当前的 phrase alignment、vocal safety、groove stability、duration room 等规则重新打分，最后并入 `transition_candidates.cue_candidates`。分析结果会新增：
-
-- `transition_candidates.learned_cue`
-- 兼容字段 `transition_candidates.cue_detr`
-
-### 2. Mix Method Aware Scoring
-
-已在 `backend/mixability.py` 新增 `mix_method_scores()`，每个 pair 会输出：
-
-- `beatmix`
-- `bass_swap`
-- `quick_cut`
-- `echo_out`
-- `breakdown_switch`
-
-每个方法都有：
-
-- `score`：该方法的适配分；
-- `threshold`：当前可校准阈值；
-- `usable`：是否达到阈值。
-
-`degradedTransition` 现在会参考这些方法分来选择转场方式，并返回：
-
-- `methodScore`
-- `methodScores`
-
-这样同一对歌不再只有一个“总可接性分”，而是可以判断“适合长 beatmix，还是更适合 bass swap / quick cut / echo out”。
-
 ## 下一步建议
 
 1. 增加离线评测集：收集人工标注的可接/不可接 pair，记录 cue drift、beat drift、transition quality、DJ 评分。
-2. 做 A/B 校准：记录用户手动调整 cue、切换转场类型、跳过推荐的行为，把权重和硬门槛从经验值升级为数据校准值。
-3. 把 `methodScores` 和人工评分对齐，分别校准 beatmix、bass_swap、quick_cut、echo_out、breakdown_switch 的阈值。
+2. 接入学习型 cue：把 CUE-DETR 或自训练 cue 模型作为候选 cue 来源，再用当前规则做融合和安全过滤。
+3. 引入 mix method aware scoring：为 beatmix、bass swap、quick cut、echo out 分别训练/校准不同评分阈值。
+4. 做 A/B 校准：记录用户手动调整 cue、切换转场类型、跳过推荐的行为，把权重和硬门槛从经验值升级为数据校准值。
